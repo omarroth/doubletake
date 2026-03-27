@@ -42,11 +42,13 @@ type AirPlayClient struct {
 	host string
 	port int
 
-	conn     net.Conn
-	mu       sync.Mutex
-	cseq     atomic.Int64
-	info     *ReceiverInfo
-	pairKeys *PairKeys
+	conn      net.Conn
+	mu        sync.Mutex
+	cseq      atomic.Int64
+	info      *ReceiverInfo
+	pairKeys  *PairKeys
+	sessionID string // X-Apple-Session-ID, set once per connection
+	pairingID string // Our pairing identifier (UUID)
 
 	// Encryption state after pair-verify
 	encrypted    bool
@@ -67,8 +69,10 @@ type AirPlayClient struct {
 
 func NewAirPlayClient(host string, port int) *AirPlayClient {
 	return &AirPlayClient{
-		host: host,
-		port: port,
+		host:      host,
+		port:      port,
+		sessionID: generateUUID(),
+		pairingID: generateUUID(),
 	}
 }
 

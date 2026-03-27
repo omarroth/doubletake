@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math/big"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -44,9 +45,10 @@ const (
 )
 
 // pairHeaders returns the HTTP headers required for pair-setup / pair-verify.
-func pairHeaders() map[string]string {
+func (c *AirPlayClient) pairHeaders() map[string]string {
 	return map[string]string{
-		"X-Apple-HKP": "3",
+		"X-Apple-HKP":        "3",
+		"X-Apple-Session-ID": c.sessionID,
 	}
 }
 
@@ -111,7 +113,7 @@ func (c *AirPlayClient) pairSetupTransient(ctx context.Context) error {
 		{Tag: tlvFlags, Value: flags},
 	})
 
-	m2Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m1, pairHeaders())
+	m2Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m1, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("M1: %w", err)
 	}
@@ -144,7 +146,7 @@ func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
 	}
 
 	// Trigger PIN display on the Apple TV
-	if _, err := c.httpRequest("POST", "/pair-pin-start", "", nil, pairHeaders()); err != nil {
+	if _, err := c.httpRequest("POST", "/pair-pin-start", "", nil, c.pairHeaders()); err != nil {
 		return fmt.Errorf("pair-pin-start: %w", err)
 	}
 
@@ -169,7 +171,7 @@ func (c *AirPlayClient) pairSetup(ctx context.Context, pin string) error {
 		{Tag: tlvState, Value: []byte{0x01}},
 	})
 
-	m2Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m1, pairHeaders())
+	m2Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m1, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("M1: %w", err)
 	}
@@ -253,7 +255,7 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 		{Tag: tlvPublicKey, Value: padTo(A.Bytes(), 384)},
 		{Tag: tlvProof, Value: m1Proof[:]},
 	})
-	m4Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m3, pairHeaders())
+	m4Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m3, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("M3: %w", err)
 	}
@@ -277,7 +279,7 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	hkdfInfo := []byte("Pair-Setup-Encrypt-Info")
 	sessionKey := hkdfSHA512(K, hkdfSalt, hkdfInfo, 32)
 
-	clientID := []byte("AirPlayClient")
+	clientID := []byte(c.pairingID)
 
 	sigSalt := []byte("Pair-Setup-Controller-Sign-Salt")
 	sigInfo := []byte("Pair-Setup-Controller-Sign-Info")
@@ -304,7 +306,7 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 		{Tag: tlvState, Value: []byte{0x05}},
 		{Tag: tlvEncryptedData, Value: encrypted},
 	})
-	m6Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m5, pairHeaders())
+	m6Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m5, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("M5: %w", err)
 	}
@@ -325,12 +327,13 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 	rand.Read(clientPrivate[:])
 	curve25519.ScalarBaseMult(&clientPublic, &clientPrivate)
 
-	// V1: Send our X25519 public key + Ed25519 public key
+	// V1: Send our ephemeral X25519 public key only.
+	// The Ed25519 long-term key was already exchanged during pair-setup M5.
 	v1 := tlv8EncodeOrdered([]tlv8Item{
 		{Tag: tlvState, Value: []byte{0x01}},
-		{Tag: tlvPublicKey, Value: append(clientPublic[:], c.pairKeys.Ed25519Public...)},
+		{Tag: tlvPublicKey, Value: clientPublic[:]},
 	})
-	v2Bytes, err := c.httpRequest("POST", "/pair-verify", "application/octet-stream", v1, pairHeaders())
+	v2Bytes, err := c.httpRequest("POST", "/pair-verify", "application/octet-stream", v1, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("V1: %w", err)
 	}
@@ -379,7 +382,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 	signature := ed25519.Sign(c.pairKeys.Ed25519Private, sigInput)
 
 	subTLV := tlv8EncodeOrdered([]tlv8Item{
-		{Tag: tlvIdentifier, Value: []byte("AirPlayClient")},
+		{Tag: tlvIdentifier, Value: []byte(c.pairingID)},
 		{Tag: tlvSignature, Value: signature},
 	})
 
@@ -395,7 +398,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 		{Tag: tlvState, Value: []byte{0x03}},
 		{Tag: tlvEncryptedData, Value: encrypted},
 	})
-	_, err = c.httpRequest("POST", "/pair-verify", "application/octet-stream", v3, pairHeaders())
+	_, err = c.httpRequest("POST", "/pair-verify", "application/octet-stream", v3, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("V3: %w", err)
 	}
@@ -475,7 +478,9 @@ func tlv8Decode(data []byte) map[byte][]byte {
 func hkdfSHA512(secret, salt, info []byte, length int) []byte {
 	r := hkdf.New(sha512.New, secret, salt, info)
 	key := make([]byte, length)
-	r.Read(key)
+	if _, err := io.ReadFull(r, key); err != nil {
+		panic(fmt.Sprintf("hkdf read: %v", err))
+	}
 	return key
 }
 
