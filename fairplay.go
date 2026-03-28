@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"fmt"
+	"log"
 
 	"golang.org/x/crypto/curve25519"
 )
@@ -42,11 +43,13 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 
 	// Phase 1: Client hello - initiate the FairPlay handshake.
 	// Send our capabilities and receive server nonce.
+	log.Printf("[FP] phase 1: sending client hello")
 	phase1Req := buildFPMessage(fpSetupMessageType1, nil)
 	phase1Resp, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", phase1Req)
 	if err != nil {
 		return fmt.Errorf("fp-setup phase 1: %w", err)
 	}
+	log.Printf("[FP] phase 1: response %d bytes", len(phase1Resp))
 
 	if len(phase1Resp) < 7 {
 		return fmt.Errorf("fp-setup phase 1: response too short (%d bytes)", len(phase1Resp))
@@ -73,10 +76,12 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	phase2Payload = append(phase2Payload, serverNonce...)
 
 	phase2Req := buildFPMessage(fpSetupMessageType2, phase2Payload)
+	log.Printf("[FP] phase 2: sending key exchange (%d bytes)", len(phase2Req))
 	phase2Resp, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", phase2Req)
 	if err != nil {
 		return fmt.Errorf("fp-setup phase 2: %w", err)
 	}
+	log.Printf("[FP] phase 2: response %d bytes", len(phase2Resp))
 
 	if len(phase2Resp) < 39 { // 7 header + 32 server pubkey
 		return fmt.Errorf("fp-setup phase 2: response too short (%d bytes)", len(phase2Resp))
@@ -121,11 +126,13 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	phase3Payload = append(phase3Payload, encryptedToken...)
 	phase3Payload = append(phase3Payload, extraData...)
 
+	log.Printf("[FP] phase 3: sending verification")
 	phase3Req := buildFPMessage(fpSetupMessageType3, phase3Payload)
 	_, err = c.httpRequest("POST", "/fp-setup", "application/octet-stream", phase3Req)
 	if err != nil {
 		return fmt.Errorf("fp-setup phase 3: %w", err)
 	}
+	log.Printf("[FP] phase 3: success")
 
 	return nil
 }

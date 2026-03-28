@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -44,11 +46,10 @@ const (
 	pairingFlagTransient = 0x00000010 // Bit 4: ephemeral/transient pairing
 )
 
-// pairHeaders returns the HTTP headers required for pair-setup / pair-verify.
+// pairHeaders returns extra HTTP headers required for pair-setup / pair-verify.
 func (c *AirPlayClient) pairHeaders() map[string]string {
 	return map[string]string{
-		"X-Apple-HKP":        "3",
-		"X-Apple-Session-ID": c.sessionID,
+		"X-Apple-HKP": "3",
 	}
 }
 
@@ -92,12 +93,15 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 
 // performTransientSetupAndVerify does transient (PIN-less) pair-setup + pair-verify.
 func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) error {
+	log.Printf("[PAIR] starting transient pair-setup")
 	if err := c.pairSetupTransient(ctx); err != nil {
 		return fmt.Errorf("pair-setup: %w", err)
 	}
+	log.Printf("[PAIR] transient pair-setup complete, starting pair-verify")
 	if err := c.pairVerify(ctx); err != nil {
 		return fmt.Errorf("pair-verify: %w", err)
 	}
+	log.Printf("[PAIR] pair-verify complete, channel is now encrypted")
 	return nil
 }
 
@@ -333,6 +337,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 		{Tag: tlvState, Value: []byte{0x01}},
 		{Tag: tlvPublicKey, Value: clientPublic[:]},
 	})
+	log.Printf("[PAIR-VERIFY] V1: sending %d-byte X25519 public key", len(clientPublic[:]))
 	v2Bytes, err := c.httpRequest("POST", "/pair-verify", "application/octet-stream", v1, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("V1: %w", err)
@@ -345,6 +350,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 
 	serverKeyData := v2[tlvPublicKey]
 	serverEncrypted := v2[tlvEncryptedData]
+	log.Printf("[PAIR-VERIFY] V2: server pubkey=%d bytes, encrypted=%d bytes", len(serverKeyData), len(serverEncrypted))
 
 	if len(serverKeyData) < 32 {
 		return fmt.Errorf("V2: server public key too short")
@@ -378,11 +384,15 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 	}
 
 	// V3: Send our encrypted proof
-	sigInput := bytes.Join([][]byte{clientPublic[:], serverPublic[:]}, nil)
+	// HAP spec: sign(clientX25519Public || pairingID || serverX25519Public)
+	clientIDBytes := []byte(c.pairingID)
+	sigInput := bytes.Join([][]byte{clientPublic[:], clientIDBytes, serverPublic[:]}, nil)
 	signature := ed25519.Sign(c.pairKeys.Ed25519Private, sigInput)
+	log.Printf("[PAIR-VERIFY] V3: sig input = clientPub(%d) || pairingID(%d) || serverPub(%d) = %d bytes",
+		len(clientPublic), len(clientIDBytes), len(serverPublic), len(sigInput))
 
 	subTLV := tlv8EncodeOrdered([]tlv8Item{
-		{Tag: tlvIdentifier, Value: []byte(c.pairingID)},
+		{Tag: tlvIdentifier, Value: clientIDBytes},
 		{Tag: tlvSignature, Value: signature},
 	})
 
@@ -398,21 +408,43 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 		{Tag: tlvState, Value: []byte{0x03}},
 		{Tag: tlvEncryptedData, Value: encrypted},
 	})
-	_, err = c.httpRequest("POST", "/pair-verify", "application/octet-stream", v3, c.pairHeaders())
+	log.Printf("[PAIR-VERIFY] V3: sending encrypted proof")
+	v4Bytes, err := c.httpRequest("POST", "/pair-verify", "application/octet-stream", v3, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("V3: %w", err)
 	}
+	// Check V4 response for TLV errors
+	if len(v4Bytes) > 0 {
+		v4 := tlv8Decode(v4Bytes)
+		if errTLV, ok := v4[tlvError]; ok {
+			return fmt.Errorf("pair-verify V4 error: %d", errTLV[0])
+		}
+		log.Printf("[PAIR-VERIFY] V4: response %d bytes, no error", len(v4Bytes))
+	} else {
+		log.Printf("[PAIR-VERIFY] V4: empty response (OK)")
+	}
 
-	// Derive channel encryption keys
-	c.encWriteKey = hkdfSHA512(shared, []byte("MediaRemote-Salt"), []byte("MediaRemote-Write-Encryption-Key"), 32)
-	c.encReadKey = hkdfSHA512(shared, []byte("MediaRemote-Salt"), []byte("MediaRemote-Read-Encryption-Key"), 32)
+	// After pair-verify, the AirPlay control channel is encrypted using HAP framing.
+	// Derive channel encryption keys from the X25519 shared secret.
+	c.pairKeys.SharedSecret = shared
+	c.encWriteKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Write-Encryption-Key"), 32)
+	c.encReadKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Read-Encryption-Key"), 32)
+	c.pairKeys.WriteKey = c.encWriteKey
+	c.pairKeys.ReadKey = c.encReadKey
+
+	log.Printf("[PAIR-VERIFY] shared secret: %s...", hex.EncodeToString(shared[:16]))
+	log.Printf("[PAIR-VERIFY] writeKey: %s...", hex.EncodeToString(c.encWriteKey[:8]))
+	log.Printf("[PAIR-VERIFY] readKey:  %s...", hex.EncodeToString(c.encReadKey[:8]))
 
 	writeCipher, err := chacha20poly1305.New(c.encWriteKey)
 	if err != nil {
 		return fmt.Errorf("write cipher: %w", err)
 	}
 	c.encCipher = writeCipher
+	c.encWriteNonce = 0
+	c.encReadNonce = 0
 	c.encrypted = true
+	log.Printf("[PAIR-VERIFY] encryption ENABLED (HAP framing, nonces at 0)")
 
 	return nil
 }

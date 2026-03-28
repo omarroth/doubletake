@@ -45,41 +45,27 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	streamDesc := map[string]interface{}{
-		"type":           110, // Screen mirroring stream
-		"streamID":       1,
-		"clientTypeUUID": "AirPlayClient",
-		"ct":             2,   // H.264
-		"spf":            352, // Samples per frame
-		"sr":             44100,
-		"latencyMin":     11025,
-		"latencyMax":     88200,
-		"clientCurTime":  uint64(0),
-		"supportsDynamicStreamID": true,
-		"screenStream": map[string]interface{}{
-			"width":     cfg.Width,
-			"height":    cfg.Height,
-			"fps":       cfg.FPS,
-			"codec":     0, // H.264
-			"latency":   100,
-		},
-	}
-
-	// Include encryption key so the receiver can decrypt the stream
-	if encKey != nil {
-		streamDesc["shk"] = encKey
-		streamDesc["shiv"] = encIV
-		streamDesc["useEncryptedStream"] = true
+		"type":               110, // Screen mirroring stream
+		"streamConnectionID": int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF),
 	}
 
 	setupReq := map[string]interface{}{
-		"deviceID":        c.info.DeviceID,
-		"sessionUUID":     sessionUUID,
-		"sourceVersion":   "935.7.1",
-		"timingProtocol":  "NTP",
-		"timingPort":      0,
+		"deviceID":                  c.info.DeviceID,
+		"sessionUUID":              sessionUUID,
+		"sourceVersion":            "935.7.1",
+		"timingProtocol":           "NTP",
+		"timingPort":               0,
 		"isScreenMirroringSession": true,
-		"streams":         []interface{}{streamDesc},
+		"streams":                  []interface{}{streamDesc},
 	}
+
+	// Include stream encryption keys at top level
+	if encKey != nil {
+		setupReq["ekey"] = encKey
+		setupReq["eiv"] = encIV
+	}
+
+	log.Printf("[SETUP] request body: %+v", setupReq)
 
 	body, err := plist.Marshal(setupReq, plist.BinaryFormat)
 	if err != nil {
@@ -91,12 +77,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if err != nil {
 		return nil, fmt.Errorf("SETUP: %w", err)
 	}
+	log.Printf("[SETUP] response body: %d bytes", len(respBody))
 
 	// Parse response to get data port
 	var setupResp map[string]interface{}
 	if _, err := plist.Unmarshal(respBody, &setupResp); err != nil {
 		return nil, fmt.Errorf("unmarshal setup response: %w", err)
 	}
+	log.Printf("[SETUP] response plist: %+v", setupResp)
 
 	dataPort := 0
 	if streams, ok := setupResp["streams"].([]interface{}); ok && len(streams) > 0 {
