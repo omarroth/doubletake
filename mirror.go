@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"howett.net/plist"
@@ -31,6 +32,7 @@ type MirrorSession struct {
 func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig) (*MirrorSession, error) {
 	sessionUUID := generateUUID()
 	uri := fmt.Sprintf("rtsp://%s:%d/%s", c.host, c.port, sessionUUID)
+	clientDeviceID := uuidToMAC(c.sessionID)
 
 	// Determine stream encryption key
 	encKey := c.fpKey
@@ -88,11 +90,13 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	// ---- Phase 1: SETUP session (timing/event channels, no streams) ----
 	setup1 := map[string]interface{}{
+		"deviceID":                 clientDeviceID,
+		"macAddress":               clientDeviceID,
 		"sessionUUID":              sessionUUID,
 		"sourceVersion":            "935.7.1",
 		"timingProtocol":           "NTP",
-		"timingPort":               timingPort,
-		"eventPort":                eventPort,
+		"timingPort":               int64(timingPort),
+		"eventPort":                int64(eventPort),
 		"isScreenMirroringSession": true,
 		"osName":                   "Linux",
 		"osBuildVersion":           "1.0.0",
@@ -127,7 +131,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// ---- Phase 2: SETUP stream (type 110 = screen mirroring) ----
 	streamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	streamDesc := map[string]interface{}{
-		"type":               110,
+		"type":               int64(110),
 		"streamConnectionID": streamConnectionID,
 	}
 
@@ -324,6 +328,9 @@ func (s *MirrorSession) heartbeatLoop(ctx context.Context, uri, sessionID string
 }
 
 func (s *MirrorSession) Close() error {
+	if s.timingConn != nil {
+		s.timingConn.Close()
+	}
 	if s.eventListener != nil {
 		s.eventListener.Close()
 	}
@@ -361,6 +368,8 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 		// Build response: echo back with our timestamps
 		reply := make([]byte, 32)
 		copy(reply, buf[:32])
+		reply[0] = 0x80
+		reply[1] = 0xd3
 
 		now := ntpTimeNow()
 		// Bytes 8-15: Reference = sender's transmit timestamp
@@ -376,6 +385,26 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 			log.Printf("[NTP] sent timing reply to %s", addr)
 		}
 	}
+}
+
+// uuidToMAC converts a UUID-ish string to a stable locally-administered MAC address.
+// Falls back to a fixed MAC if the UUID does not contain enough hex digits.
+func uuidToMAC(id string) string {
+	hex := strings.ReplaceAll(strings.ToLower(id), "-", "")
+	if len(hex) < 12 {
+		return "02:00:00:00:00:01"
+	}
+	b := []byte(hex[:12])
+	parts := []string{
+		string(b[0:2]),
+		string(b[2:4]),
+		string(b[4:6]),
+		string(b[6:8]),
+		string(b[8:10]),
+		string(b[10:12]),
+	}
+	parts[0] = "02"
+	return strings.ToUpper(strings.Join(parts, ":"))
 }
 
 // ntpTimeNow returns the current time as an NTP timestamp (seconds since 1900-01-01).
