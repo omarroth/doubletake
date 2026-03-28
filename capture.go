@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -32,6 +31,10 @@ type ScreenCapture struct {
 // StartCapture initiates Wayland screen capture using the xdg-desktop-portal
 // D-Bus API to get a PipeWire stream, then pipes it through ffmpeg for H.264 encoding.
 func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
+	if err := gstSupportsPipeWire(); err != nil {
+		return nil, err
+	}
+
 	nodeID, err := requestScreencast(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
@@ -40,8 +43,8 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 
 	captureCtx, cancel := context.WithCancel(ctx)
 
-	args := buildFFmpegArgs(cfg, nodeID)
-	cmd := exec.CommandContext(captureCtx, "ffmpeg", args...)
+	args := buildGStreamerArgs(cfg, nodeID)
+	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", args...)
 	cmd.Stderr = os.Stderr
 
 	stdout, err := cmd.StdoutPipe()
@@ -61,6 +64,16 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 		cancel:   cancel,
 		pwNodeID: nodeID,
 	}, nil
+}
+
+func gstSupportsPipeWire() error {
+	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
+		return fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire (e.g. gstreamer1.0-pipewire or pipewire-gst)")
+	}
+	if err := exec.Command("gst-inspect-1.0", "openh264enc").Run(); err != nil {
+		return fmt.Errorf("GStreamer 'openh264enc' encoder not found; install gst-openh264 (e.g. gstreamer1.0-plugins-bad or gst-plugins-bad)")
+	}
+	return nil
 }
 
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
@@ -91,54 +104,24 @@ func (sc *ScreenCapture) Stop() {
 	}
 }
 
-// buildFFmpegArgs constructs the ffmpeg command for encoding the PipeWire stream to H.264.
-func buildFFmpegArgs(cfg CaptureConfig, nodeID uint32) []string {
-	args := []string{
-		"-loglevel", "warning",
-		"-f", "pipewire",
-		"-framerate", strconv.Itoa(cfg.FPS),
-		"-i", strconv.FormatUint(uint64(nodeID), 10),
-		"-vf", fmt.Sprintf("scale=%d:%d:flags=lanczos", cfg.Width, cfg.Height),
+// buildGStreamerArgs constructs the gst-launch-1.0 arguments for encoding the PipeWire stream to H.264 Annex-B.
+func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32) []string {
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
 	}
-
-	switch cfg.HWAccel {
-	case "vaapi":
-		args = append(args,
-			"-vaapi_device", "/dev/dri/renderD128",
-			"-vf", fmt.Sprintf("format=nv12,hwupload,scale_vaapi=%d:%d", cfg.Width, cfg.Height),
-			"-c:v", "h264_vaapi",
-			"-qp", "26",
-		)
-	case "none":
-		args = append(args,
-			"-c:v", "libx264",
-			"-preset", "ultrafast",
-			"-tune", "zerolatency",
-			"-profile:v", "high",
-			"-level", "4.2",
-			"-crf", "23",
-			"-g", strconv.Itoa(cfg.FPS), // keyframe every second
-		)
-	default: // "auto" - try VAAPI first, fall back to software
-		args = append(args,
-			"-c:v", "libx264",
-			"-preset", "ultrafast",
-			"-tune", "zerolatency",
-			"-profile:v", "high",
-			"-level", "4.2",
-			"-crf", "23",
-			"-g", strconv.Itoa(cfg.FPS),
-		)
+	rawCaps := fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps)
+	return []string{
+		"--quiet",
+		"pipewiresrc", fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
+		"!", "videoconvert",
+		"!", "videoscale",
+		"!", rawCaps,
+		"!", "openh264enc", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
+		"!", "h264parse", "config-interval=-1",
+		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
+		"!", "fdsink", "fd=1",
 	}
-
-	args = append(args,
-		"-an",        // no audio for now
-		"-f", "h264", // raw H.264 bitstream
-		"-bsf:v", "h264_mp4toannexb",
-		"pipe:1", // output to stdout
-	)
-
-	return args
 }
 
 // requestScreencast uses the xdg-desktop-portal D-Bus API to request screen capture
