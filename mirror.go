@@ -19,6 +19,7 @@ import (
 type MirrorSession struct {
 	client        *AirPlayClient
 	dataConn      net.Conn
+	eventConn     net.Conn
 	timingConn    net.PacketConn
 	eventListener net.Listener
 	DataPort      int
@@ -118,14 +119,37 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	var resp1 map[string]interface{}
+	receiverEventPort := 0
 	if len(resp1Body) > 0 {
 		if _, err := plist.Unmarshal(resp1Body, &resp1); err != nil {
 			eventListener.Close()
 			return nil, fmt.Errorf("unmarshal setup1 response: %w", err)
 		}
 		log.Printf("[SETUP-1] response: %+v", resp1)
+		if ep, ok := resp1["eventPort"]; ok {
+			switch v := ep.(type) {
+			case uint64:
+				receiverEventPort = int(v)
+			case int64:
+				receiverEventPort = int(v)
+			case float64:
+				receiverEventPort = int(v)
+			}
+		}
 	} else {
 		log.Printf("[SETUP-1] empty response body (OK)")
+	}
+
+	// Some receivers require an active TCP event channel before RECORD.
+	var receiverEventConn net.Conn
+	if receiverEventPort > 0 {
+		eventAddr := net.JoinHostPort(c.host, strconv.Itoa(receiverEventPort))
+		receiverEventConn, err = net.DialTimeout("tcp", eventAddr, 3*time.Second)
+		if err != nil {
+			log.Printf("[EVENT] connect to receiver event port %s failed: %v", eventAddr, err)
+		} else {
+			log.Printf("[EVENT] connected to receiver event port %s", eventAddr)
+		}
 	}
 
 	// ---- Phase 2: SETUP stream (type 110 = screen mirroring) ----
@@ -197,24 +221,34 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		return nil, fmt.Errorf("no data port in SETUP response")
 	}
 
-	// Send RECORD to start the session
-	_, _, err = c.rtspRequest("RECORD", uri, "", nil, map[string]string{
-		"Session": sessionUUID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("RECORD: %w", err)
-	}
-
-	// Connect to the data port for streaming
+	// Connect to the data port before RECORD.
+	// Some receivers wait for the sender data socket to be ready before
+	// acknowledging RECORD, otherwise they timeout and return 500.
 	dataAddr := net.JoinHostPort(c.host, strconv.Itoa(dataPort))
 	dataConn, err := net.DialTimeout("tcp", dataAddr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connect data port %s: %w", dataAddr, err)
 	}
+	log.Printf("[SETUP] data channel connected: %s", dataAddr)
+
+	// Send RECORD to start the session.
+	// Apple TV expects normal RTSP start headers here; without them it may wait
+	// for ~10s and return 500.
+	recordHeaders := map[string]string{
+		"Session":  sessionUUID,
+		"Range":    "npt=0-",
+		"RTP-Info": "seq=0;rtptime=0",
+	}
+	_, _, err = c.rtspRequest("RECORD", uri, "", nil, recordHeaders)
+	if err != nil {
+		dataConn.Close()
+		return nil, fmt.Errorf("RECORD: %w", err)
+	}
 
 	session := &MirrorSession{
 		client:        c,
 		dataConn:      dataConn,
+		eventConn:     receiverEventConn,
 		eventListener: eventListener,
 		DataPort:      dataPort,
 		startTime:     time.Now(),
@@ -328,6 +362,9 @@ func (s *MirrorSession) heartbeatLoop(ctx context.Context, uri, sessionID string
 }
 
 func (s *MirrorSession) Close() error {
+	if s.eventConn != nil {
+		s.eventConn.Close()
+	}
 	if s.timingConn != nil {
 		s.timingConn.Close()
 	}
