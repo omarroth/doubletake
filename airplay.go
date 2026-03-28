@@ -217,7 +217,7 @@ func (c *AirPlayClient) rtspRequest(method, uri, contentType string, body []byte
 }
 
 func (c *AirPlayClient) readHTTPResponse() ([]byte, error) {
-	c.conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	defer c.conn.SetReadDeadline(time.Time{})
 
 	if c.encrypted {

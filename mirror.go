@@ -18,6 +18,7 @@ import (
 type MirrorSession struct {
 	client        *AirPlayClient
 	dataConn      net.Conn
+	timingConn    net.PacketConn
 	eventListener net.Listener
 	DataPort      int
 
@@ -44,31 +45,54 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		encIV = c.streamIV
 	}
 
-	// Start a TCP listener for the event (reverse) channel — Apple TV connects back to us
+	// Start NTP timing UDP listener — Apple TV sends timing requests here
+	timingConn, err := net.ListenPacket("udp", ":0")
+	if err != nil {
+		return nil, fmt.Errorf("listen timing port: %w", err)
+	}
+	timingPort := timingConn.LocalAddr().(*net.UDPAddr).Port
+	log.Printf("[SETUP] NTP timing listener on UDP port %d", timingPort)
+
+	// Start NTP timing responder BEFORE sending SETUP so it's ready
+	// when the Apple TV probes us
+	go ntpTimingResponder(ctx, timingConn)
+
+	// Start a TCP listener for the event (reverse) channel
 	eventListener, err := net.Listen("tcp", ":0")
 	if err != nil {
+		timingConn.Close()
 		return nil, fmt.Errorf("listen event port: %w", err)
 	}
 	eventPort := eventListener.Addr().(*net.TCPAddr).Port
 	log.Printf("[SETUP] event listener on TCP port %d", eventPort)
 
 	// Accept event connection asynchronously
-	eventConnCh := make(chan net.Conn, 1)
 	go func() {
 		conn, err := eventListener.Accept()
 		if err != nil {
 			log.Printf("[EVENT] accept error: %v", err)
 			return
 		}
-		log.Printf("[EVENT] Apple TV connected for reverse events")
-		eventConnCh <- conn
+		log.Printf("[EVENT] Apple TV connected for reverse events from %s", conn.RemoteAddr())
+		// Keep connection open; just drain it
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				_, err := conn.Read(buf)
+				if err != nil {
+					return
+				}
+			}
+		}()
 	}()
 
-	// ---- Phase 1: SETUP session (timing channels, no streams) ----
+	// ---- Phase 1: SETUP session (timing/event channels, no streams) ----
 	setup1 := map[string]interface{}{
 		"sessionUUID":              sessionUUID,
 		"sourceVersion":            "935.7.1",
-		"timingProtocol":           "None",
+		"timingProtocol":           "NTP",
+		"timingPort":               timingPort,
+		"eventPort":                eventPort,
 		"isScreenMirroringSession": true,
 		"osName":                   "Linux",
 		"osBuildVersion":           "1.0.0",
@@ -307,6 +331,51 @@ func (s *MirrorSession) Close() error {
 		return s.dataConn.Close()
 	}
 	return nil
+}
+
+// ntpTimingResponder replies to NTP timing requests from the Apple TV.
+func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
+	buf := make([]byte, 128)
+	for {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+			return
+		default:
+		}
+		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			log.Printf("[NTP] read error: %v", err)
+			return
+		}
+		log.Printf("[NTP] received %d bytes from %s", n, addr)
+
+		if n < 32 {
+			continue
+		}
+
+		// Build response: echo back with our timestamps
+		reply := make([]byte, 32)
+		copy(reply, buf[:32])
+
+		now := ntpTimeNow()
+		// Bytes 8-15: Reference = sender's transmit timestamp
+		copy(reply[8:16], buf[24:32])
+		// Bytes 16-23: Receive timestamp = now
+		binary.BigEndian.PutUint64(reply[16:24], now)
+		// Bytes 24-31: Transmit timestamp = now
+		binary.BigEndian.PutUint64(reply[24:32], now)
+
+		if _, err := conn.WriteTo(reply, addr); err != nil {
+			log.Printf("[NTP] write error: %v", err)
+		} else {
+			log.Printf("[NTP] sent timing reply to %s", addr)
+		}
+	}
 }
 
 // ntpTimeNow returns the current time as an NTP timestamp (seconds since 1900-01-01).
