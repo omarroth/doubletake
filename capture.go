@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
@@ -22,9 +23,9 @@ type CaptureConfig struct {
 
 // ScreenCapture manages Wayland screen capture via xdg-desktop-portal + ffmpeg.
 type ScreenCapture struct {
-	cmd     *exec.Cmd
-	stdout  io.ReadCloser
-	cancel  context.CancelFunc
+	cmd      *exec.Cmd
+	stdout   io.ReadCloser
+	cancel   context.CancelFunc
 	pwNodeID uint32
 }
 
@@ -67,11 +68,27 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 }
 
 func (sc *ScreenCapture) Stop() {
+	if sc.cancel == nil || sc.cmd == nil {
+		return
+	}
 	sc.cancel()
 	if sc.cmd.Process != nil {
-		sc.cmd.Process.Signal(os.Interrupt)
+		_ = sc.cmd.Process.Signal(os.Interrupt)
 	}
-	sc.cmd.Wait()
+	done := make(chan struct{})
+	go func() {
+		_ = sc.cmd.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		if sc.cmd.Process != nil {
+			_ = sc.cmd.Process.Kill()
+		}
+		<-done
+	}
 }
 
 // buildFFmpegArgs constructs the ffmpeg command for encoding the PipeWire stream to H.264.
@@ -115,10 +132,10 @@ func buildFFmpegArgs(cfg CaptureConfig, nodeID uint32) []string {
 	}
 
 	args = append(args,
-		"-an",             // no audio for now
-		"-f", "h264",      // raw H.264 bitstream
+		"-an",        // no audio for now
+		"-f", "h264", // raw H.264 bitstream
 		"-bsf:v", "h264_mp4toannexb",
-		"pipe:1",          // output to stdout
+		"pipe:1", // output to stdout
 	)
 
 	return args
@@ -141,7 +158,7 @@ func requestScreencast(ctx context.Context) (uint32, error) {
 
 	// Create session
 	sessionOpts := map[string]dbus.Variant{
-		"handle_token":  dbus.MakeVariant(token),
+		"handle_token":         dbus.MakeVariant(token),
 		"session_handle_token": dbus.MakeVariant(token),
 	}
 

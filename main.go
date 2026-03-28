@@ -79,6 +79,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("mirror setup failed: %v", err)
 	}
+	defer session.Close()
 	log.Printf("mirror session ready (data port: %d)", session.DataPort)
 
 	captureCfg := CaptureConfig{
@@ -92,6 +93,11 @@ func main() {
 		log.Fatalf("screen capture failed: %v", err)
 	}
 	defer capture.Stop()
+	go func() {
+		<-ctx.Done()
+		capture.Stop()
+		session.Close()
+	}()
 	log.Println("screen capture started")
 
 	if err := session.StreamFrames(ctx, capture); err != nil && ctx.Err() == nil {
