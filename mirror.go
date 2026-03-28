@@ -73,7 +73,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	go func() {
 		conn, err := eventListener.Accept()
 		if err != nil {
-			log.Printf("[EVENT] accept error: %v", err)
+			if !strings.Contains(err.Error(), "use of closed network connection") {
+				log.Printf("[EVENT] accept error: %v", err)
+			}
 			return
 		}
 		log.Printf("[EVENT] Apple TV connected for reverse events from %s", conn.RemoteAddr())
@@ -295,7 +297,10 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 		n, err := capture.Read(buf)
 		if err != nil {
 			if err == io.EOF {
-				return nil
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fmt.Errorf("capture process exited unexpectedly (EOF)")
 			}
 			return fmt.Errorf("read capture: %w", err)
 		}
