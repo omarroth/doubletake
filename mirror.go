@@ -28,13 +28,12 @@ type MirrorSession struct {
 // setupMirrorSession negotiates the mirroring stream with the Apple TV.
 func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig) (*MirrorSession, error) {
 	sessionUUID := generateUUID()
+	uri := fmt.Sprintf("rtsp://%s/%s", c.host, sessionUUID)
 
-	// Build SETUP request body as binary plist
-	// Determine stream encryption key to advertise in SETUP
+	// Determine stream encryption key
 	encKey := c.fpKey
 	encIV := c.fpIV
 	if encKey == nil {
-		// Ensure we have stream keys derived from pair-verify
 		if c.streamKey == nil {
 			if err := c.deriveStreamKeys(); err != nil {
 				return nil, fmt.Errorf("derive stream keys: %w", err)
@@ -44,47 +43,71 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		encIV = c.streamIV
 	}
 
-	streamDesc := map[string]interface{}{
-		"type":               110, // Screen mirroring stream
-		"streamConnectionID": int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF),
-	}
-
-	setupReq := map[string]interface{}{
-		"deviceID":                  c.info.DeviceID,
+	// ---- Phase 1: SETUP session (timing/event channels, no streams) ----
+	setup1 := map[string]interface{}{
 		"sessionUUID":              sessionUUID,
 		"sourceVersion":            "935.7.1",
 		"timingProtocol":           "NTP",
 		"timingPort":               0,
 		"isScreenMirroringSession": true,
-		"streams":                  []interface{}{streamDesc},
+	}
+	log.Printf("[SETUP-1] request: %+v", setup1)
+
+	body1, err := plist.Marshal(setup1, plist.BinaryFormat)
+	if err != nil {
+		return nil, fmt.Errorf("marshal setup1 plist: %w", err)
 	}
 
-	// Include stream encryption keys at top level
+	resp1Body, _, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body1, nil)
+	if err != nil {
+		return nil, fmt.Errorf("SETUP phase 1: %w", err)
+	}
+
+	var resp1 map[string]interface{}
+	if len(resp1Body) > 0 {
+		if _, err := plist.Unmarshal(resp1Body, &resp1); err != nil {
+			return nil, fmt.Errorf("unmarshal setup1 response: %w", err)
+		}
+		log.Printf("[SETUP-1] response: %+v", resp1)
+	} else {
+		log.Printf("[SETUP-1] empty response body (OK)")
+	}
+
+	// ---- Phase 2: SETUP stream (type 110 = screen mirroring) ----
+	streamDesc := map[string]interface{}{
+		"type":               110,
+		"streamConnectionID": int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF),
+	}
+
+	// Encryption keys go inside the stream descriptor
 	if encKey != nil {
-		setupReq["ekey"] = encKey
-		setupReq["eiv"] = encIV
+		streamDesc["shk"] = encKey
+		streamDesc["shiv"] = encIV
 	}
 
-	log.Printf("[SETUP] request body: %+v", setupReq)
+	setup2 := map[string]interface{}{
+		"streams": []interface{}{streamDesc},
+	}
+	log.Printf("[SETUP-2] request: %+v", setup2)
 
-	body, err := plist.Marshal(setupReq, plist.BinaryFormat)
+	body2, err := plist.Marshal(setup2, plist.BinaryFormat)
 	if err != nil {
-		return nil, fmt.Errorf("marshal setup plist: %w", err)
+		return nil, fmt.Errorf("marshal setup2 plist: %w", err)
 	}
 
-	uri := fmt.Sprintf("rtsp://%s/%s", c.host, sessionUUID)
-	respBody, _, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body, nil)
+	resp2Body, _, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body2, nil)
 	if err != nil {
-		return nil, fmt.Errorf("SETUP: %w", err)
+		return nil, fmt.Errorf("SETUP phase 2: %w", err)
 	}
-	log.Printf("[SETUP] response body: %d bytes", len(respBody))
 
-	// Parse response to get data port
+	log.Printf("[SETUP-2] response body: %d bytes", len(resp2Body))
+
+	// Parse phase 2 response to get data port
 	var setupResp map[string]interface{}
-	if _, err := plist.Unmarshal(respBody, &setupResp); err != nil {
-		return nil, fmt.Errorf("unmarshal setup response: %w", err)
+	if _, err := plist.Unmarshal(resp2Body, &setupResp); err != nil {
+		return nil, fmt.Errorf("unmarshal setup2 response: %w", err)
 	}
-	log.Printf("[SETUP] response plist: %+v", setupResp)
+	log.Printf("[SETUP-2] response plist: %+v", setupResp)
 
 	dataPort := 0
 	if streams, ok := setupResp["streams"].([]interface{}); ok && len(streams) > 0 {
