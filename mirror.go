@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -25,7 +26,6 @@ type MirrorSession struct {
 	DataPort      int
 
 	streamCipher func([]byte) []byte // AES-CTR encryption
-	startTime    time.Time
 	frameSeq     uint32
 }
 
@@ -253,25 +253,20 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		eventConn:     receiverEventConn,
 		eventListener: eventListener,
 		DataPort:      dataPort,
-		startTime:     time.Now(),
 	}
 
-	// Set up stream encryption: prefer FairPlay key, fall back to pair-verify derived key
-	encKey = c.fpKey
-	encIV = c.fpIV
-	if encKey == nil {
-		encKey = c.streamKey
-		encIV = c.streamIV
-	}
+	// Derive actual video cipher keys from shk + streamConnectionID via SHA-512
+	// (matches Apple TV's key derivation in mirror_buffer_init_aes).
 	if encKey != nil {
-		streamCipher, err := newStreamCipher(encKey, encIV)
+		videoKey, videoIV := deriveVideoKeys(encKey, streamConnectionID)
+		sc, err := newStreamCipher(videoKey, videoIV)
 		if err != nil {
 			dataConn.Close()
 			return nil, fmt.Errorf("stream cipher: %w", err)
 		}
 		session.streamCipher = func(data []byte) []byte {
 			out := make([]byte, len(data))
-			streamCipher.XORKeyStream(out, data)
+			sc.XORKeyStream(out, data)
 			return out
 		}
 	}
@@ -283,9 +278,16 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 }
 
 // StreamFrames reads H.264 frames from the capture pipeline and sends them to the Apple TV.
+// Protocol (from UxPlay/raop_rtp_mirror.c):
+//   - SPS+PPS: sent as unencrypted codec frame (header[4]=0x01) in avcC format
+//   - IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x10, AVCC payload
+//   - non-IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
 func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture) error {
-	buf := make([]byte, 256*1024) // 256KB read buffer
+	buf := make([]byte, 256*1024)
 	parser := newAnnexBParser()
+
+	var latestSPS, latestPPS []byte // raw NAL data WITHOUT start code
+	var vclBuf []byte               // AVCC-formatted data accumulating for current VCL packet
 
 	for {
 		select {
@@ -304,26 +306,54 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			}
 			return fmt.Errorf("read capture: %w", err)
 		}
-
 		if n == 0 {
 			continue
 		}
 
 		nals := parser.Push(buf[:n])
 		for _, nal := range nals {
-			frameData := nal
-			if s.streamCipher != nil {
-				frameData = s.streamCipher(frameData)
-			}
-			if err := s.sendFrame(frameData); err != nil {
-				return fmt.Errorf("send frame: %w", err)
+			nt := nalType(nal)
+			raw := stripStartCode(nal)
+
+			switch nt {
+			case 7: // SPS
+				latestSPS = raw
+			case 8: // PPS
+				latestPPS = raw
+			case 6: // SEI — accumulate with next VCL
+				vclBuf = append(vclBuf, avccWrap(raw)...)
+			case 5: // IDR VCL (keyframe)
+				// Send SPS+PPS as unencrypted avcC codec frame first.
+				if latestSPS != nil && latestPPS != nil {
+					if err := s.sendCodecFrame(buildAVCCConfig(latestSPS, latestPPS)); err != nil {
+						return fmt.Errorf("send codec: %w", err)
+					}
+				}
+				vclBuf = append(vclBuf, avccWrap(raw)...)
+				frameData := vclBuf
+				if s.streamCipher != nil {
+					frameData = s.streamCipher(vclBuf)
+				}
+				if err := s.sendFrame(frameData, true); err != nil {
+					return fmt.Errorf("send IDR: %w", err)
+				}
+				vclBuf = vclBuf[:0]
+			case 1, 2, 3, 4: // non-IDR VCL
+				vclBuf = append(vclBuf, avccWrap(raw)...)
+				frameData := vclBuf
+				if s.streamCipher != nil {
+					frameData = s.streamCipher(vclBuf)
+				}
+				if err := s.sendFrame(frameData, false); err != nil {
+					return fmt.Errorf("send frame: %w", err)
+				}
+				vclBuf = vclBuf[:0]
 			}
 		}
 	}
 }
 
-// annexBParser incrementally extracts complete Annex-B NAL units
-// (including start codes) from a byte stream.
+// annexBParser incrementally extracts complete Annex-B NAL units from a byte stream.
 type annexBParser struct {
 	buf []byte
 }
@@ -378,29 +408,119 @@ func findStartCode(b []byte, from int) int {
 	return -1
 }
 
-// sendFrame writes a single frame with the mirroring protocol header.
-func (s *MirrorSession) sendFrame(nalData []byte) error {
-	elapsed := time.Since(s.startTime)
-	ntpTimestamp := timeToNTP(elapsed)
+// stripStartCode removes the Annex-B start code prefix (00 00 01 or 00 00 00 01).
+func stripStartCode(nal []byte) []byte {
+	if len(nal) > 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1 {
+		return nal[4:]
+	}
+	if len(nal) > 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1 {
+		return nal[3:]
+	}
+	return nal
+}
+
+// avccWrap prepends a 4-byte big-endian length to a raw NAL unit (AVCC format).
+func avccWrap(raw []byte) []byte {
+	b := make([]byte, 4+len(raw))
+	binary.BigEndian.PutUint32(b[:4], uint32(len(raw)))
+	copy(b[4:], raw)
+	return b
+}
+
+// buildAVCCConfig builds an AVCDecoderConfigurationRecord (avcC) from raw SPS and PPS.
+func buildAVCCConfig(sps, pps []byte) []byte {
+	payload := make([]byte, 6+2+len(sps)+1+2+len(pps))
+	payload[0] = 0x01   // configurationVersion = 1
+	payload[1] = sps[1] // AVCProfileIndication
+	payload[2] = sps[2] // profile_compatibility
+	payload[3] = sps[3] // AVCLevelIndication
+	payload[4] = 0xff   // lengthSizeMinusOne = 3 (4-byte NALU lengths)
+	payload[5] = 0xe1   // numSequenceParameterSets = 1
+	binary.BigEndian.PutUint16(payload[6:8], uint16(len(sps)))
+	copy(payload[8:], sps)
+	off := 8 + len(sps)
+	payload[off] = 0x01 // numPictureParameterSets = 1
+	binary.BigEndian.PutUint16(payload[off+1:off+3], uint16(len(pps)))
+	copy(payload[off+3:], pps)
+	return payload
+}
+
+// nalType returns the H.264 NAL unit type from a NAL that may begin with a start code.
+func nalType(nal []byte) byte {
+	// Skip start code: 00 00 01 or 00 00 00 01
+	for i := 0; i+1 < len(nal); i++ {
+		if nal[i] == 0x01 && i >= 2 && nal[i-1] == 0x00 && nal[i-2] == 0x00 {
+			if i+1 < len(nal) {
+				return nal[i+1] & 0x1f
+			}
+		}
+	}
+	return 0
+}
+
+// sendCodecFrame sends an unencrypted SPS+PPS codec packet (header type 0x01 0x00).
+// payload is an AVCDecoderConfigurationRecord (avcC format).
+func (s *MirrorSession) sendCodecFrame(payload []byte) error {
+	s.frameSeq++
+	header := make([]byte, 128)
+	binary.LittleEndian.PutUint32(header[0:4], uint32(len(payload)))
+	header[4] = 0x01 // payload type = SPS+PPS codec packet (unencrypted)
+	header[5] = 0x00
+	header[6] = 0x16 // option: standard unencrypted SPS+PPS
+	header[7] = 0x01
+	binary.BigEndian.PutUint64(header[8:16], ntpTimeNow())
+	binary.LittleEndian.PutUint32(header[16:20], s.frameSeq)
+
+	frame := make([]byte, 128+len(payload))
+	copy(frame[:128], header)
+	copy(frame[128:], payload)
+	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := s.dataConn.Write(frame)
+	return err
+}
+
+// sendFrame writes a single encrypted VCL frame with the mirroring protocol header.
+// payload must be AVCC-encoded (4-byte BE length per NALU, no start codes).
+// isKeyframe=true sets header[5]=0x10 (IDR), false sets header[5]=0x00 (non-IDR).
+func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool) error {
+	ntpTimestamp := ntpTimeNow()
 
 	s.frameSeq++
 
-	// 128-byte mirroring frame header
 	header := make([]byte, 128)
-	binary.LittleEndian.PutUint32(header[0:4], uint32(len(nalData))) // payload size
-	binary.LittleEndian.PutUint16(header[4:6], 0)                    // payload type: video
-	binary.LittleEndian.PutUint16(header[6:8], 0)                    // reserved
-	binary.BigEndian.PutUint64(header[8:16], ntpTimestamp)           // NTP timestamp
-	binary.LittleEndian.PutUint32(header[16:20], s.frameSeq)         // sequence number
+	binary.LittleEndian.PutUint32(header[0:4], uint32(len(auData)))
+	// header[4]=0x00 for encrypted VCL; header[5]=0x10 for IDR, 0x00 for non-IDR.
+	header[4] = 0x00
+	if isKeyframe {
+		header[5] = 0x10
+	} else {
+		header[5] = 0x00
+	}
+	binary.BigEndian.PutUint64(header[8:16], ntpTimestamp)
+	binary.LittleEndian.PutUint32(header[16:20], s.frameSeq)
 
-	// Write header + payload atomically
-	frame := make([]byte, 128+len(nalData))
+	frame := make([]byte, 128+len(auData))
 	copy(frame[:128], header)
-	copy(frame[128:], nalData)
+	copy(frame[128:], auData)
 
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, err := s.dataConn.Write(frame)
 	return err
+}
+
+// deriveVideoKeys derives the AES-128-CTR key/IV for video encryption.
+// Per UxPlay mirror_buffer.c: SHA-512("AirPlayStreamKey<id>" + shk)[:16] and SHA-512("AirPlayStreamIV<id>" + shk)[:16].
+func deriveVideoKeys(shk []byte, streamConnectionID int64) (key, iv []byte) {
+	h := sha512.New()
+	h.Write([]byte(fmt.Sprintf("AirPlayStreamKey%d", uint64(streamConnectionID))))
+	h.Write(shk)
+	key = h.Sum(nil)[:16]
+
+	h.Reset()
+	h.Write([]byte(fmt.Sprintf("AirPlayStreamIV%d", uint64(streamConnectionID))))
+	h.Write(shk)
+	iv = h.Sum(nil)[:16]
+	return
 }
 
 // heartbeatLoop sends periodic GET_PARAMETER requests to keep the session alive.
@@ -513,14 +633,6 @@ func ntpTimeNow() uint64 {
 	now := time.Now()
 	secs := uint64(now.Unix()) + ntpEpochOffset
 	frac := uint64(now.Nanosecond()) * (1 << 32) / 1e9
-	return secs<<32 | frac
-}
-
-// timeToNTP converts a duration to an NTP timestamp (seconds since 1900 in upper 32 bits,
-// fractional seconds in lower 32 bits).
-func timeToNTP(d time.Duration) uint64 {
-	secs := uint64(d.Seconds())
-	frac := uint64((d - time.Duration(secs)*time.Second).Nanoseconds()) * (1 << 32) / 1e9
 	return secs<<32 | frac
 }
 
