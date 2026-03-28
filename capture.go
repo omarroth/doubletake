@@ -35,7 +35,7 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 		return nil, err
 	}
 
-	nodeID, err := requestScreencast(ctx)
+	nodeID, pwFd, err := requestScreencast(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -43,20 +43,28 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 
 	captureCtx, cancel := context.WithCancel(ctx)
 
-	args := buildGStreamerArgs(cfg, nodeID)
+	// ExtraFiles are inherited by the child starting at fd 3 (after stdin/stdout/stderr).
+	// The PipeWire remote fd will be fd 3 in gst-launch-1.0.
+	const pwFdNum = 3
+	args := buildGStreamerArgs(cfg, nodeID, pwFdNum)
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", args...)
 	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{pwFd}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+		pwFd.Close()
+		return nil, fmt.Errorf("gst-launch stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("start ffmpeg: %w", err)
+		pwFd.Close()
+		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
+	// Child inherited the fd; close the parent's copy.
+	pwFd.Close()
 
 	return &ScreenCapture{
 		cmd:      cmd,
@@ -105,18 +113,21 @@ func (sc *ScreenCapture) Stop() {
 }
 
 // buildGStreamerArgs constructs the gst-launch-1.0 arguments for encoding the PipeWire stream to H.264 Annex-B.
-func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32) []string {
+// pwFdNum is the file descriptor number (in the child process) for the portal's PipeWire remote.
+func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32, pwFdNum int) []string {
 	fps := cfg.FPS
 	if fps <= 0 {
 		fps = 30
 	}
-	rawCaps := fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps)
 	return []string{
 		"--quiet",
-		"pipewiresrc", fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
+		// fd= connects to the portal's restricted PipeWire remote (from OpenPipeWireRemote).
+		// Without fd=, pipewiresrc connects to the global instance which cannot negotiate the
+		// portal node format and returns EINVAL (-22).
+		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
 		"!", "videoconvert",
 		"!", "videoscale",
-		"!", rawCaps,
+		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d", cfg.Width, cfg.Height),
 		"!", "openh264enc", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
 		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
@@ -125,11 +136,11 @@ func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32) []string {
 }
 
 // requestScreencast uses the xdg-desktop-portal D-Bus API to request screen capture
-// permission and returns a PipeWire node ID for the captured screen.
-func requestScreencast(ctx context.Context) (uint32, error) {
+// permission and returns a PipeWire node ID and an fd for the portal's PipeWire remote.
+func requestScreencast(ctx context.Context) (uint32, *os.File, error) {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
-		return 0, fmt.Errorf("connect session bus: %w", err)
+		return 0, nil, fmt.Errorf("connect session bus: %w", err)
 	}
 	defer conn.Close()
 
@@ -148,16 +159,16 @@ func requestScreencast(ctx context.Context) (uint32, error) {
 	var sessionHandle dbus.ObjectPath
 	call := portal.Call("org.freedesktop.portal.ScreenCast.CreateSession", 0, sessionOpts)
 	if call.Err != nil {
-		return 0, fmt.Errorf("CreateSession: %w", call.Err)
+		return 0, nil, fmt.Errorf("CreateSession: %w", call.Err)
 	}
 	if err := call.Store(&sessionHandle); err != nil {
-		return 0, fmt.Errorf("store session handle: %w", err)
+		return 0, nil, fmt.Errorf("store session handle: %w", err)
 	}
 
 	// Wait for session response via signal
 	sessionPath, err := waitForResponse(conn, senderName, token)
 	if err != nil {
-		return 0, fmt.Errorf("session response: %w", err)
+		return 0, nil, fmt.Errorf("session response: %w", err)
 	}
 
 	// Select sources (screen)
@@ -171,12 +182,12 @@ func requestScreencast(ctx context.Context) (uint32, error) {
 	call = portal.Call("org.freedesktop.portal.ScreenCast.SelectSources", 0,
 		dbus.ObjectPath(sessionPath), selectOpts)
 	if call.Err != nil {
-		return 0, fmt.Errorf("SelectSources: %w", call.Err)
+		return 0, nil, fmt.Errorf("SelectSources: %w", call.Err)
 	}
 
 	_, err = waitForResponse(conn, senderName, token+"_select")
 	if err != nil {
-		return 0, fmt.Errorf("select response: %w", err)
+		return 0, nil, fmt.Errorf("select response: %w", err)
 	}
 
 	// Start the screencast
@@ -187,43 +198,62 @@ func requestScreencast(ctx context.Context) (uint32, error) {
 	call = portal.Call("org.freedesktop.portal.ScreenCast.Start", 0,
 		dbus.ObjectPath(sessionPath), "", startOpts)
 	if call.Err != nil {
-		return 0, fmt.Errorf("Start: %w", call.Err)
+		return 0, nil, fmt.Errorf("Start: %w", call.Err)
 	}
 
 	startResult, err := waitForResponseWithResult(conn, senderName, token+"_start")
 	if err != nil {
-		return 0, fmt.Errorf("start response: %w", err)
+		return 0, nil, fmt.Errorf("start response: %w", err)
 	}
 
 	// Extract PipeWire node ID from the result
 	streams, ok := startResult["streams"]
 	if !ok {
-		return 0, fmt.Errorf("no streams in start response")
+		return 0, nil, fmt.Errorf("no streams in start response")
 	}
 
+	var nodeID uint32
 	streamList, ok := streams.Value().([][]interface{})
 	if !ok {
 		// Try alternate format
 		if v, ok2 := streams.Value().([]interface{}); ok2 && len(v) > 0 {
 			if tuple, ok3 := v[0].([]interface{}); ok3 && len(tuple) > 0 {
-				if nodeID, ok4 := tuple[0].(uint32); ok4 {
-					return nodeID, nil
+				if nid, ok4 := tuple[0].(uint32); ok4 {
+					nodeID = nid
+				} else {
+					return 0, nil, fmt.Errorf("unexpected node ID type: %T", tuple[0])
 				}
+			} else {
+				return 0, nil, fmt.Errorf("unexpected streams format: %T", streams.Value())
 			}
+		} else {
+			return 0, nil, fmt.Errorf("unexpected streams format: %T", streams.Value())
 		}
-		return 0, fmt.Errorf("unexpected streams format: %T", streams.Value())
+	} else {
+		if len(streamList) == 0 || len(streamList[0]) == 0 {
+			return 0, nil, fmt.Errorf("empty streams list")
+		}
+		nid, ok2 := streamList[0][0].(uint32)
+		if !ok2 {
+			return 0, nil, fmt.Errorf("unexpected node ID type: %T", streamList[0][0])
+		}
+		nodeID = nid
 	}
 
-	if len(streamList) == 0 || len(streamList[0]) == 0 {
-		return 0, fmt.Errorf("empty streams list")
+	// OpenPipeWireRemote returns a Unix fd for the portal's PipeWire remote.
+	// pipewiresrc MUST use this fd to connect; without it, it connects to the
+	// global PipeWire instance which does not have the portal node and returns EINVAL.
+	call = portal.Call("org.freedesktop.portal.ScreenCast.OpenPipeWireRemote", 0,
+		dbus.ObjectPath(sessionPath), map[string]dbus.Variant{})
+	if call.Err != nil {
+		return 0, nil, fmt.Errorf("OpenPipeWireRemote: %w", call.Err)
+	}
+	var pwFD dbus.UnixFD
+	if err := call.Store(&pwFD); err != nil {
+		return 0, nil, fmt.Errorf("store pipewire fd: %w", err)
 	}
 
-	nodeID, ok := streamList[0][0].(uint32)
-	if !ok {
-		return 0, fmt.Errorf("unexpected node ID type: %T", streamList[0][0])
-	}
-
-	return nodeID, nil
+	return nodeID, os.NewFile(uintptr(pwFD), "pipewire-remote"), nil
 }
 
 func waitForResponse(conn *dbus.Conn, sender, token string) (string, error) {
