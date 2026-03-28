@@ -16,9 +16,10 @@ import (
 
 // MirrorSession manages an active screen mirroring session.
 type MirrorSession struct {
-	client   *AirPlayClient
-	dataConn net.Conn
-	DataPort int
+	client        *AirPlayClient
+	dataConn      net.Conn
+	eventListener net.Listener
+	DataPort      int
 
 	streamCipher func([]byte) []byte // AES-CTR encryption
 	startTime    time.Time
@@ -28,7 +29,7 @@ type MirrorSession struct {
 // setupMirrorSession negotiates the mirroring stream with the Apple TV.
 func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig) (*MirrorSession, error) {
 	sessionUUID := generateUUID()
-	uri := fmt.Sprintf("rtsp://%s/%s", c.host, sessionUUID)
+	uri := fmt.Sprintf("rtsp://%s:%d/%s", c.host, c.port, sessionUUID)
 
 	// Determine stream encryption key
 	encKey := c.fpKey
@@ -43,29 +44,55 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		encIV = c.streamIV
 	}
 
-	// ---- Phase 1: SETUP session (timing/event channels, no streams) ----
+	// Start a TCP listener for the event (reverse) channel — Apple TV connects back to us
+	eventListener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return nil, fmt.Errorf("listen event port: %w", err)
+	}
+	eventPort := eventListener.Addr().(*net.TCPAddr).Port
+	log.Printf("[SETUP] event listener on TCP port %d", eventPort)
+
+	// Accept event connection asynchronously
+	eventConnCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := eventListener.Accept()
+		if err != nil {
+			log.Printf("[EVENT] accept error: %v", err)
+			return
+		}
+		log.Printf("[EVENT] Apple TV connected for reverse events")
+		eventConnCh <- conn
+	}()
+
+	// ---- Phase 1: SETUP session (timing channels, no streams) ----
 	setup1 := map[string]interface{}{
 		"sessionUUID":              sessionUUID,
 		"sourceVersion":            "935.7.1",
-		"timingProtocol":           "NTP",
-		"timingPort":               0,
+		"timingProtocol":           "None",
 		"isScreenMirroringSession": true,
+		"osName":                   "Linux",
+		"osBuildVersion":           "1.0.0",
+		"model":                    "Linux",
+		"name":                     "Linux",
 	}
 	log.Printf("[SETUP-1] request: %+v", setup1)
 
 	body1, err := plist.Marshal(setup1, plist.BinaryFormat)
 	if err != nil {
+		eventListener.Close()
 		return nil, fmt.Errorf("marshal setup1 plist: %w", err)
 	}
 
 	resp1Body, _, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body1, nil)
 	if err != nil {
+		eventListener.Close()
 		return nil, fmt.Errorf("SETUP phase 1: %w", err)
 	}
 
 	var resp1 map[string]interface{}
 	if len(resp1Body) > 0 {
 		if _, err := plist.Unmarshal(resp1Body, &resp1); err != nil {
+			eventListener.Close()
 			return nil, fmt.Errorf("unmarshal setup1 response: %w", err)
 		}
 		log.Printf("[SETUP-1] response: %+v", resp1)
@@ -74,9 +101,10 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	// ---- Phase 2: SETUP stream (type 110 = screen mirroring) ----
+	streamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	streamDesc := map[string]interface{}{
 		"type":               110,
-		"streamConnectionID": int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF),
+		"streamConnectionID": streamConnectionID,
 	}
 
 	// Encryption keys go inside the stream descriptor
@@ -157,10 +185,11 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	session := &MirrorSession{
-		client:   c,
-		dataConn: dataConn,
-		DataPort: dataPort,
-		startTime: time.Now(),
+		client:        c,
+		dataConn:      dataConn,
+		eventListener: eventListener,
+		DataPort:      dataPort,
+		startTime:     time.Now(),
 	}
 
 	// Set up stream encryption: prefer FairPlay key, fall back to pair-verify derived key
@@ -182,9 +211,6 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			return out
 		}
 	}
-
-	// Start NTP time sync in background
-	go session.ntpSyncLoop(ctx)
 
 	// Start heartbeat in background
 	go session.heartbeatLoop(ctx, uri, sessionUUID)
@@ -237,11 +263,11 @@ func (s *MirrorSession) sendFrame(nalData []byte) error {
 
 	// 128-byte mirroring frame header
 	header := make([]byte, 128)
-	binary.LittleEndian.PutUint32(header[0:4], uint32(len(nalData)))     // payload size
-	binary.LittleEndian.PutUint16(header[4:6], 0)                        // payload type: video
-	binary.LittleEndian.PutUint16(header[6:8], 0)                        // reserved
-	binary.BigEndian.PutUint64(header[8:16], ntpTimestamp)                // NTP timestamp
-	binary.LittleEndian.PutUint32(header[16:20], s.frameSeq)             // sequence number
+	binary.LittleEndian.PutUint32(header[0:4], uint32(len(nalData))) // payload size
+	binary.LittleEndian.PutUint16(header[4:6], 0)                    // payload type: video
+	binary.LittleEndian.PutUint16(header[6:8], 0)                    // reserved
+	binary.BigEndian.PutUint64(header[8:16], ntpTimestamp)           // NTP timestamp
+	binary.LittleEndian.PutUint32(header[16:20], s.frameSeq)         // sequence number
 
 	// Write header + payload atomically
 	frame := make([]byte, 128+len(nalData))
@@ -251,35 +277,6 @@ func (s *MirrorSession) sendFrame(nalData []byte) error {
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, err := s.dataConn.Write(frame)
 	return err
-}
-
-// ntpSyncLoop handles NTP time synchronization with the receiver.
-func (s *MirrorSession) ntpSyncLoop(ctx context.Context) {
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.sendNTPSync()
-		}
-	}
-}
-
-func (s *MirrorSession) sendNTPSync() {
-	// NTP sync packet (simplified): 32 bytes
-	// The Apple TV expects periodic time sync to maintain A/V sync
-	packet := make([]byte, 32)
-	packet[0] = 0x80 // Version, mode
-	packet[1] = 0xd3 // Type
-
-	elapsed := time.Since(s.startTime)
-	ntp := timeToNTP(elapsed)
-	binary.BigEndian.PutUint64(packet[24:32], ntp)
-
-	s.dataConn.Write(packet) //nolint: best-effort
 }
 
 // heartbeatLoop sends periodic GET_PARAMETER requests to keep the session alive.
@@ -303,10 +300,23 @@ func (s *MirrorSession) heartbeatLoop(ctx context.Context, uri, sessionID string
 }
 
 func (s *MirrorSession) Close() error {
+	if s.eventListener != nil {
+		s.eventListener.Close()
+	}
 	if s.dataConn != nil {
 		return s.dataConn.Close()
 	}
 	return nil
+}
+
+// ntpTimeNow returns the current time as an NTP timestamp (seconds since 1900-01-01).
+func ntpTimeNow() uint64 {
+	// NTP epoch is 1900-01-01, Unix is 1970-01-01 = 70 years = 2208988800 seconds
+	const ntpEpochOffset = 2208988800
+	now := time.Now()
+	secs := uint64(now.Unix()) + ntpEpochOffset
+	frac := uint64(now.Nanosecond()) * (1 << 32) / 1e9
+	return secs<<32 | frac
 }
 
 // timeToNTP converts a duration to an NTP timestamp (seconds since 1900 in upper 32 bits,
