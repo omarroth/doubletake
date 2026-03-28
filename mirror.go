@@ -283,6 +283,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 // StreamFrames reads H.264 frames from the capture pipeline and sends them to the Apple TV.
 func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture) error {
 	buf := make([]byte, 256*1024) // 256KB read buffer
+	parser := newAnnexBParser()
 
 	for {
 		select {
@@ -303,17 +304,73 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			continue
 		}
 
-		frameData := buf[:n]
-
-		// Encrypt the frame data if encryption is set up
-		if s.streamCipher != nil {
-			frameData = s.streamCipher(frameData)
-		}
-
-		if err := s.sendFrame(frameData); err != nil {
-			return fmt.Errorf("send frame: %w", err)
+		nals := parser.Push(buf[:n])
+		for _, nal := range nals {
+			frameData := nal
+			if s.streamCipher != nil {
+				frameData = s.streamCipher(frameData)
+			}
+			if err := s.sendFrame(frameData); err != nil {
+				return fmt.Errorf("send frame: %w", err)
+			}
 		}
 	}
+}
+
+// annexBParser incrementally extracts complete Annex-B NAL units
+// (including start codes) from a byte stream.
+type annexBParser struct {
+	buf []byte
+}
+
+func newAnnexBParser() *annexBParser {
+	return &annexBParser{buf: make([]byte, 0, 512*1024)}
+}
+
+func (p *annexBParser) Push(data []byte) [][]byte {
+	p.buf = append(p.buf, data...)
+	var out [][]byte
+
+	for {
+		start := findStartCode(p.buf, 0)
+		if start < 0 {
+			if len(p.buf) > 1024*1024 {
+				p.buf = p.buf[len(p.buf)-128*1024:]
+			}
+			break
+		}
+
+		next := findStartCode(p.buf, start+3)
+		if next < 0 {
+			if start > 0 {
+				p.buf = append([]byte(nil), p.buf[start:]...)
+			}
+			break
+		}
+
+		nal := append([]byte(nil), p.buf[start:next]...)
+		out = append(out, nal)
+		p.buf = p.buf[next:]
+	}
+
+	return out
+}
+
+func findStartCode(b []byte, from int) int {
+	if from < 0 {
+		from = 0
+	}
+	for i := from; i+3 < len(b); i++ {
+		if b[i] == 0x00 && b[i+1] == 0x00 {
+			if b[i+2] == 0x01 {
+				return i
+			}
+			if i+3 < len(b) && b[i+2] == 0x00 && b[i+3] == 0x01 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // sendFrame writes a single frame with the mirroring protocol header.
