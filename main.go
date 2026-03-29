@@ -17,10 +17,14 @@ func main() {
 	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
 	pin := flag.String("pin", "", "4-digit PIN for pairing (shown on Apple TV)")
+	credFile := flag.String("creds", defaultCredentialsFile, "Path to saved pairing credentials")
+	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
 	width := flag.Int("width", 1920, "Stream width")
 	height := flag.Int("height", 1080, "Stream height")
 	fps := flag.Int("fps", 30, "Frames per second")
 	hwaccel := flag.String("hwaccel", "auto", "Hardware acceleration: auto, vaapi, none")
+	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
+	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -59,8 +63,57 @@ func main() {
 	}
 	log.Printf("connected to: %s (model: %s)", info.Name, info.Model)
 
-	if err := client.Pair(ctx, *pin); err != nil {
-		log.Fatalf("pairing failed: %v", err)
+	// Pairing flow:
+	// 1. If --pin provided or --pair forced, do full pair-setup + save credentials
+	// 2. If saved credentials exist, load them and do pair-verify only
+	// 3. Otherwise, do transient (ephemeral) pairing
+	needFullPair := *forcePair || *pin != ""
+	var savedCreds *SavedCredentials
+
+	if !needFullPair {
+		var err error
+		savedCreds, err = LoadCredentials(*credFile)
+		if err != nil {
+			log.Printf("warning: failed to load credentials: %v", err)
+		}
+	}
+
+	if needFullPair {
+		// Full pair-setup with PIN
+		pinVal := *pin
+		if pinVal == "" {
+			// Trigger PIN display and ask user
+			fmt.Print("Enter the PIN shown on Apple TV: ")
+			fmt.Scanln(&pinVal)
+		}
+		if err := client.Pair(ctx, pinVal); err != nil {
+			log.Fatalf("pairing failed: %v", err)
+		}
+		// Save credentials for next time
+		if err := SaveCredentials(*credFile, client.pairingID, client.pairKeys.Ed25519Public, client.pairKeys.Ed25519Private); err != nil {
+			log.Printf("warning: failed to save credentials: %v", err)
+		} else {
+			log.Printf("credentials saved to %s", *credFile)
+		}
+	} else if savedCreds != nil {
+		// Use saved credentials — pair-verify only (fast path)
+		log.Printf("using saved credentials from %s", *credFile)
+		pub, priv := savedCreds.Ed25519Keys()
+		client.pairingID = savedCreds.PairingID
+		client.pairKeys = &PairKeys{
+			Ed25519Public:  pub,
+			Ed25519Private: priv,
+		}
+		if err := client.pairVerify(ctx); err != nil {
+			log.Printf("pair-verify with saved creds failed: %v", err)
+			log.Printf("try re-pairing with: --pair --pin XXXX")
+			os.Exit(1)
+		}
+	} else {
+		// Transient pairing (no saved creds, no PIN)
+		if err := client.Pair(ctx, ""); err != nil {
+			log.Fatalf("pairing failed: %v", err)
+		}
 	}
 	log.Println("pairing complete")
 
@@ -71,9 +124,10 @@ func main() {
 	}
 
 	streamCfg := StreamConfig{
-		Width:  *width,
-		Height: *height,
-		FPS:    *fps,
+		Width:     *width,
+		Height:    *height,
+		FPS:       *fps,
+		NoEncrypt: *noEncrypt,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {
@@ -82,15 +136,31 @@ func main() {
 	defer session.Close()
 	log.Printf("mirror session ready (data port: %d)", session.DataPort)
 
-	captureCfg := CaptureConfig{
-		Width:   *width,
-		Height:  *height,
-		FPS:     *fps,
-		HWAccel: *hwaccel,
-	}
-	capture, err := StartCapture(ctx, captureCfg)
-	if err != nil {
-		log.Fatalf("screen capture failed: %v", err)
+	var capture *ScreenCapture
+	if *testMode {
+		log.Println("using synthetic video (videotestsrc) for debugging")
+		var err error
+		capture, err = StartTestCapture(ctx, CaptureConfig{
+			Width:   *width,
+			Height:  *height,
+			FPS:     *fps,
+			HWAccel: *hwaccel,
+		})
+		if err != nil {
+			log.Fatalf("test capture failed: %v", err)
+		}
+	} else {
+		captureCfg := CaptureConfig{
+			Width:   *width,
+			Height:  *height,
+			FPS:     *fps,
+			HWAccel: *hwaccel,
+		}
+		var err error
+		capture, err = StartCapture(ctx, captureCfg)
+		if err != nil {
+			log.Fatalf("screen capture failed: %v", err)
+		}
 	}
 	defer capture.Stop()
 	go func() {

@@ -465,9 +465,10 @@ func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
 
 // StreamConfig holds the configuration for a mirroring session.
 type StreamConfig struct {
-	Width  int
-	Height int
-	FPS    int
+	Width     int
+	Height    int
+	FPS       int
+	NoEncrypt bool // Disable encryption for debugging
 }
 
 // generateStreamKey creates a random AES-128 key for stream encryption.
@@ -490,4 +491,42 @@ func newStreamCipher(key, iv []byte) (cipher.Stream, error) {
 		return nil, err
 	}
 	return cipher.NewCTR(block, iv), nil
+}
+
+// mirrorCipher implements the AirPlay mirroring AES-CTR encryption scheme.
+// Unlike a plain stream cipher, the Apple TV receiver calls
+// aes_ctr_start_fresh_block() at the start of each frame, which skips
+// any remaining bytes in the current 16-byte CTR block. The sender
+// must advance the keystream identically.
+type mirrorCipher struct {
+	stream      cipher.Stream
+	blockOffset int // bytes used in the current 16-byte CTR block
+}
+
+func newMirrorCipher(key, iv []byte) (*mirrorCipher, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return &mirrorCipher{
+		stream:      cipher.NewCTR(block, iv),
+		blockOffset: 0,
+	}, nil
+}
+
+// EncryptFrame encrypts a single video frame payload.
+// It starts on a fresh 16-byte block boundary (matching the receiver's
+// aes_ctr_start_fresh_block call), then encrypts the entire payload.
+func (mc *mirrorCipher) EncryptFrame(payload []byte) []byte {
+	// Skip remaining bytes in the current CTR block to align
+	if mc.blockOffset > 0 {
+		waste := make([]byte, 16-mc.blockOffset)
+		mc.stream.XORKeyStream(waste, waste)
+		mc.blockOffset = 0
+	}
+
+	out := make([]byte, len(payload))
+	mc.stream.XORKeyStream(out, payload)
+	mc.blockOffset = len(payload) % 16
+	return out
 }

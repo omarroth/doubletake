@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -26,10 +28,11 @@ type ScreenCapture struct {
 	stdout   io.ReadCloser
 	cancel   context.CancelFunc
 	pwNodeID uint32
+	waitCh   chan error
 }
 
 // StartCapture initiates Wayland screen capture using the xdg-desktop-portal
-// D-Bus API to get a PipeWire stream, then pipes it through ffmpeg for H.264 encoding.
+// D-Bus API to get a PipeWire stream, then pipes it through GStreamer for H.264 encoding.
 func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	if err := gstSupportsPipeWire(); err != nil {
 		return nil, err
@@ -47,8 +50,8 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 	// The PipeWire remote fd will be fd 3 in gst-launch-1.0.
 	const pwFdNum = 3
 	args := buildGStreamerArgs(cfg, nodeID, pwFdNum)
+	log.Printf("[CAPTURE] launching gst-launch-1.0 %s", strings.Join(args, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", args...)
-	cmd.Stderr = os.Stderr
 	cmd.ExtraFiles = []*os.File{pwFd}
 
 	stdout, err := cmd.StdoutPipe()
@@ -56,6 +59,12 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 		cancel()
 		pwFd.Close()
 		return nil, fmt.Errorf("gst-launch stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		pwFd.Close()
+		return nil, fmt.Errorf("gst-launch stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -66,11 +75,18 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 	// Child inherited the fd; close the parent's copy.
 	pwFd.Close()
 
+	go scanCaptureStderr(stderr)
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
 	return &ScreenCapture{
 		cmd:      cmd,
 		stdout:   stdout,
 		cancel:   cancel,
 		pwNodeID: nodeID,
+		waitCh:   waitCh,
 	}, nil
 }
 
@@ -85,6 +101,14 @@ func gstSupportsPipeWire() error {
 }
 
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
+	select {
+	case err := <-sc.waitCh:
+		if err != nil {
+			return 0, fmt.Errorf("gst-launch exited: %w", err)
+		}
+		return 0, io.EOF
+	default:
+	}
 	return sc.stdout.Read(buf)
 }
 
@@ -98,7 +122,11 @@ func (sc *ScreenCapture) Stop() {
 	}
 	done := make(chan struct{})
 	go func() {
-		_ = sc.cmd.Wait()
+		if sc.waitCh != nil {
+			<-sc.waitCh
+		} else {
+			_ = sc.cmd.Wait()
+		}
 		close(done)
 	}()
 
@@ -125,13 +153,82 @@ func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32, pwFdNum int) []string 
 		// Without fd=, pipewiresrc connects to the global instance which cannot negotiate the
 		// portal node format and returns EINVAL (-22).
 		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
+		"!", "queue",
 		"!", "videoconvert",
 		"!", "videoscale",
-		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d", cfg.Width, cfg.Height),
-		"!", "openh264enc", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
+		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", "openh264enc", "usage-type=screen", "rate-control=bitrate", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
 		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
-		"!", "fdsink", "fd=1",
+		"!", "fdsink", "fd=1", "sync=false", "async=false",
+	}
+}
+
+// StartTestCapture creates a synthetic H.264 video stream using GStreamer's videotestsrc.
+// This is useful for debugging the AirPlay mirroring protocol without relying on screen capture.
+func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
+	captureCtx, cancel := context.WithCancel(ctx)
+
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+
+	testArgs := []string{
+		"--quiet",
+		"videotestsrc", "is-live=true", "do-timestamp=true", "num-buffers=100",
+		"!", "queue",
+		"!", "videoconvert",
+		"!", "videoscale",
+		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", "openh264enc", "usage-type=screen", "rate-control=bitrate", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
+		"!", "h264parse", "config-interval=-1",
+		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
+		"!", "fdsink", "fd=1", "sync=true", "async=false",
+	}
+
+	log.Printf("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(testArgs, " "))
+	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", testArgs...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("gst-launch stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("gst-launch stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("start gst-launch: %w", err)
+	}
+
+	go scanCaptureStderr(stderr)
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	return &ScreenCapture{
+		cmd:    cmd,
+		stdout: stdout,
+		cancel: cancel,
+		waitCh: waitCh,
+	}, nil
+}
+
+func scanCaptureStderr(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		log.Printf("[GST] %s", scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("[GST] stderr read error: %v", err)
 	}
 }
 
@@ -270,7 +367,7 @@ func waitForResponseWithResult(conn *dbus.Conn, sender, token string) (map[strin
 	conn.Signal(ch)
 	defer conn.RemoveSignal(ch)
 
-	matchRule := fmt.Sprintf("type='signal',interface='org.freedesktop.portal.Request',member='Response'")
+	matchRule := "type='signal',interface='org.freedesktop.portal.Request',member='Response'"
 	conn.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, matchRule)
 
 	select {
