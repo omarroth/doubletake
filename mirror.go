@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ type MirrorSession struct {
 	timingConn    net.PacketConn
 	eventListener net.Listener
 	DataPort      int
+	videoWidth    int
+	videoHeight   int
 
 	streamCipher func([]byte) []byte // AES-CTR encryption
 	frameSeq     uint32
@@ -46,6 +49,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		}
 		encKey = c.streamKey
 		encIV = c.streamIV
+	}
+
+	if cfg.NoEncrypt {
+		log.Printf("[SETUP] video frame encryption DISABLED (--no-encrypt mode)")
+		encKey = nil
+		encIV = nil
+	} else if encKey != nil {
+		log.Printf("[SETUP] using encryption (key: %d bytes, IV: %d bytes)", len(encKey), len(encIV))
 	}
 
 	// Start NTP timing UDP listener — Apple TV sends timing requests here
@@ -253,13 +264,24 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		eventConn:     receiverEventConn,
 		eventListener: eventListener,
 		DataPort:      dataPort,
+		videoWidth:    cfg.Width,
+		videoHeight:   cfg.Height,
 	}
 
-	// Derive actual video cipher keys from shk + streamConnectionID via SHA-512
-	// (matches Apple TV's key derivation in mirror_buffer_init_aes).
+	// Set up video cipher using continuous AES-CTR.
+	// UxPlay's mirror_buffer_decrypt uses a continuous CTR stream across frames:
+	// leftover keystream from one frame carries into the next. No per-frame
+	// block alignment — plain cipher.NewCTR is correct.
 	if encKey != nil {
-		videoKey, videoIV := deriveVideoKeys(encKey, streamConnectionID)
-		sc, err := newStreamCipher(videoKey, videoIV)
+		// Derive AES-128-CTR key/IV from shk + streamConnectionID using SHA-512.
+		// Matches UxPlay's mirror_buffer_init_aes.
+		derivedKey, derivedIV := deriveVideoKeys(encKey, streamConnectionID)
+		log.Printf("[SETUP] streamConnectionID: %d", streamConnectionID)
+		log.Printf("[SETUP] shk (raw key):    %02x", encKey)
+		log.Printf("[SETUP] shiv (raw IV):    %02x", encIV)
+		log.Printf("[SETUP] derived AES key:  %02x", derivedKey)
+		log.Printf("[SETUP] derived AES IV:   %02x", derivedIV)
+		sc, err := newStreamCipher(derivedKey, derivedIV)
 		if err != nil {
 			dataConn.Close()
 			return nil, fmt.Errorf("stream cipher: %w", err)
@@ -269,10 +291,26 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			sc.XORKeyStream(out, data)
 			return out
 		}
+	} else {
+		log.Printf("[SETUP] no video cipher — frames will be sent unencrypted")
 	}
+
+	// Monitor data connection for incoming data from Apple TV
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := dataConn.Read(buf)
+			if err != nil {
+				log.Printf("[DATA-READ] data conn closed: %v", err)
+				return
+			}
+			log.Printf("[DATA-READ] received %d bytes from Apple TV: %02x", n, buf[:min(n, 64)])
+		}
+	}()
 
 	// Start heartbeat in background
 	go session.heartbeatLoop(ctx, uri, sessionUUID)
+	go session.dataHeartbeatLoop(ctx)
 
 	return session, nil
 }
@@ -284,10 +322,12 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 //   - non-IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
 func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture) error {
 	buf := make([]byte, 256*1024)
-	parser := newAnnexBParser()
+	parser := newH264Parser()
 
 	var latestSPS, latestPPS []byte // raw NAL data WITHOUT start code
 	var vclBuf []byte               // AVCC-formatted data accumulating for current VCL packet
+	var frameCount int
+	var nalLog strings.Builder
 
 	for {
 		select {
@@ -309,61 +349,134 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 		if n == 0 {
 			continue
 		}
+		if frameCount == 0 {
+			log.Printf("[CAPTURE] read %d bytes start=% x", n, buf[:min(n, 16)])
+		}
 
 		nals := parser.Push(buf[:n])
 		for _, nal := range nals {
 			nt := nalType(nal)
 			raw := stripStartCode(nal)
 
+			// Log first 20 AU sequences in detail
+			if frameCount < 20 {
+				fmt.Fprintf(&nalLog, "NAL type=%d len=%d ", nt, len(raw))
+				if len(raw) > 0 {
+					fmt.Fprintf(&nalLog, "hdr=%02x", raw[0])
+				}
+				nalLog.WriteByte('|')
+			}
+
 			switch nt {
 			case 7: // SPS
 				latestSPS = raw
+				if frameCount < 20 {
+					log.Printf("[STREAM] SPS len=%d bytes=%02x", len(raw), raw)
+				}
 			case 8: // PPS
 				latestPPS = raw
+				if frameCount < 20 {
+					log.Printf("[STREAM] PPS len=%d bytes=%02x", len(raw), raw)
+				}
 			case 6: // SEI — accumulate with next VCL
 				vclBuf = append(vclBuf, avccWrap(raw)...)
 			case 5: // IDR VCL (keyframe)
+				packetTimestamp := ntpTimeNow()
 				// Send SPS+PPS as unencrypted avcC codec frame first.
 				if latestSPS != nil && latestPPS != nil {
-					if err := s.sendCodecFrame(buildAVCCConfig(latestSPS, latestPPS)); err != nil {
+					avcC := buildAVCCConfig(latestSPS, latestPPS)
+					if frameCount < 20 {
+						log.Printf("[STREAM] sending codec frame avcC len=%d hdr=%02x", len(avcC), avcC[:min(8, len(avcC))])
+					}
+					if err := s.sendCodecFrame(avcC, packetTimestamp); err != nil {
 						return fmt.Errorf("send codec: %w", err)
 					}
+				} else {
+					log.Printf("[STREAM] IDR frame but latestSPS=%v latestPPS=%v — skipping keyframe", latestSPS == nil, latestPPS == nil)
 				}
 				vclBuf = append(vclBuf, avccWrap(raw)...)
 				frameData := vclBuf
 				if s.streamCipher != nil {
+					if frameCount < 5 {
+						log.Printf("[CRYPTO] IDR frame %d plain[0:20]=%02x", frameCount, vclBuf[:min(20, len(vclBuf))])
+					}
 					frameData = s.streamCipher(vclBuf)
+					if frameCount < 5 {
+						log.Printf("[CRYPTO] IDR frame %d  enc[0:20]=%02x", frameCount, frameData[:min(20, len(frameData))])
+					}
 				}
-				if err := s.sendFrame(frameData, true); err != nil {
+				if frameCount < 20 {
+					log.Printf("[STREAM] IDR frame %d: avcc_payload=%d encrypted=%v", frameCount, len(vclBuf), s.streamCipher != nil)
+					log.Printf("[STREAM] NAL sequence for frame %d: %s", frameCount, nalLog.String())
+				}
+				nalLog.Reset()
+				if err := s.sendFrame(frameData, true, packetTimestamp); err != nil {
 					return fmt.Errorf("send IDR: %w", err)
 				}
 				vclBuf = vclBuf[:0]
+				frameCount++
 			case 1, 2, 3, 4: // non-IDR VCL
 				vclBuf = append(vclBuf, avccWrap(raw)...)
 				frameData := vclBuf
 				if s.streamCipher != nil {
+					if frameCount < 5 {
+						log.Printf("[CRYPTO] non-IDR frame %d plain[0:20]=%02x", frameCount, vclBuf[:min(20, len(vclBuf))])
+					}
 					frameData = s.streamCipher(vclBuf)
+					if frameCount < 5 {
+						log.Printf("[CRYPTO] non-IDR frame %d  enc[0:20]=%02x", frameCount, frameData[:min(20, len(frameData))])
+					}
 				}
-				if err := s.sendFrame(frameData, false); err != nil {
+				if frameCount < 5 {
+					log.Printf("[STREAM] non-IDR frame %d: avcc_payload=%d encrypted=%v", frameCount, len(vclBuf), s.streamCipher != nil)
+				}
+				nalLog.Reset()
+
+				// Validate frame size before sending
+				if len(frameData) > 10*1024*1024 {
+					log.Printf("[STREAM] warning: non-IDR frame %d is very large: %d bytes", frameCount, len(frameData))
+				}
+
+				if err := s.sendFrame(frameData, false, ntpTimeNow()); err != nil {
 					return fmt.Errorf("send frame: %w", err)
 				}
 				vclBuf = vclBuf[:0]
+				frameCount++
+			default:
+				if frameCount < 20 {
+					log.Printf("[STREAM] ignoring NAL type=%d len=%d", nt, len(raw))
+				}
 			}
 		}
 	}
 }
 
-// annexBParser incrementally extracts complete Annex-B NAL units from a byte stream.
-type annexBParser struct {
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// h264Parser incrementally extracts NAL units from either Annex-B or length-prefixed AVC streams.
+type h264Parser struct {
 	buf []byte
 }
 
-func newAnnexBParser() *annexBParser {
-	return &annexBParser{buf: make([]byte, 0, 512*1024)}
+func newH264Parser() *h264Parser {
+	return &h264Parser{buf: make([]byte, 0, 512*1024)}
 }
 
-func (p *annexBParser) Push(data []byte) [][]byte {
+func (p *h264Parser) Push(data []byte) [][]byte {
 	p.buf = append(p.buf, data...)
+
+	if hasStartCode(p.buf) {
+		return p.pushAnnexB()
+	}
+	return p.pushAVCC()
+}
+
+func (p *h264Parser) pushAnnexB() [][]byte {
 	var out [][]byte
 
 	for {
@@ -389,6 +502,38 @@ func (p *annexBParser) Push(data []byte) [][]byte {
 	}
 
 	return out
+}
+
+func (p *h264Parser) pushAVCC() [][]byte {
+	var out [][]byte
+
+	for {
+		if len(p.buf) < 4 {
+			break
+		}
+
+		nalLen := int(binary.BigEndian.Uint32(p.buf[:4]))
+		if nalLen <= 0 || nalLen > 16*1024*1024 {
+			log.Printf("[STREAM] invalid AVCC NAL length %d, dropping %d buffered bytes", nalLen, len(p.buf))
+			p.buf = p.buf[:0]
+			break
+		}
+		if len(p.buf) < 4+nalLen {
+			break
+		}
+
+		nal := make([]byte, 4+nalLen)
+		binary.BigEndian.PutUint32(nal[:4], uint32(1))
+		copy(nal[4:], p.buf[4:4+nalLen])
+		out = append(out, nal)
+		p.buf = p.buf[4+nalLen:]
+	}
+
+	return out
+}
+
+func hasStartCode(b []byte) bool {
+	return findStartCode(b, 0) >= 0
 }
 
 func findStartCode(b []byte, from int) int {
@@ -460,52 +605,101 @@ func nalType(nal []byte) byte {
 
 // sendCodecFrame sends an unencrypted SPS+PPS codec packet (header type 0x01 0x00).
 // payload is an AVCDecoderConfigurationRecord (avcC format).
-func (s *MirrorSession) sendCodecFrame(payload []byte) error {
+func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) error {
 	s.frameSeq++
 	header := make([]byte, 128)
 	binary.LittleEndian.PutUint32(header[0:4], uint32(len(payload)))
 	header[4] = 0x01 // payload type = SPS+PPS codec packet (unencrypted)
 	header[5] = 0x00
-	header[6] = 0x16 // option: standard unencrypted SPS+PPS
+	header[6] = 0x16 // h264 SPS+PPS (per UxPlay protocol docs)
 	header[7] = 0x01
-	binary.BigEndian.PutUint64(header[8:16], ntpTimeNow())
-	binary.LittleEndian.PutUint32(header[16:20], s.frameSeq)
+	binary.LittleEndian.PutUint64(header[8:16], ntpTimestamp)
+	putFloat32LE(header[16:20], float32(s.videoWidth))
+	putFloat32LE(header[20:24], float32(s.videoHeight))
+	putFloat32LE(header[40:44], float32(s.videoWidth))
+	putFloat32LE(header[44:48], float32(s.videoHeight))
+	putFloat32LE(header[56:60], float32(s.videoWidth))
+	putFloat32LE(header[60:64], float32(s.videoHeight))
 
 	frame := make([]byte, 128+len(payload))
 	copy(frame[:128], header)
 	copy(frame[128:], payload)
+
+	log.Printf("[SEND] codec frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d",
+		s.frameSeq, len(payload), header[4], header[5], ntpTimestamp)
+
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, err := s.dataConn.Write(frame)
-	return err
+	if err := writeFull(s.dataConn, frame); err != nil {
+		return err
+	}
+	return nil
 }
 
 // sendFrame writes a single encrypted VCL frame with the mirroring protocol header.
 // payload must be AVCC-encoded (4-byte BE length per NALU, no start codes).
-// isKeyframe=true sets header[5]=0x10 (IDR), false sets header[5]=0x00 (non-IDR).
-func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool) error {
-	ntpTimestamp := ntpTimeNow()
-
+func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp uint64) error {
 	s.frameSeq++
 
 	header := make([]byte, 128)
 	binary.LittleEndian.PutUint32(header[0:4], uint32(len(auData)))
-	// header[4]=0x00 for encrypted VCL; header[5]=0x10 for IDR, 0x00 for non-IDR.
-	header[4] = 0x00
+	header[4] = 0x00 // encrypted VCL
 	if isKeyframe {
-		header[5] = 0x10
+		header[5] = 0x10 // IDR frame indicator (per UxPlay: "0x00 0x10")
 	} else {
-		header[5] = 0x00
+		header[5] = 0x00 // non-IDR
 	}
-	binary.BigEndian.PutUint64(header[8:16], ntpTimestamp)
-	binary.LittleEndian.PutUint32(header[16:20], s.frameSeq)
+	// bytes 6-7 = 0x00, 0x00 for encrypted packets (default)
+	binary.LittleEndian.PutUint64(header[8:16], ntpTimestamp)
 
 	frame := make([]byte, 128+len(auData))
 	copy(frame[:128], header)
 	copy(frame[128:], auData)
 
+	keyframeStr := "non-IDR"
+	if isKeyframe {
+		keyframeStr = "IDR"
+	}
+
+	// Log detailed frame header in hex
+	hdrHex := fmt.Sprintf("%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+		header[0], header[1], header[2], header[3],
+		header[4], header[5], header[6], header[7],
+		header[8], header[9], header[10], header[11],
+		header[12], header[13], header[14], header[15])
+
+	log.Printf("[SEND] %s frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d hdr_hex=%s",
+		keyframeStr, s.frameSeq, len(auData), header[4], header[5], ntpTimestamp, hdrHex)
+
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, err := s.dataConn.Write(frame)
+	err := writeFull(s.dataConn, frame)
+	if err != nil {
+		log.Printf("[SEND] write error on frame seq=%d: %v", s.frameSeq, err)
+		// Log first 20 bytes of encrypted payload for debugging
+		if len(auData) > 0 {
+			payloadHex := fmt.Sprintf("%02x", auData[:min(20, len(auData))])
+			log.Printf("[SEND] payload[0:20]=%s", payloadHex)
+		}
+	}
 	return err
+}
+
+// writeFull writes all bytes to conn, handling short writes from net.Conn.Write.
+func writeFull(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return fmt.Errorf("short write: wrote %d of %d bytes", n, len(data))
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func putFloat32LE(dst []byte, value float32) {
+	binary.LittleEndian.PutUint32(dst, math.Float32bits(value))
 }
 
 // deriveVideoKeys derives the AES-128-CTR key/IV for video encryption.
@@ -538,6 +732,29 @@ func (s *MirrorSession) heartbeatLoop(ctx context.Context, uri, sessionID string
 			})
 			if err != nil {
 				log.Printf("heartbeat failed: %v", err)
+			}
+		}
+	}
+}
+
+// dataHeartbeatLoop sends periodic heartbeat frames on the data channel.
+// AirMyPC sends these every ~1s: 128-byte header with byte4=0x02, bytes6-7=0x1e00, no payload.
+func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			header := make([]byte, 128)
+			header[4] = 0x02
+			header[6] = 0x1e
+			s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := writeFull(s.dataConn, header); err != nil {
+				log.Printf("[HEARTBEAT] data channel heartbeat failed: %v", err)
+				return
 			}
 		}
 	}
@@ -590,12 +807,12 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 		reply[0] = 0x80
 		reply[1] = 0xd3
 
-		now := ntpTimeNow()
+		now := ntpTimestampFromUnix(time.Now())
 		// Bytes 8-15: Reference = sender's transmit timestamp
 		copy(reply[8:16], buf[24:32])
-		// Bytes 16-23: Receive timestamp = now
+		// Bytes 16-23: Receive timestamp = now (NTP format, BE)
 		binary.BigEndian.PutUint64(reply[16:24], now)
-		// Bytes 24-31: Transmit timestamp = now
+		// Bytes 24-31: Transmit timestamp = now (NTP format, BE)
 		binary.BigEndian.PutUint64(reply[24:32], now)
 
 		if _, err := conn.WriteTo(reply, addr); err != nil {
@@ -626,14 +843,29 @@ func uuidToMAC(id string) string {
 	return strings.ToUpper(strings.Join(parts, ":"))
 }
 
-// ntpTimeNow returns the current time as an NTP timestamp (seconds since 1900-01-01).
+// appStartTime is the reference point for boot-relative timestamps.
+var appStartTime = time.Now()
+
+// ntpTimeNow returns a 64-bit NTP fixed-point timestamp for mirroring frame headers.
+// Format: upper 32 bits = seconds, lower 32 bits = fractional seconds (1/2^32).
+// Uses boot-relative time (no epoch offset), matching real Apple senders.
 func ntpTimeNow() uint64 {
-	// NTP epoch is 1900-01-01, Unix is 1970-01-01 = 70 years = 2208988800 seconds
-	const ntpEpochOffset = 2208988800
-	now := time.Now()
-	secs := uint64(now.Unix()) + ntpEpochOffset
-	frac := uint64(now.Nanosecond()) * (1 << 32) / 1e9
-	return secs<<32 | frac
+	d := time.Since(appStartTime)
+	sec := uint64(d / time.Second)
+	nsecFrac := uint64(d % time.Second)
+	frac := (nsecFrac << 32) / uint64(time.Second)
+	return (sec << 32) | frac
+}
+
+// ntpTimestampFromUnix converts a Unix time.Time to NTP fixed-point format
+// with the NTP epoch (1900-01-01). Used for NTP timing responses.
+const secondsFrom1900To1970 = 2208988800
+
+func ntpTimestampFromUnix(t time.Time) uint64 {
+	sec := uint64(t.Unix()) + secondsFrom1900To1970
+	nsecFrac := uint64(t.Nanosecond())
+	frac := (nsecFrac << 32) / uint64(time.Second)
+	return (sec << 32) | frac
 }
 
 func generateUUID() string {
