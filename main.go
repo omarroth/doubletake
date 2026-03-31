@@ -25,6 +25,7 @@ func main() {
 	hwaccel := flag.String("hwaccel", "auto", "Hardware acceleration: auto, vaapi, none")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
+	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,7 +97,7 @@ func main() {
 			log.Printf("credentials saved to %s", *credFile)
 		}
 	} else if savedCreds != nil {
-		// Use saved credentials — pair-verify only (fast path)
+		// Use saved credentials — pair-verify
 		log.Printf("using saved credentials from %s", *credFile)
 		pub, priv := savedCreds.Ed25519Keys()
 		client.pairingID = savedCreds.PairingID
@@ -117,10 +118,16 @@ func main() {
 	}
 	log.Println("pairing complete")
 
-	if err := client.FairPlaySetup(ctx); err != nil {
-		log.Printf("fairplay setup skipped (non-fatal with HKP): %v", err)
-	} else {
-		log.Println("fairplay setup complete")
+	// FairPlay setup — establishes encrypted key wrapping for video stream
+	// Skip if already done pre-auth (saved creds path)
+	if os.Getenv("SKIP_FAIRPLAY") != "" {
+		log.Println("SKIP_FAIRPLAY: skipping FairPlay setup entirely")
+	} else if client.fpEkey == nil {
+		if err := client.fairPlaySetup(ctx); err != nil {
+			log.Printf("FairPlay setup failed (non-fatal): %v", err)
+		} else {
+			log.Println("FairPlay setup complete")
+		}
 	}
 
 	streamCfg := StreamConfig{
@@ -128,6 +135,7 @@ func main() {
 		Height:    *height,
 		FPS:       *fps,
 		NoEncrypt: *noEncrypt,
+		DirectKey: *directKey,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {
@@ -135,6 +143,41 @@ func main() {
 	}
 	defer session.Close()
 	log.Printf("mirror session ready (data port: %d)", session.DataPort)
+
+	// Quick heartbeat-only test: don't send any video, just keep session alive
+	if os.Getenv("HEARTBEAT_ONLY") != "" {
+		log.Println("HEARTBEAT_ONLY mode: no video will be sent, waiting 10s...")
+		if os.Getenv("SEND_CODEC") != "" {
+			// Send an SPS/PPS codec frame, then wait
+			log.Println("sending test codec frame...")
+			sps := []byte{0x67, 0x64, 0x00, 0x28, 0xAC, 0x56, 0x20, 0x0D, 0x81, 0x4F, 0xE5, 0x9B, 0x81, 0x01, 0x01, 0x01}
+			pps := []byte{0x68, 0xEE, 0x3C, 0xB0}
+			// Build avcC
+			avcC := make([]byte, 6+2+len(sps)+1+2+len(pps))
+			avcC[0] = 0x01
+			avcC[1] = sps[1]
+			avcC[2] = sps[2]
+			avcC[3] = sps[3]
+			avcC[4] = 0xff
+			avcC[5] = 0xe1
+			avcC[6] = byte(len(sps) >> 8)
+			avcC[7] = byte(len(sps))
+			copy(avcC[8:], sps)
+			avcC[8+len(sps)] = 0x01
+			avcC[9+len(sps)] = byte(len(pps) >> 8)
+			avcC[10+len(sps)] = byte(len(pps))
+			copy(avcC[11+len(sps):], pps)
+			// Send as codec packet
+			session.SendTestCodec(avcC)
+		}
+		if os.Getenv("SEND_EMPTY_VCL") != "" {
+			log.Println("sending empty VCL header (zero payload)...")
+			session.SendTestEmptyVCL()
+		}
+		time.Sleep(10 * time.Second)
+		log.Println("heartbeat test complete")
+		return
+	}
 
 	var capture *ScreenCapture
 	if *testMode {
@@ -170,7 +213,7 @@ func main() {
 	}()
 	log.Println("screen capture started")
 
-	if err := session.StreamFrames(ctx, capture); err != nil && ctx.Err() == nil {
+	if err := session.StreamFrames(ctx, capture, 2*time.Second); err != nil && ctx.Err() == nil {
 		log.Fatalf("streaming error: %v", err)
 	}
 	log.Println("stream ended")

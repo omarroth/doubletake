@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha512"
@@ -531,4 +533,126 @@ func nonceBytes(n uint64) []byte {
 	nonce := make([]byte, 12)
 	binary.LittleEndian.PutUint64(nonce[4:], n)
 	return nonce
+}
+
+// rawPairVerify performs a non-HAP ("AirMyPC-style") pair-verify that keeps the
+// connection in plaintext. This is required because Apple TV rejects FairPlay
+// fp-setup phase 2 over HAP-encrypted connections.
+//
+// Protocol (raw binary, NOT TLV8):
+//
+//	V1 (client→server, 68 bytes): \x01\x00\x00\x00 + X25519_pub(32) + Ed25519_pub(32)
+//	V2 (server→client, 96 bytes): server_X25519_pub(32) + AES-CTR(server_sig, offset=0)(64)
+//	V3 (client→server, 68 bytes): \x00\x00\x00\x00 + AES-CTR(client_sig, offset=64)(64)
+//	V4 (server→client, 0 bytes): empty 200 OK
+//
+// AES-CTR key derivation (SHA-512, NOT HKDF):
+//
+//	key = SHA-512("Pair-Verify-AES-Key" || X25519_shared_secret)[:16]
+//	iv  = SHA-512("Pair-Verify-AES-IV"  || X25519_shared_secret)[:16]
+func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
+	// Generate ephemeral X25519 key pair
+	var clientPrivate [32]byte
+	rand.Read(clientPrivate[:])
+	var clientPublic [32]byte
+	curve25519.ScalarBaseMult(&clientPublic, &clientPrivate)
+
+	// V1: flags(4) + X25519_pub(32) + Ed25519_pub(32) = 68 bytes
+	v1 := make([]byte, 68)
+	v1[0] = 0x01 // flags: auth type=1
+	copy(v1[4:36], clientPublic[:])
+	copy(v1[36:68], c.pairKeys.Ed25519Public)
+
+	log.Printf("[RAW-PV] V1: sending 68 bytes (X25519 pub + Ed25519 pub)")
+	log.Printf("[RAW-PV] V1 hex: %02x", v1)
+	v2, err := c.rawRequest("POST", "/pair-verify", "application/octet-stream", v1)
+	if err != nil {
+		return fmt.Errorf("V1: %w", err)
+	}
+	log.Printf("[RAW-PV] V2: received %d bytes", len(v2))
+
+	if len(v2) != 96 {
+		return fmt.Errorf("V2: expected 96 bytes, got %d", len(v2))
+	}
+
+	// Extract server's X25519 public key (first 32 bytes)
+	var serverPublic [32]byte
+	copy(serverPublic[:], v2[:32])
+	encryptedServerSig := v2[32:96]
+
+	// Compute X25519 shared secret
+	shared, err := curve25519.X25519(clientPrivate[:], serverPublic[:])
+	if err != nil {
+		return fmt.Errorf("x25519: %w", err)
+	}
+
+	// Derive AES-128-CTR key and IV from shared secret using SHA-512
+	aesKey := sha512DeriveKey("Pair-Verify-AES-Key", shared)
+	aesIV := sha512DeriveKey("Pair-Verify-AES-IV", shared)
+
+	// Decrypt server's signature (at AES-CTR offset 0)
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return fmt.Errorf("aes cipher: %w", err)
+	}
+	serverSig := make([]byte, 64)
+	cipher.NewCTR(block, aesIV).XORKeyStream(serverSig, encryptedServerSig)
+
+	// Verify server's Ed25519 signature over (server_X25519 || client_X25519)
+	serverSigMsg := make([]byte, 64)
+	copy(serverSigMsg[:32], serverPublic[:])
+	copy(serverSigMsg[32:], clientPublic[:])
+
+	// Use the server's Ed25519 public key from /info
+	if c.info == nil || len(c.info.PK) < 32 {
+		return fmt.Errorf("server Ed25519 public key not available (call GetInfo first)")
+	}
+	serverEd25519Pub := ed25519.PublicKey(c.info.PK[:32])
+	if !ed25519.Verify(serverEd25519Pub, serverSigMsg, serverSig) {
+		return fmt.Errorf("server signature verification failed")
+	}
+	log.Printf("[RAW-PV] server signature verified OK")
+
+	// Sign our proof: Ed25519_sign(client_X25519 || server_X25519)
+	clientSigMsg := make([]byte, 64)
+	copy(clientSigMsg[:32], clientPublic[:])
+	copy(clientSigMsg[32:], serverPublic[:])
+	clientSig := ed25519.Sign(c.pairKeys.Ed25519Private, clientSigMsg)
+
+	// Encrypt client signature at AES-CTR offset 64 (skip first 64 bytes)
+	block2, _ := aes.NewCipher(aesKey)
+	ctr := cipher.NewCTR(block2, aesIV)
+	skip := make([]byte, 64)
+	ctr.XORKeyStream(skip, skip) // advance CTR by 64 bytes
+	encryptedClientSig := make([]byte, 64)
+	ctr.XORKeyStream(encryptedClientSig, clientSig)
+
+	// V3: flags(4) + encrypted_client_sig(64) = 68 bytes
+	v3 := make([]byte, 68)
+	// v3[0:4] = 0x00000000 (already zero)
+	copy(v3[4:68], encryptedClientSig)
+
+	log.Printf("[RAW-PV] V3: sending encrypted proof (68 bytes)")
+	v4, err := c.rawRequest("POST", "/pair-verify", "application/octet-stream", v3)
+	if err != nil {
+		return fmt.Errorf("V3: %w", err)
+	}
+
+	if len(v4) != 0 {
+		log.Printf("[RAW-PV] V4: unexpected %d bytes in response", len(v4))
+	}
+	log.Printf("[RAW-PV] pair-verify complete (connection stays PLAINTEXT)")
+
+	// Store shared secret for potential stream key derivation,
+	// but do NOT enable HAP encryption on the control channel
+	c.pairKeys.SharedSecret = shared
+	return nil
+}
+
+// sha512DeriveKey derives a 16-byte key: SHA-512(salt || secret)[:16]
+func sha512DeriveKey(salt string, secret []byte) []byte {
+	h := sha512.New()
+	h.Write([]byte(salt))
+	h.Write(secret)
+	return h.Sum(nil)[:16]
 }

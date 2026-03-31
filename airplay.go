@@ -62,8 +62,9 @@ type AirPlayClient struct {
 	encCipher     cipher.AEAD
 
 	// FairPlay derived key for stream encryption
-	fpKey []byte
-	fpIV  []byte
+	fpKey  []byte
+	fpIV   []byte
+	fpEkey []byte // 72-byte wrapped key for SETUP
 
 	// Stream encryption key (from FP or pair-verify)
 	streamKey []byte
@@ -95,6 +96,12 @@ func (c *AirPlayClient) Close() error {
 		return c.conn.Close()
 	}
 	return nil
+}
+
+// ClearSessionID clears the session ID so requests don't include X-Apple-Session-ID.
+// Used for the raw/legacy protocol path (raw pair-verify).
+func (c *AirPlayClient) ClearSessionID() {
+	c.sessionID = ""
 }
 
 func (c *AirPlayClient) GetInfo() (*ReceiverInfo, error) {
@@ -166,6 +173,39 @@ func (c *AirPlayClient) httpRequest(method, path, contentType string, body []byt
 		return nil, fmt.Errorf("write request: %w", err)
 	}
 	log.Printf("[HTTP] wrote %d bytes to socket, waiting for response...", len(data))
+
+	return c.readHTTPResponse()
+}
+
+// rawRequest sends a bare RTSP/1.0 request without X-Apple-Session-ID or HAP
+// encryption. Used for the raw binary pair-verify protocol.
+func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte, extraHeaders ...map[string]string) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	seq := c.cseq.Add(1)
+
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, path)
+	fmt.Fprintf(&buf, "Content-Type: %s\r\n", contentType)
+	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
+	fmt.Fprintf(&buf, "X-Apple-ProtocolVersion: 1\r\n")
+	for _, hdrs := range extraHeaders {
+		for k, v := range hdrs {
+			fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
+		}
+	}
+	fmt.Fprintf(&buf, "Content-Length: %d\r\n", len(body))
+	fmt.Fprintf(&buf, "CSeq: %d\r\n", seq)
+	buf.WriteString("\r\n")
+	buf.Write(body)
+
+	data := buf.Bytes()
+	log.Printf("[RAW] -> %s %s (body=%d bytes, cseq=%d)", method, path, len(body), seq)
+
+	if _, err := c.conn.Write(data); err != nil {
+		return nil, fmt.Errorf("write request: %w", err)
+	}
 
 	return c.readHTTPResponse()
 }
@@ -469,6 +509,7 @@ type StreamConfig struct {
 	Height    int
 	FPS       int
 	NoEncrypt bool // Disable encryption for debugging
+	DirectKey bool // Use shk/shiv directly without SHA-512 derivation
 }
 
 // generateStreamKey creates a random AES-128 key for stream encryption.
