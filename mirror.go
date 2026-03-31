@@ -282,16 +282,12 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		log.Printf("[SETUP] shiv (raw IV):    %02x", encIV)
 		log.Printf("[SETUP] cipher key:       %02x", cipherKey)
 		log.Printf("[SETUP] cipher IV:        %02x", cipherIV)
-		sc, err := newStreamCipher(cipherKey, cipherIV)
+		mc, err := newMirrorCipher(cipherKey, cipherIV)
 		if err != nil {
 			dataConn.Close()
 			return nil, fmt.Errorf("stream cipher: %w", err)
 		}
-		session.streamCipher = func(data []byte) []byte {
-			out := make([]byte, len(data))
-			sc.XORKeyStream(out, data)
-			return out
-		}
+		session.streamCipher = mc.EncryptFrame
 	} else {
 		log.Printf("[SETUP] no video cipher — frames will be sent unencrypted")
 	}
@@ -865,9 +861,16 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
 	}
 
 	// Send immediate first feedback — iPhone does this within ~1s of streaming
-	_, _, err := s.client.rtspRequest("POST", "/feedback", "", nil, nil)
+	body, _, err := s.client.rtspRequest("POST", "/feedback", "", nil, nil)
 	if err != nil {
 		log.Printf("[FEEDBACK] initial error: %v", err)
+	} else if len(body) > 0 {
+		var fbResp map[string]interface{}
+		if _, perr := plist.Unmarshal(body, &fbResp); perr == nil {
+			log.Printf("[FEEDBACK] response: %+v", fbResp)
+		} else {
+			log.Printf("[FEEDBACK] response (%d bytes): %02x", len(body), body)
+		}
 	}
 
 	ticker := time.NewTicker(2 * time.Second)

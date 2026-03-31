@@ -533,14 +533,23 @@ func newStreamCipher(key, iv []byte) (cipher.Stream, error) {
 	return cipher.NewCTR(block, iv), nil
 }
 
-// mirrorCipher implements the AirPlay mirroring AES-CTR encryption scheme.
-// Unlike a plain stream cipher, the Apple TV receiver calls
-// aes_ctr_start_fresh_block() at the start of each frame, which skips
-// any remaining bytes in the current 16-byte CTR block. The sender
-// must advance the keystream identically.
+// mirrorCipher implements the AirPlay mirroring AES-CTR encryption scheme
+// matching the receiver's mirror_buffer_decrypt exactly.
+//
+// The receiver (mirror_buffer.c) processes each frame as follows:
+//  1. XOR the first nextDecryptCount bytes using cached keystream (og buffer)
+//     left over from the previous frame's trailing partial block.
+//  2. Call aes_ctr_start_fresh_block — advance CTR to next 16-byte boundary.
+//  3. Decrypt floor((len - nextDecryptCount) / 16) * 16 bytes (full blocks).
+//  4. If trailing partial block: pad to 16, decrypt full block, use needed
+//     bytes, cache remaining keystream in og for step 1 of next frame.
+//
+// The sender must produce ciphertext that decrypts correctly under this scheme.
 type mirrorCipher struct {
-	stream      cipher.Stream
-	blockOffset int // bytes used in the current 16-byte CTR block
+	stream         cipher.Stream
+	blockOffset    int      // bytes consumed in current 16-byte CTR block
+	og             [16]byte // cached keystream from previous frame's trailing partial block
+	nextCryptCount int      // how many og bytes are available for the next frame's prefix
 }
 
 func newMirrorCipher(key, iv []byte) (*mirrorCipher, error) {
@@ -549,24 +558,62 @@ func newMirrorCipher(key, iv []byte) (*mirrorCipher, error) {
 		return nil, err
 	}
 	return &mirrorCipher{
-		stream:      cipher.NewCTR(block, iv),
-		blockOffset: 0,
+		stream: cipher.NewCTR(block, iv),
 	}, nil
 }
 
-// EncryptFrame encrypts a single video frame payload.
-// It starts on a fresh 16-byte block boundary (matching the receiver's
-// aes_ctr_start_fresh_block call), then encrypts the entire payload.
+// EncryptFrame encrypts a single video frame payload, matching the
+// receiver's mirror_buffer_decrypt block-alignment scheme.
 func (mc *mirrorCipher) EncryptFrame(payload []byte) []byte {
-	// Skip remaining bytes in the current CTR block to align
+	inputLen := len(payload)
+	out := make([]byte, inputLen)
+	pos := 0
+
+	// Step 1: XOR prefix bytes using cached keystream from previous frame's
+	// trailing partial block (matches receiver's og buffer usage).
+	if mc.nextCryptCount > 0 {
+		n := mc.nextCryptCount
+		if n > inputLen {
+			n = inputLen
+		}
+		ogStart := 16 - mc.nextCryptCount
+		for i := 0; i < n; i++ {
+			out[i] = payload[i] ^ mc.og[ogStart+i]
+		}
+		pos = n
+	}
+
+	// Step 2: Advance CTR to next 16-byte boundary (aes_ctr_start_fresh_block).
 	if mc.blockOffset > 0 {
 		waste := make([]byte, 16-mc.blockOffset)
 		mc.stream.XORKeyStream(waste, waste)
 		mc.blockOffset = 0
 	}
 
-	out := make([]byte, len(payload))
-	mc.stream.XORKeyStream(out, payload)
-	mc.blockOffset = len(payload) % 16
+	remaining := inputLen - pos
+
+	// Step 3: Encrypt full 16-byte blocks.
+	fullBlocks := (remaining / 16) * 16
+	if fullBlocks > 0 {
+		mc.stream.XORKeyStream(out[pos:pos+fullBlocks], payload[pos:pos+fullBlocks])
+		mc.blockOffset = 0 // still aligned after full blocks
+		pos += fullBlocks
+	}
+
+	// Step 4: Handle trailing partial block.
+	restLen := remaining % 16
+	mc.nextCryptCount = 0
+	if restLen > 0 {
+		// Pad input to 16 bytes, encrypt full block, use first restLen bytes.
+		var padded [16]byte
+		copy(padded[:restLen], payload[pos:pos+restLen])
+		mc.stream.XORKeyStream(padded[:], padded[:])
+		copy(out[pos:], padded[:restLen])
+		// Cache the full decrypted block for next frame's step 1.
+		mc.og = padded
+		mc.nextCryptCount = 16 - restLen
+		mc.blockOffset = 0 // we encrypted a full 16-byte block
+	}
+
 	return out
 }

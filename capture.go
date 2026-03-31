@@ -322,6 +322,8 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		fmt.Sprintf("bitrate=%d", 4000),
 		fmt.Sprintf("key-int-max=%d", fps),
 		"bframes=0",
+		"sliced-threads=false",
+		"threads=1",
 		"byte-stream=true",
 		"!", "video/x-h264,profile=high,stream-format=byte-stream",
 		"!", "fdsink", "fd=1",
