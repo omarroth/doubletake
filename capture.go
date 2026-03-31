@@ -24,7 +24,8 @@ type CaptureConfig struct {
 
 // ScreenCapture manages Wayland screen capture via xdg-desktop-portal + ffmpeg.
 type ScreenCapture struct {
-	cmd      *exec.Cmd
+	cmd      *exec.Cmd // primary process (ffmpeg encoder)
+	gstCmd   *exec.Cmd // GStreamer raw capture for Wayland (nil for X11)
 	stdout   io.ReadCloser
 	cancel   context.CancelFunc
 	pwNodeID uint32
@@ -32,8 +33,8 @@ type ScreenCapture struct {
 }
 
 // StartCapture detects the display server (Wayland or X11) and initiates screen
-// capture accordingly. On Wayland it uses xdg-desktop-portal + PipeWire; on X11
-// it uses GStreamer's ximagesrc.
+// capture accordingly. On Wayland it uses xdg-desktop-portal + PipeWire for raw
+// capture and ffmpeg/libx264 for encoding; on X11 it uses ffmpeg x11grab directly.
 func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		return startWaylandCapture(ctx, cfg)
@@ -45,8 +46,12 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 }
 
 func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
-	if err := gstSupportsPipeWire(); err != nil {
-		return nil, err
+	// Check dependencies
+	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
+		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
+	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH; install ffmpeg with libx264 support")
 	}
 
 	nodeID, pwFd, err := requestScreencast(ctx)
@@ -57,91 +62,152 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 
 	captureCtx, cancel := context.WithCancel(ctx)
 
-	// ExtraFiles are inherited by the child starting at fd 3 (after stdin/stdout/stderr).
-	// The PipeWire remote fd will be fd 3 in gst-launch-1.0.
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+
+	// Step 1: GStreamer captures raw I420 frames from the PipeWire portal.
+	// We only use GStreamer for capture — encoding is done by ffmpeg/libx264.
 	const pwFdNum = 3
-	args := buildGStreamerArgs(cfg, nodeID, pwFdNum)
-	log.Printf("[CAPTURE] launching gst-launch-1.0 %s", strings.Join(args, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", args...)
-	cmd.ExtraFiles = []*os.File{pwFd}
+	gstArgs := []string{
+		"--quiet",
+		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
+		"!", "video/x-raw",
+		"!", "queue",
+		"!", "videoconvert",
+		"!", "videoscale",
+		"!", "videorate",
+		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", "fdsink", "fd=1", "sync=false", "async=false",
+	}
+	log.Printf("[CAPTURE] gst-launch-1.0 (raw capture) %s", strings.Join(gstArgs, " "))
+	gstCmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
+	gstCmd.ExtraFiles = []*os.File{pwFd}
 
-	stdout, err := cmd.StdoutPipe()
+	// Step 2: FFmpeg encodes raw I420 → H.264 High profile Annex-B byte stream
+	ffmpegArgs := buildFFmpegEncodeArgs(cfg, "pipe:0")
+	log.Printf("[CAPTURE] ffmpeg (encode) %s", strings.Join(ffmpegArgs, " "))
+	ffmpegCmd := exec.CommandContext(captureCtx, "ffmpeg", ffmpegArgs...)
+
+	// Create OS pipe: GStreamer raw stdout → FFmpeg stdin
+	pipeR, pipeW, err := os.Pipe()
 	if err != nil {
 		cancel()
 		pwFd.Close()
-		return nil, fmt.Errorf("gst-launch stdout pipe: %w", err)
+		return nil, fmt.Errorf("create pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	gstCmd.Stdout = pipeW
+	ffmpegCmd.Stdin = pipeR
+
+	ffmpegStdout, err := ffmpegCmd.StdoutPipe()
 	if err != nil {
 		cancel()
 		pwFd.Close()
-		return nil, fmt.Errorf("gst-launch stderr pipe: %w", err)
+		pipeR.Close()
+		pipeW.Close()
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	gstStderr, _ := gstCmd.StderrPipe()
+	ffmpegStderr, _ := ffmpegCmd.StderrPipe()
+
+	// Start GStreamer first so the pipe write-end is ready
+	if err := gstCmd.Start(); err != nil {
 		cancel()
 		pwFd.Close()
+		pipeR.Close()
+		pipeW.Close()
 		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
-	// Child inherited the fd; close the parent's copy.
-	pwFd.Close()
+	pwFd.Close()  // child inherited it
+	pipeW.Close() // parent closes write end
 
-	go scanCaptureStderr(stderr)
+	if err := ffmpegCmd.Start(); err != nil {
+		gstCmd.Process.Kill()
+		gstCmd.Wait()
+		cancel()
+		pipeR.Close()
+		return nil, fmt.Errorf("start ffmpeg: %w", err)
+	}
+	pipeR.Close() // parent closes read end
+
+	go logStderr("GST", gstStderr)
+	go logStderr("FFMPEG", ffmpegStderr)
+
 	waitCh := make(chan error, 1)
 	go func() {
-		waitCh <- cmd.Wait()
+		err := ffmpegCmd.Wait()
+		gstCmd.Process.Kill()
+		gstCmd.Wait()
+		waitCh <- err
 	}()
 
 	return &ScreenCapture{
-		cmd:      cmd,
-		stdout:   stdout,
+		cmd:      ffmpegCmd,
+		gstCmd:   gstCmd,
+		stdout:   ffmpegStdout,
 		cancel:   cancel,
 		pwNodeID: nodeID,
 		waitCh:   waitCh,
 	}, nil
 }
 
-func gstSupportsPipeWire() error {
-	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
-		return fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire (e.g. gstreamer1.0-pipewire or pipewire-gst)")
-	}
-	if err := exec.Command("gst-inspect-1.0", "openh264enc").Run(); err != nil {
-		return fmt.Errorf("GStreamer 'openh264enc' encoder not found; install gst-openh264 (e.g. gstreamer1.0-plugins-bad or gst-plugins-bad)")
-	}
-	return nil
-}
-
 func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
-	if err := exec.Command("gst-inspect-1.0", "ximagesrc").Run(); err != nil {
-		return nil, fmt.Errorf("GStreamer 'ximagesrc' plugin not found; install gst-plugins-good (e.g. gstreamer1.0-plugins-good)")
-	}
-	if err := exec.Command("gst-inspect-1.0", "openh264enc").Run(); err != nil {
-		return nil, fmt.Errorf("GStreamer 'openh264enc' encoder not found; install gst-openh264 (e.g. gstreamer1.0-plugins-bad or gst-plugins-bad)")
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return nil, fmt.Errorf("ffmpeg not found in PATH; install ffmpeg with libx264 support")
 	}
 
 	captureCtx, cancel := context.WithCancel(ctx)
 
-	args := buildX11GStreamerArgs(cfg)
-	log.Printf("[CAPTURE] launching gst-launch-1.0 %s", strings.Join(args, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", args...)
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+
+	display := os.Getenv("DISPLAY")
+	ffmpegArgs := []string{
+		"-nostdin",
+		"-f", "x11grab",
+		"-framerate", fmt.Sprintf("%d", fps),
+		"-video_size", fmt.Sprintf("%dx%d", cfg.Width, cfg.Height),
+		"-i", display,
+		"-pix_fmt", "yuv420p",
+		"-c:v", "libx264",
+		"-profile:v", "high",
+		"-level:v", "4.0",
+		"-tune", "zerolatency",
+		"-preset", "ultrafast",
+		"-g", fmt.Sprintf("%d", fps),
+		"-keyint_min", fmt.Sprintf("%d", fps),
+		"-bf", "0",
+		"-b:v", "4000k",
+		"-maxrate", "4000k",
+		"-bufsize", "8000k",
+		"-f", "h264",
+		"pipe:1",
+	}
+
+	log.Printf("[CAPTURE] launching ffmpeg (x11) %s", strings.Join(ffmpegArgs, " "))
+	cmd := exec.CommandContext(captureCtx, "ffmpeg", ffmpegArgs...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gst-launch stdout pipe: %w", err)
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gst-launch stderr pipe: %w", err)
+		return nil, fmt.Errorf("ffmpeg stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("start gst-launch: %w", err)
+		return nil, fmt.Errorf("start ffmpeg: %w", err)
 	}
 
-	go scanCaptureStderr(stderr)
+	go logStderr("FFMPEG", stderr)
 	waitCh := make(chan error, 1)
 	go func() {
 		waitCh <- cmd.Wait()
@@ -175,6 +241,9 @@ func (sc *ScreenCapture) Stop() {
 	if sc.cmd.Process != nil {
 		_ = sc.cmd.Process.Signal(os.Interrupt)
 	}
+	if sc.gstCmd != nil && sc.gstCmd.Process != nil {
+		_ = sc.gstCmd.Process.Signal(os.Interrupt)
+	}
 	done := make(chan struct{})
 	go func() {
 		if sc.waitCh != nil {
@@ -191,57 +260,47 @@ func (sc *ScreenCapture) Stop() {
 		if sc.cmd.Process != nil {
 			_ = sc.cmd.Process.Kill()
 		}
+		if sc.gstCmd != nil && sc.gstCmd.Process != nil {
+			_ = sc.gstCmd.Process.Kill()
+		}
 		<-done
 	}
 }
 
-// buildGStreamerArgs constructs the gst-launch-1.0 arguments for encoding the PipeWire stream to H.264 Annex-B.
-// pwFdNum is the file descriptor number (in the child process) for the portal's PipeWire remote.
-func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32, pwFdNum int) []string {
+// buildFFmpegEncodeArgs constructs ffmpeg arguments for encoding raw I420 video
+// (or from another input) to H.264 High profile Annex-B byte stream.
+func buildFFmpegEncodeArgs(cfg CaptureConfig, input string) []string {
 	fps := cfg.FPS
 	if fps <= 0 {
 		fps = 30
 	}
 	return []string{
-		"--quiet",
-		// fd= connects to the portal's restricted PipeWire remote (from OpenPipeWireRemote).
-		// Without fd=, pipewiresrc connects to the global instance which cannot negotiate the
-		// portal node format and returns EINVAL (-22).
-		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
-		"!", "queue",
-		"!", "videoconvert",
-		"!", "videoscale",
-		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
-		"!", "openh264enc", "usage-type=screen", "rate-control=bitrate", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
-		"!", "h264parse", "config-interval=-1",
-		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
-		"!", "fdsink", "fd=1", "sync=false", "async=false",
+		"-nostdin",
+		"-f", "rawvideo",
+		"-pixel_format", "yuv420p",
+		"-video_size", fmt.Sprintf("%dx%d", cfg.Width, cfg.Height),
+		"-framerate", fmt.Sprintf("%d", fps),
+		"-i", input,
+		"-c:v", "libx264",
+		"-profile:v", "high",
+		"-level:v", "4.0",
+		"-tune", "zerolatency",
+		"-preset", "ultrafast",
+		"-g", fmt.Sprintf("%d", fps),
+		"-keyint_min", fmt.Sprintf("%d", fps),
+		"-bf", "0",
+		"-b:v", "4000k",
+		"-maxrate", "4000k",
+		"-bufsize", "8000k",
+		"-f", "h264",
+		"pipe:1",
 	}
 }
 
-// buildX11GStreamerArgs constructs gst-launch-1.0 arguments for X11 screen capture.
-func buildX11GStreamerArgs(cfg CaptureConfig) []string {
-	fps := cfg.FPS
-	if fps <= 0 {
-		fps = 30
-	}
-	return []string{
-		"--quiet",
-		"ximagesrc", "use-damage=false", fmt.Sprintf("blocksize=%d", cfg.Width*cfg.Height*4),
-		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
-		"!", "queue",
-		"!", "videoconvert",
-		"!", "videoscale",
-		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
-		"!", "openh264enc", "usage-type=screen", "rate-control=bitrate", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
-		"!", "h264parse", "config-interval=-1",
-		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
-		"!", "fdsink", "fd=1", "sync=false", "async=false",
-	}
-}
-
-// StartTestCapture creates a synthetic H.264 video stream using FFmpeg's libx264 encoder
-// with High profile to match what Apple TV expects for screen mirroring.
+// StartTestCapture creates a synthetic H.264 video stream using GStreamer's
+// videotestsrc + x264enc, producing High profile Annex-B byte stream output.
+// This replicates the same GStreamer pipeline ecosystem that UxPlay uses on the
+// receiver side, avoiding any ffmpeg/libx264 encoding differences.
 func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
@@ -250,47 +309,44 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		fps = 30
 	}
 
-	// Use ffmpeg with libx264 High profile, Annex-B byte stream output
-	// Note: -tune zerolatency forces Constrained Baseline, so we skip it and use
-	// -preset veryfast with explicit CABAC/8x8dct to ensure actual High profile output.
-	ffmpegArgs := []string{
-		"-f", "lavfi",
-		"-i", fmt.Sprintf("testsrc=duration=10:size=%dx%d:rate=%d", cfg.Width, cfg.Height, fps),
-		"-pix_fmt", "yuv420p",
-		"-c:v", "libx264",
-		"-profile:v", "high",
-		"-level", "4.0",
-		"-preset", "veryfast",
-		"-g", fmt.Sprintf("%d", fps), // keyframe interval
-		"-bf", "0", // no B-frames
-		"-b:v", "4000k",
-		"-maxrate", "4000k",
-		"-bufsize", "8000k",
-		"-x264-params", "cabac=1:8x8dct=1:bframes=0",
-		"-f", "h264",
-		"-",
+	// GStreamer pipeline: videotestsrc → timeoverlay → x264enc High profile → Annex-B byte stream → stdout
+	// pattern=18 = ball (bouncing ball with motion); timeoverlay adds a frame counter
+	gstArgs := []string{
+		"--quiet",
+		"videotestsrc", "pattern=18", fmt.Sprintf("num-buffers=%d", 10*fps),
+		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", "timeoverlay",
+		"!", "videoconvert",
+		"!", "x264enc",
+		"tune=zerolatency",
+		fmt.Sprintf("bitrate=%d", 4000),
+		fmt.Sprintf("key-int-max=%d", fps),
+		"bframes=0",
+		"byte-stream=true",
+		"!", "video/x-h264,profile=high,stream-format=byte-stream",
+		"!", "fdsink", "fd=1",
 	}
 
-	log.Printf("[CAPTURE] launching ffmpeg (test mode) %s", strings.Join(ffmpegArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "ffmpeg", ffmpegArgs...)
+	log.Printf("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(gstArgs, " "))
+	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("ffmpeg stderr pipe: %w", err)
+		return nil, fmt.Errorf("gst stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("start ffmpeg: %w", err)
+		return nil, fmt.Errorf("start gst-launch-1.0: %w", err)
 	}
 
-	go scanCaptureStderr(stderr)
+	go logStderr("GST", stderr)
 	waitCh := make(chan error, 1)
 	go func() {
 		waitCh <- cmd.Wait()
@@ -304,15 +360,18 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 	}, nil
 }
 
-func scanCaptureStderr(r io.Reader) {
+func logStderr(prefix string, r io.Reader) {
+	if r == nil {
+		return
+	}
 	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
-		log.Printf("[GST] %s", scanner.Text())
+		log.Printf("[%s] %s", prefix, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		log.Printf("[GST] stderr read error: %v", err)
+		log.Printf("[%s] stderr read error: %v", prefix, err)
 	}
 }
 
