@@ -96,15 +96,52 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 // performTransientSetupAndVerify does transient (PIN-less) pair-setup + pair-verify.
 func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) error {
 	log.Printf("[PAIR] starting transient pair-setup")
-	if err := c.pairSetupTransient(ctx); err != nil {
-		return fmt.Errorf("pair-setup: %w", err)
+
+	// Try raw binary pair-setup first (UxPlay / legacy AirPlay protocol).
+	// Send 32-byte Ed25519 public key, expect 32-byte server public key back.
+	log.Printf("[PAIR] trying raw binary pair-setup (UxPlay-compatible)")
+	serverPub, err := c.rawPairSetup(ctx)
+	if err != nil {
+		// Fall back to TLV8/HomeKit-style pair-setup (Apple TV)
+		log.Printf("[PAIR] raw pair-setup failed (%v), trying TLV8 pair-setup", err)
+		if err := c.pairSetupTransient(ctx); err != nil {
+			return fmt.Errorf("pair-setup: %w", err)
+		}
+		log.Printf("[PAIR] transient pair-setup complete, starting HAP pair-verify")
+		if err := c.pairVerify(ctx); err != nil {
+			return fmt.Errorf("pair-verify: %w", err)
+		}
+		log.Printf("[PAIR] pair-verify complete, channel is now encrypted")
+		return nil
 	}
-	log.Printf("[PAIR] transient pair-setup complete, starting pair-verify")
-	if err := c.pairVerify(ctx); err != nil {
-		return fmt.Errorf("pair-verify: %w", err)
+
+	// Raw pair-setup succeeded — store server's Ed25519 public key and use raw pair-verify
+	log.Printf("[PAIR] raw pair-setup OK, server Ed25519 pub: %02x", serverPub[:8])
+	if c.info == nil {
+		c.info = &ReceiverInfo{}
 	}
-	log.Printf("[PAIR] pair-verify complete, channel is now encrypted")
+	c.info.PK = serverPub
+
+	log.Printf("[PAIR] starting raw pair-verify (no HAP encryption)")
+	if err := c.rawPairVerify(ctx); err != nil {
+		return fmt.Errorf("raw pair-verify: %w", err)
+	}
+	log.Printf("[PAIR] raw pair-verify complete (connection stays plaintext)")
 	return nil
+}
+
+// rawPairSetup sends a 32-byte Ed25519 public key to /pair-setup and expects
+// a 32-byte server Ed25519 public key back. This is the UxPlay / legacy AirPlay
+// transient pair-setup protocol.
+func (c *AirPlayClient) rawPairSetup(ctx context.Context) ([]byte, error) {
+	resp, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", c.pairKeys.Ed25519Public)
+	if err != nil {
+		return nil, fmt.Errorf("pair-setup: %w", err)
+	}
+	if len(resp) != 32 {
+		return nil, fmt.Errorf("pair-setup: expected 32 bytes, got %d", len(resp))
+	}
+	return resp, nil
 }
 
 // pairSetupTransient performs a transient (ephemeral, no-PIN) pair-setup.

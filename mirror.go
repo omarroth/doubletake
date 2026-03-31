@@ -119,14 +119,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		},
 	}
 
-	// Encryption keys go inside the stream descriptor
-	if c.fpEkey != nil {
-		// FairPlay mode: send wrapped ekey + eiv + et=32
-		streamDesc["ekey"] = c.fpEkey
-		streamDesc["eiv"] = encIV
-		streamDesc["et"] = int64(32)
-		log.Printf("[SETUP] FairPlay mode: ekey=%d bytes, eiv=%d bytes, et=32", len(c.fpEkey), len(encIV))
-	} else if encKey != nil {
+	// Encryption keys: shk/shiv go inside the stream descriptor,
+	// but ekey/eiv go at the ROOT level of the plist (Apple TV reads them from root).
+	if encKey != nil && c.fpEkey == nil {
 		streamDesc["shk"] = encKey
 		streamDesc["shiv"] = encIV
 	}
@@ -143,6 +138,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		"model":                    "Linux",
 		"name":                     "Linux",
 		"streams":                  []interface{}{streamDesc},
+	}
+
+	// FairPlay ekey/eiv go at the root level (receiver reads them from req_root_node)
+	// Only send when encryption is actually enabled (not in no-encrypt mode)
+	if c.fpEkey != nil && encKey != nil {
+		setupPlist["ekey"] = c.fpEkey
+		setupPlist["eiv"] = encIV
+		log.Printf("[SETUP] FairPlay mode: ekey=%d bytes, eiv=%d bytes (at root level)", len(c.fpEkey), len(encIV))
 	}
 	log.Printf("[SETUP] combined request: %+v", setupPlist)
 
@@ -854,7 +857,9 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _, err := s.client.rtspRequest("POST", uri+"/feedback", "", nil, nil)
+			// Use bare /feedback path — UxPlay matches against exact path "/feedback",
+			// not the full RTSP URI with session UUID prefix.
+			_, _, err := s.client.rtspRequest("POST", "/feedback", "", nil, nil)
 			if err != nil {
 				log.Printf("[FEEDBACK] error: %v", err)
 			}

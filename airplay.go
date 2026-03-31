@@ -133,8 +133,10 @@ func (c *AirPlayClient) SetupMirror(ctx context.Context, cfg StreamConfig) (*Mir
 	return c.setupMirrorSession(ctx, cfg)
 }
 
-// httpRequest sends an HTTP/1.1 request over the AirPlay connection and returns the response body.
-// Optional extraHeaders are merged into the request.
+// httpRequest sends an RTSP/1.0 request over the AirPlay connection and returns the response body.
+// Used for /info, /pair-setup, /pair-verify, /fp-setup etc. (RAOP connection type).
+// Does NOT send X-Apple-Session-ID (UxPlay classifies CSeq connections as RAOP and
+// crashes with an assert if both CSeq and X-Apple-Session-ID are present).
 func (c *AirPlayClient) httpRequest(method, path, contentType string, body []byte, extraHeaders ...map[string]string) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -142,12 +144,9 @@ func (c *AirPlayClient) httpRequest(method, path, contentType string, body []byt
 	seq := c.cseq.Add(1)
 
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "%s %s HTTP/1.1\r\n", method, path)
+	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, path)
 	fmt.Fprintf(&buf, "CSeq: %d\r\n", seq)
 	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
-	if c.sessionID != "" {
-		fmt.Fprintf(&buf, "X-Apple-Session-ID: %s\r\n", c.sessionID)
-	}
 	for _, hdrs := range extraHeaders {
 		for k, v := range hdrs {
 			fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
@@ -221,9 +220,9 @@ func (c *AirPlayClient) rtspRequest(method, uri, contentType string, body []byte
 	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, uri)
 	fmt.Fprintf(&buf, "CSeq: %d\r\n", seq)
 	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
-	if c.sessionID != "" {
-		fmt.Fprintf(&buf, "X-Apple-Session-ID: %s\r\n", c.sessionID)
-	}
+	// NOTE: Do NOT send X-Apple-Session-ID here. UxPlay classifies CSeq connections
+	// as RAOP type and crashes (strcmp against NULL) if session ID is present.
+	// Apple TV doesn't need it either since the session is identified by TCP connection.
 	for k, v := range extraHeaders {
 		fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
 	}

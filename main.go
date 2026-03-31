@@ -106,9 +106,18 @@ func main() {
 			Ed25519Private: priv,
 		}
 		if err := client.pairVerify(ctx); err != nil {
-			log.Printf("pair-verify with saved creds failed: %v", err)
-			log.Printf("try re-pairing with: --pair --pin XXXX")
-			os.Exit(1)
+			log.Printf("pair-verify with saved creds failed: %v, falling back to transient pairing", err)
+			// Reconnect — the failed pair-verify may have closed the connection
+			client.Close()
+			if err := client.Connect(ctx); err != nil {
+				log.Fatalf("reconnect failed: %v", err)
+			}
+			if _, err := client.GetInfo(); err != nil {
+				log.Fatalf("get info after reconnect failed: %v", err)
+			}
+			if err := client.Pair(ctx, ""); err != nil {
+				log.Fatalf("transient pairing fallback failed: %v", err)
+			}
 		}
 	} else {
 		// Transient pairing (no saved creds, no PIN)
