@@ -37,7 +37,7 @@ type fpMessageCandidate struct {
 
 func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	// Use the Wine + AirParrotNative.dll harness for real FairPlay SAP
-	m1, m3, err := c.fairPlayViaHarness(ctx)
+	m1, m3, phase2Resp, err := c.fairPlayViaHarness(ctx)
 	if err != nil {
 		return err
 	}
@@ -62,6 +62,13 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 		log.Printf("[FP] playfair round-trip OK: encrypt→decrypt matches plainKey")
 	}
 
+	// Use FP phase 2 response as session key (Apple TV derives keys from this, not from ekey)
+	// The first 16 bytes of the phase 2 response are used as the audio AES key
+	var sessionKey [16]byte
+	copy(sessionKey[:], phase2Resp[:16])
+	log.Printf("[FP] phase2Resp session key: %02x", sessionKey)
+	log.Printf("[FP] playfair plainKey:      %02x", plainKey)
+
 	// Generate a random 16-byte IV
 	var eiv [16]byte
 	if _, err := rand.Read(eiv[:]); err != nil {
@@ -69,6 +76,10 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	}
 
 	// Store the FairPlay results
+	// Try BOTH approaches:
+	// A) plainKey (random, wrapped in ekey) - receiver uses fairplay_decrypt(m3, ekey) to get plainKey
+	// B) sessionKey (from phase2Resp[:16]) - receiver uses FP internal state
+	// For now, try A with combined hash since ekey is at root level
 	c.fpKey = plainKey[:]
 	c.fpIV = eiv[:]
 	c.fpEkey = ekey[:]
@@ -79,7 +90,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 
 // fairPlayViaHarness runs the Wine-based FairPlay harness to perform the
 // real FP_Init / FP_Process handshake with the Apple TV.
-func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [164]byte, err error) {
+func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [164]byte, phase2Resp []byte, err error) {
 	// Find the harness relative to the executable
 	_, thisFile, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(thisFile)
@@ -92,15 +103,15 @@ func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, m3, fmt.Errorf("harness stdin pipe: %w", err)
+		return nil, m3, nil, fmt.Errorf("harness stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, m3, fmt.Errorf("harness stdout pipe: %w", err)
+		return nil, m3, nil, fmt.Errorf("harness stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, m3, fmt.Errorf("harness start: %w", err)
+		return nil, m3, nil, fmt.Errorf("harness start: %w", err)
 	}
 	defer cmd.Wait()
 
@@ -111,7 +122,7 @@ func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "ERROR=") {
-			return nil, m3, fmt.Errorf("harness phase 1 error: %s", line[6:])
+			return nil, m3, nil, fmt.Errorf("harness phase 1 error: %s", line[6:])
 		}
 		if strings.HasPrefix(line, "PHASE1=") {
 			m1Hex = line[7:]
@@ -121,11 +132,11 @@ func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [
 		log.Printf("[FP] harness debug: %s", line)
 	}
 	if m1Hex == "" {
-		return nil, m3, fmt.Errorf("harness: no PHASE1 output")
+		return nil, m3, nil, fmt.Errorf("harness: no PHASE1 output")
 	}
 	m1, err = hex.DecodeString(m1Hex)
 	if err != nil {
-		return nil, m3, fmt.Errorf("decode phase 1 hex: %w", err)
+		return nil, m3, nil, fmt.Errorf("decode phase 1 hex: %w", err)
 	}
 	log.Printf("[FP] phase 1: harness generated %d bytes", len(m1))
 
@@ -134,13 +145,13 @@ func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [
 		map[string]string{"X-Apple-ET": "32"})
 	if err != nil {
 		stdin.Close()
-		return nil, m3, fmt.Errorf("fp-setup phase 1: %w", err)
+		return nil, m3, nil, fmt.Errorf("fp-setup phase 1: %w", err)
 	}
 	log.Printf("[FP] phase 1: server response %d bytes", len(phase1Resp))
 
 	if len(phase1Resp) < 12 || phase1Resp[6] != 2 {
 		stdin.Close()
-		return nil, m3, fmt.Errorf("fp-setup phase 1: bad response (len=%d)", len(phase1Resp))
+		return nil, m3, nil, fmt.Errorf("fp-setup phase 1: bad response (len=%d)", len(phase1Resp))
 	}
 
 	// Feed m2 to harness
@@ -154,10 +165,10 @@ func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "PHASE2_ERR=") {
-			return nil, m3, fmt.Errorf("harness phase 2 error: %s", line)
+			return nil, m3, nil, fmt.Errorf("harness phase 2 error: %s", line)
 		}
 		if strings.HasPrefix(line, "ERROR=") {
-			return nil, m3, fmt.Errorf("harness error: %s", line[6:])
+			return nil, m3, nil, fmt.Errorf("harness error: %s", line[6:])
 		}
 		if strings.HasPrefix(line, "PHASE2=") {
 			m3Hex = line[7:]
@@ -166,30 +177,31 @@ func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [
 		log.Printf("[FP] harness debug: %s", line)
 	}
 	if m3Hex == "" {
-		return nil, m3, fmt.Errorf("harness: no PHASE2 output")
+		return nil, m3, nil, fmt.Errorf("harness: no PHASE2 output")
 	}
 	m3Bytes, err := hex.DecodeString(m3Hex)
 	if err != nil {
-		return nil, m3, fmt.Errorf("decode phase 2 hex: %w", err)
+		return nil, m3, nil, fmt.Errorf("decode phase 2 hex: %w", err)
 	}
 	if len(m3Bytes) != 164 {
-		return nil, m3, fmt.Errorf("phase 2: expected 164 bytes, got %d", len(m3Bytes))
+		return nil, m3, nil, fmt.Errorf("phase 2: expected 164 bytes, got %d", len(m3Bytes))
 	}
 	copy(m3[:], m3Bytes)
 	log.Printf("[FP] phase 2: harness generated 164-byte m3")
 
 	// POST m3 to Apple TV
-	phase2Resp, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m3[:],
+	phase2Resp, err = c.httpRequest("POST", "/fp-setup", "application/octet-stream", m3[:],
 		map[string]string{"X-Apple-ET": "32"})
 	if err != nil {
-		return nil, m3, fmt.Errorf("fp-setup phase 2: %w", err)
+		return nil, m3, nil, fmt.Errorf("fp-setup phase 2: %w", err)
 	}
 	log.Printf("[FP] phase 2: server response %d bytes", len(phase2Resp))
 
 	if len(phase2Resp) >= 32 && phase2Resp[6] == 4 {
 		log.Printf("[FP] phase 2: server accepted! response type=%d", phase2Resp[6])
+		log.Printf("[FP] phase 2: response hex=%02x", phase2Resp)
 	} else {
-		return nil, m3, fmt.Errorf("fp-setup phase 2: rejected (len=%d, type=%d)",
+		return nil, m3, nil, fmt.Errorf("fp-setup phase 2: rejected (len=%d, type=%d)",
 			len(phase2Resp), func() byte {
 				if len(phase2Resp) > 6 {
 					return phase2Resp[6]
@@ -198,7 +210,7 @@ func (c *AirPlayClient) fairPlayViaHarness(ctx context.Context) (m1 []byte, m3 [
 			}())
 	}
 
-	return m1, m3, nil
+	return m1, m3, phase2Resp, nil
 }
 
 // deriveStreamKeys derives AES stream encryption keys from the pair-verify shared secret.

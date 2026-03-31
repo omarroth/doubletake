@@ -31,9 +31,20 @@ type ScreenCapture struct {
 	waitCh   chan error
 }
 
-// StartCapture initiates Wayland screen capture using the xdg-desktop-portal
-// D-Bus API to get a PipeWire stream, then pipes it through GStreamer for H.264 encoding.
+// StartCapture detects the display server (Wayland or X11) and initiates screen
+// capture accordingly. On Wayland it uses xdg-desktop-portal + PipeWire; on X11
+// it uses GStreamer's ximagesrc.
 func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
+	if os.Getenv("WAYLAND_DISPLAY") != "" {
+		return startWaylandCapture(ctx, cfg)
+	}
+	if os.Getenv("DISPLAY") != "" {
+		return startX11Capture(ctx, cfg)
+	}
+	return nil, fmt.Errorf("no display server detected (neither WAYLAND_DISPLAY nor DISPLAY is set)")
+}
+
+func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	if err := gstSupportsPipeWire(); err != nil {
 		return nil, err
 	}
