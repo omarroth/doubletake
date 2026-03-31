@@ -111,6 +111,50 @@ func gstSupportsPipeWire() error {
 	return nil
 }
 
+func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
+	if err := exec.Command("gst-inspect-1.0", "ximagesrc").Run(); err != nil {
+		return nil, fmt.Errorf("GStreamer 'ximagesrc' plugin not found; install gst-plugins-good (e.g. gstreamer1.0-plugins-good)")
+	}
+	if err := exec.Command("gst-inspect-1.0", "openh264enc").Run(); err != nil {
+		return nil, fmt.Errorf("GStreamer 'openh264enc' encoder not found; install gst-openh264 (e.g. gstreamer1.0-plugins-bad or gst-plugins-bad)")
+	}
+
+	captureCtx, cancel := context.WithCancel(ctx)
+
+	args := buildX11GStreamerArgs(cfg)
+	log.Printf("[CAPTURE] launching gst-launch-1.0 %s", strings.Join(args, " "))
+	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", args...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("gst-launch stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("gst-launch stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("start gst-launch: %w", err)
+	}
+
+	go scanCaptureStderr(stderr)
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	return &ScreenCapture{
+		cmd:    cmd,
+		stdout: stdout,
+		cancel: cancel,
+		waitCh: waitCh,
+	}, nil
+}
+
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 	select {
 	case err := <-sc.waitCh:
@@ -164,6 +208,27 @@ func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32, pwFdNum int) []string 
 		// Without fd=, pipewiresrc connects to the global instance which cannot negotiate the
 		// portal node format and returns EINVAL (-22).
 		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
+		"!", "queue",
+		"!", "videoconvert",
+		"!", "videoscale",
+		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", "openh264enc", "usage-type=screen", "rate-control=bitrate", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
+		"!", "h264parse", "config-interval=-1",
+		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
+		"!", "fdsink", "fd=1", "sync=false", "async=false",
+	}
+}
+
+// buildX11GStreamerArgs constructs gst-launch-1.0 arguments for X11 screen capture.
+func buildX11GStreamerArgs(cfg CaptureConfig) []string {
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+	return []string{
+		"--quiet",
+		"ximagesrc", "use-damage=false", fmt.Sprintf("blocksize=%d", cfg.Width*cfg.Height*4),
+		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
 		"!", "queue",
 		"!", "videoconvert",
 		"!", "videoscale",
