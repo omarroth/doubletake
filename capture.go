@@ -164,8 +164,8 @@ func buildGStreamerArgs(cfg CaptureConfig, nodeID uint32, pwFdNum int) []string 
 	}
 }
 
-// StartTestCapture creates a synthetic H.264 video stream using GStreamer's videotestsrc.
-// This is useful for debugging the AirPlay mirroring protocol without relying on screen capture.
+// StartTestCapture creates a synthetic H.264 video stream using FFmpeg's libx264 encoder
+// with High profile to match what Apple TV expects for screen mirroring.
 func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
@@ -174,36 +174,44 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		fps = 30
 	}
 
-	testArgs := []string{
-		"--quiet",
-		"videotestsrc", "is-live=true", "do-timestamp=true", "num-buffers=100",
-		"!", "queue",
-		"!", "videoconvert",
-		"!", "videoscale",
-		"!", fmt.Sprintf("video/x-raw,format=I420,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
-		"!", "openh264enc", "usage-type=screen", "rate-control=bitrate", "complexity=0", fmt.Sprintf("gop-size=%d", fps), "bitrate=4000000",
-		"!", "h264parse", "config-interval=-1",
-		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
-		"!", "fdsink", "fd=1", "sync=true", "async=false",
+	// Use ffmpeg with libx264 High profile, Annex-B byte stream output
+	// Note: -tune zerolatency forces Constrained Baseline, so we skip it and use
+	// -preset veryfast with explicit CABAC/8x8dct to ensure actual High profile output.
+	ffmpegArgs := []string{
+		"-f", "lavfi",
+		"-i", fmt.Sprintf("testsrc=duration=10:size=%dx%d:rate=%d", cfg.Width, cfg.Height, fps),
+		"-pix_fmt", "yuv420p",
+		"-c:v", "libx264",
+		"-profile:v", "high",
+		"-level", "4.0",
+		"-preset", "veryfast",
+		"-g", fmt.Sprintf("%d", fps), // keyframe interval
+		"-bf", "0", // no B-frames
+		"-b:v", "4000k",
+		"-maxrate", "4000k",
+		"-bufsize", "8000k",
+		"-x264-params", "cabac=1:8x8dct=1:bframes=0",
+		"-f", "h264",
+		"-",
 	}
 
-	log.Printf("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(testArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", testArgs...)
+	log.Printf("[CAPTURE] launching ffmpeg (test mode) %s", strings.Join(ffmpegArgs, " "))
+	cmd := exec.CommandContext(captureCtx, "ffmpeg", ffmpegArgs...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gst-launch stdout pipe: %w", err)
+		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gst-launch stderr pipe: %w", err)
+		return nil, fmt.Errorf("ffmpeg stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("start gst-launch: %w", err)
+		return nil, fmt.Errorf("start ffmpeg: %w", err)
 	}
 
 	go scanCaptureStderr(stderr)

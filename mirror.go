@@ -28,8 +28,9 @@ type MirrorSession struct {
 	videoWidth    int
 	videoHeight   int
 
-	streamCipher func([]byte) []byte // AES-CTR encryption
-	frameSeq     uint32
+	streamCipher   func([]byte) []byte // AES-CTR encryption
+	frameSeq       uint32
+	firstFrameSent chan struct{} // closed after first video frame is sent
 }
 
 // setupMirrorSession negotiates the mirroring stream with the Apple TV.
@@ -90,70 +91,93 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			return
 		}
 		log.Printf("[EVENT] Apple TV connected for reverse events from %s", conn.RemoteAddr())
-		// Keep connection open; just drain it
+		// Keep connection open; log received data
 		go func() {
 			buf := make([]byte, 4096)
 			for {
-				_, err := conn.Read(buf)
+				n, err := conn.Read(buf)
 				if err != nil {
+					log.Printf("[EVENT] event channel closed: %v", err)
 					return
 				}
+				log.Printf("[EVENT] received %d bytes: %02x", n, buf[:min(n, 64)])
 			}
 		}()
 	}()
 
-	// ---- Phase 1: SETUP session (timing/event channels, no streams) ----
-	setup1 := map[string]interface{}{
+	// ---- Single combined SETUP (matching AirMyPC structure) ----
+	streamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
+	streamDesc := map[string]interface{}{
+		"type":               int64(110),
+		"streamConnectionID": streamConnectionID,
+		"timestampInfo": []interface{}{
+			map[string]interface{}{"name": "SubSu"},
+			map[string]interface{}{"name": "BePxT"},
+			map[string]interface{}{"name": "AfPxT"},
+			map[string]interface{}{"name": "BefEn"},
+			map[string]interface{}{"name": "EmEnc"},
+		},
+	}
+
+	// Encryption keys go inside the stream descriptor
+	if c.fpEkey != nil {
+		// FairPlay mode: send wrapped ekey + eiv + et=32
+		streamDesc["ekey"] = c.fpEkey
+		streamDesc["eiv"] = encIV
+		streamDesc["et"] = int64(32)
+		log.Printf("[SETUP] FairPlay mode: ekey=%d bytes, eiv=%d bytes, et=32", len(c.fpEkey), len(encIV))
+	} else if encKey != nil {
+		streamDesc["shk"] = encKey
+		streamDesc["shiv"] = encIV
+	}
+
+	setupPlist := map[string]interface{}{
 		"deviceID":                 clientDeviceID,
 		"macAddress":               clientDeviceID,
 		"sessionUUID":              sessionUUID,
-		"sourceVersion":            "935.7.1",
+		"sourceVersion":            "280.33",
 		"timingProtocol":           "NTP",
 		"timingPort":               int64(timingPort),
-		"eventPort":                int64(eventPort),
 		"isScreenMirroringSession": true,
-		"osName":                   "Linux",
-		"osBuildVersion":           "1.0.0",
+		"osBuildVersion":           "13F69",
 		"model":                    "Linux",
 		"name":                     "Linux",
+		"streams":                  []interface{}{streamDesc},
 	}
-	log.Printf("[SETUP-1] request: %+v", setup1)
+	log.Printf("[SETUP] combined request: %+v", setupPlist)
 
-	body1, err := plist.Marshal(setup1, plist.BinaryFormat)
+	setupBody, err := plist.Marshal(setupPlist, plist.BinaryFormat)
 	if err != nil {
 		eventListener.Close()
-		return nil, fmt.Errorf("marshal setup1 plist: %w", err)
+		return nil, fmt.Errorf("marshal setup plist: %w", err)
 	}
 
-	resp1Body, _, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body1, nil)
+	respBody, _, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", setupBody, nil)
 	if err != nil {
 		eventListener.Close()
-		return nil, fmt.Errorf("SETUP phase 1: %w", err)
+		return nil, fmt.Errorf("SETUP: %w", err)
 	}
 
-	var resp1 map[string]interface{}
+	var setupResp map[string]interface{}
+	if _, err := plist.Unmarshal(respBody, &setupResp); err != nil {
+		return nil, fmt.Errorf("unmarshal setup response: %w", err)
+	}
+	log.Printf("[SETUP] response: %+v", setupResp)
+
+	// Extract event port from response
 	receiverEventPort := 0
-	if len(resp1Body) > 0 {
-		if _, err := plist.Unmarshal(resp1Body, &resp1); err != nil {
-			eventListener.Close()
-			return nil, fmt.Errorf("unmarshal setup1 response: %w", err)
+	if ep, ok := setupResp["eventPort"]; ok {
+		switch v := ep.(type) {
+		case uint64:
+			receiverEventPort = int(v)
+		case int64:
+			receiverEventPort = int(v)
+		case float64:
+			receiverEventPort = int(v)
 		}
-		log.Printf("[SETUP-1] response: %+v", resp1)
-		if ep, ok := resp1["eventPort"]; ok {
-			switch v := ep.(type) {
-			case uint64:
-				receiverEventPort = int(v)
-			case int64:
-				receiverEventPort = int(v)
-			case float64:
-				receiverEventPort = int(v)
-			}
-		}
-	} else {
-		log.Printf("[SETUP-1] empty response body (OK)")
 	}
 
-	// Some receivers require an active TCP event channel before RECORD.
+	// Connect to receiver event port if available
 	var receiverEventConn net.Conn
 	if receiverEventPort > 0 {
 		eventAddr := net.JoinHostPort(c.host, strconv.Itoa(receiverEventPort))
@@ -165,43 +189,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		}
 	}
 
-	// ---- Phase 2: SETUP stream (type 110 = screen mirroring) ----
-	streamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
-	streamDesc := map[string]interface{}{
-		"type":               int64(110),
-		"streamConnectionID": streamConnectionID,
-	}
-
-	// Encryption keys go inside the stream descriptor
-	if encKey != nil {
-		streamDesc["shk"] = encKey
-		streamDesc["shiv"] = encIV
-	}
-
-	setup2 := map[string]interface{}{
-		"streams": []interface{}{streamDesc},
-	}
-	log.Printf("[SETUP-2] request: %+v", setup2)
-
-	body2, err := plist.Marshal(setup2, plist.BinaryFormat)
-	if err != nil {
-		return nil, fmt.Errorf("marshal setup2 plist: %w", err)
-	}
-
-	resp2Body, _, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body2, nil)
-	if err != nil {
-		return nil, fmt.Errorf("SETUP phase 2: %w", err)
-	}
-
-	log.Printf("[SETUP-2] response body: %d bytes", len(resp2Body))
-
-	// Parse phase 2 response to get data port
-	var setupResp map[string]interface{}
-	if _, err := plist.Unmarshal(resp2Body, &setupResp); err != nil {
-		return nil, fmt.Errorf("unmarshal setup2 response: %w", err)
-	}
-	log.Printf("[SETUP-2] response plist: %+v", setupResp)
-
+	// Extract data port from streams response
 	dataPort := 0
 	if streams, ok := setupResp["streams"].([]interface{}); ok && len(streams) > 0 {
 		if stream, ok := streams[0].(map[string]interface{}); ok {
@@ -214,18 +202,6 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 				case float64:
 					dataPort = int(v)
 				}
-			}
-		}
-	}
-
-	if dataPort == 0 {
-		// Try top-level eventPort or use default
-		if ep, ok := setupResp["eventPort"]; ok {
-			switch v := ep.(type) {
-			case uint64:
-				dataPort = int(v)
-			case int64:
-				dataPort = int(v)
 			}
 		}
 	}
@@ -259,13 +235,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	session := &MirrorSession{
-		client:        c,
-		dataConn:      dataConn,
-		eventConn:     receiverEventConn,
-		eventListener: eventListener,
-		DataPort:      dataPort,
-		videoWidth:    cfg.Width,
-		videoHeight:   cfg.Height,
+		client:         c,
+		dataConn:       dataConn,
+		eventConn:      receiverEventConn,
+		eventListener:  eventListener,
+		DataPort:       dataPort,
+		videoWidth:     cfg.Width,
+		videoHeight:    cfg.Height,
+		firstFrameSent: make(chan struct{}),
 	}
 
 	// Set up video cipher using continuous AES-CTR.
@@ -273,15 +250,34 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// leftover keystream from one frame carries into the next. No per-frame
 	// block alignment — plain cipher.NewCTR is correct.
 	if encKey != nil {
-		// Derive AES-128-CTR key/IV from shk + streamConnectionID using SHA-512.
-		// Matches UxPlay's mirror_buffer_init_aes.
-		derivedKey, derivedIV := deriveVideoKeys(encKey, streamConnectionID)
+		var cipherKey, cipherIV []byte
+		if cfg.DirectKey {
+			// Use shk/shiv directly without derivation
+			cipherKey = encKey
+			cipherIV = encIV
+			log.Printf("[SETUP] using DIRECT key mode (no SHA-512 derivation)")
+		} else {
+			// Derive AES-128-CTR key/IV from shk + streamConnectionID using SHA-512.
+			// Matches UxPlay's mirror_buffer_init_aes.
+			derivationKey := encKey
+			if c.fpEkey != nil && c.pairKeys != nil && c.pairKeys.SharedSecret != nil {
+				// FairPlay mode: combine AES key with pair-verify ECDH shared secret
+				// eaesKey = SHA-512(aesKey || ecdhShared)[:16]
+				h := sha512.New()
+				h.Write(encKey)
+				h.Write(c.pairKeys.SharedSecret)
+				derivationKey = h.Sum(nil)[:16]
+				log.Printf("[SETUP] FairPlay eaesKey (combined hash): %02x", derivationKey)
+			}
+			cipherKey, cipherIV = deriveVideoKeys(derivationKey, streamConnectionID)
+			log.Printf("[SETUP] using SHA-512 derived keys")
+		}
 		log.Printf("[SETUP] streamConnectionID: %d", streamConnectionID)
 		log.Printf("[SETUP] shk (raw key):    %02x", encKey)
 		log.Printf("[SETUP] shiv (raw IV):    %02x", encIV)
-		log.Printf("[SETUP] derived AES key:  %02x", derivedKey)
-		log.Printf("[SETUP] derived AES IV:   %02x", derivedIV)
-		sc, err := newStreamCipher(derivedKey, derivedIV)
+		log.Printf("[SETUP] cipher key:       %02x", cipherKey)
+		log.Printf("[SETUP] cipher IV:        %02x", cipherIV)
+		sc, err := newStreamCipher(cipherKey, cipherIV)
 		if err != nil {
 			dataConn.Close()
 			return nil, fmt.Errorf("stream cipher: %w", err)
@@ -311,6 +307,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Start heartbeat in background
 	go session.heartbeatLoop(ctx, uri, sessionUUID)
 	go session.dataHeartbeatLoop(ctx)
+	go session.feedbackLoop(ctx, uri)
 
 	return session, nil
 }
@@ -318,9 +315,19 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 // StreamFrames reads H.264 frames from the capture pipeline and sends them to the Apple TV.
 // Protocol (from UxPlay/raop_rtp_mirror.c):
 //   - SPS+PPS: sent as unencrypted codec frame (header[4]=0x01) in avcC format
-//   - IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x10, AVCC payload
+//   - IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
 //   - non-IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
-func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture) error {
+func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture, startDelay time.Duration) error {
+	if startDelay > 0 {
+		log.Printf("[STREAM] waiting %v before sending first frame...", startDelay)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(startDelay):
+			log.Printf("[STREAM] delay complete, starting frame send")
+		}
+	}
+
 	buf := make([]byte, 256*1024)
 	parser := newH264Parser()
 
@@ -328,6 +335,8 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	var vclBuf []byte               // AVCC-formatted data accumulating for current VCL packet
 	var frameCount int
 	var nalLog strings.Builder
+	frameInterval := time.Second / 30 // ~33ms at 30fps
+	var lastFrameTime time.Time
 
 	for {
 		select {
@@ -378,9 +387,20 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 				if frameCount < 20 {
 					log.Printf("[STREAM] PPS len=%d bytes=%02x", len(raw), raw)
 				}
-			case 6: // SEI — accumulate with next VCL
-				vclBuf = append(vclBuf, avccWrap(raw)...)
+			case 6: // SEI — skip, don't include in VCL data
+				if frameCount < 20 {
+					log.Printf("[STREAM] skipping SEI NAL len=%d", len(raw))
+				}
 			case 5: // IDR VCL (keyframe)
+				// Pace frames at target framerate
+				if !lastFrameTime.IsZero() {
+					elapsed := time.Since(lastFrameTime)
+					if elapsed < frameInterval {
+						time.Sleep(frameInterval - elapsed)
+					}
+				}
+				lastFrameTime = time.Now()
+
 				packetTimestamp := ntpTimeNow()
 				// Send SPS+PPS as unencrypted avcC codec frame first.
 				if latestSPS != nil && latestPPS != nil {
@@ -390,6 +410,12 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 					}
 					if err := s.sendCodecFrame(avcC, packetTimestamp); err != nil {
 						return fmt.Errorf("send codec: %w", err)
+					}
+					// Signal that the first frame has been sent (unblocks data heartbeat)
+					select {
+					case <-s.firstFrameSent:
+					default:
+						close(s.firstFrameSent)
 					}
 				} else {
 					log.Printf("[STREAM] IDR frame but latestSPS=%v latestPPS=%v — skipping keyframe", latestSPS == nil, latestPPS == nil)
@@ -416,6 +442,15 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 				vclBuf = vclBuf[:0]
 				frameCount++
 			case 1, 2, 3, 4: // non-IDR VCL
+				// Pace frames at target framerate
+				if !lastFrameTime.IsZero() {
+					elapsed := time.Since(lastFrameTime)
+					if elapsed < frameInterval {
+						time.Sleep(frameInterval - elapsed)
+					}
+				}
+				lastFrameTime = time.Now()
+
 				vclBuf = append(vclBuf, avccWrap(raw)...)
 				frameData := vclBuf
 				if s.streamCipher != nil {
@@ -611,7 +646,7 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 	binary.LittleEndian.PutUint32(header[0:4], uint32(len(payload)))
 	header[4] = 0x01 // payload type = SPS+PPS codec packet (unencrypted)
 	header[5] = 0x00
-	header[6] = 0x16 // h264 SPS+PPS (per UxPlay protocol docs)
+	header[6] = 0x16 // h264 SPS+PPS option
 	header[7] = 0x01
 	binary.LittleEndian.PutUint64(header[8:16], ntpTimestamp)
 	putFloat32LE(header[16:20], float32(s.videoWidth))
@@ -627,6 +662,8 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 
 	log.Printf("[SEND] codec frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d",
 		s.frameSeq, len(payload), header[4], header[5], ntpTimestamp)
+	log.Printf("[SEND] codec full header: %02x", header)
+	log.Printf("[SEND] codec payload: %02x", payload)
 
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := writeFull(s.dataConn, frame); err != nil {
@@ -635,20 +672,55 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 	return nil
 }
 
+// SendTestCodec sends a codec frame for testing purposes.
+func (s *MirrorSession) SendTestCodec(avcC []byte) {
+	if err := s.sendCodecFrame(avcC, ntpTimeNow()); err != nil {
+		log.Printf("[TEST] sendCodecFrame error: %v", err)
+	} else {
+		log.Println("[TEST] codec frame sent successfully")
+	}
+}
+
+// SendTestEmptyVCL sends a VCL header with zero-length payload for testing.
+func (s *MirrorSession) SendTestEmptyVCL() {
+	header := make([]byte, 128)
+	// payload size = 0
+	header[4] = 0x00 // VCL video data type
+	header[5] = 0x00
+	header[6] = 0x00
+	header[7] = 0x00
+	binary.LittleEndian.PutUint64(header[8:16], ntpTimeNow())
+	log.Printf("[TEST] sending type 0x00 (VCL) header: %02x", header[:16])
+	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := writeFull(s.dataConn, header); err != nil {
+		log.Printf("[TEST] type 0x00 write error: %v", err)
+	} else {
+		log.Println("[TEST] type 0x00 header sent successfully")
+	}
+}
+
 // sendFrame writes a single encrypted VCL frame with the mirroring protocol header.
 // payload must be AVCC-encoded (4-byte BE length per NALU, no start codes).
+// Header layout (128 bytes):
+//
+//	[0:4]   payload size (LE uint32)
+//	[4]     payload type: 0x00 = encrypted video data
+//	[5]     0x10 = IDR (keyframe), 0x00 = non-IDR
+//	[6:8]   payload option: 0x00 0x00 for encrypted packets
+//	[8:16]  NTP timestamp (LE uint64, boot-relative)
+//	[16:128] zeroed (no image-size data for VCL packets)
 func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp uint64) error {
 	s.frameSeq++
 
 	header := make([]byte, 128)
 	binary.LittleEndian.PutUint32(header[0:4], uint32(len(auData)))
-	header[4] = 0x00 // encrypted VCL
+	header[4] = 0x00 // payload type = encrypted video data
 	if isKeyframe {
-		header[5] = 0x10 // IDR frame indicator (per UxPlay: "0x00 0x10")
+		header[5] = 0x10 // IDR frame indicator
 	} else {
 		header[5] = 0x00 // non-IDR
 	}
-	// bytes 6-7 = 0x00, 0x00 for encrypted packets (default)
+	// header[6:8] = 0x00 0x00 for encrypted packets (already zeroed)
 	binary.LittleEndian.PutUint64(header[8:16], ntpTimestamp)
 
 	frame := make([]byte, 128+len(auData))
@@ -666,6 +738,10 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 		header[4], header[5], header[6], header[7],
 		header[8], header[9], header[10], header[11],
 		header[12], header[13], header[14], header[15])
+
+	if s.frameSeq <= 3 {
+		log.Printf("[SEND] %s full header: %02x", keyframeStr, header)
+	}
 
 	log.Printf("[SEND] %s frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d hdr_hex=%s",
 		keyframeStr, s.frameSeq, len(auData), header[4], header[5], ntpTimestamp, hdrHex)
@@ -739,7 +815,15 @@ func (s *MirrorSession) heartbeatLoop(ctx context.Context, uri, sessionID string
 
 // dataHeartbeatLoop sends periodic heartbeat frames on the data channel.
 // AirMyPC sends these every ~1s: 128-byte header with byte4=0x02, bytes6-7=0x1e00, no payload.
+// Waits until the first video frame has been sent before starting.
 func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
+	// Wait for first video frame before sending heartbeats
+	select {
+	case <-ctx.Done():
+		return
+	case <-s.firstFrameSent:
+	}
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -755,6 +839,24 @@ func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
 			if err := writeFull(s.dataConn, header); err != nil {
 				log.Printf("[HEARTBEAT] data channel heartbeat failed: %v", err)
 				return
+			}
+		}
+	}
+}
+
+// feedbackLoop sends periodic POST /feedback requests like AirMyPC (every 2s).
+func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _, err := s.client.rtspRequest("POST", uri+"/feedback", "", nil, nil)
+			if err != nil {
+				log.Printf("[FEEDBACK] error: %v", err)
 			}
 		}
 	}
