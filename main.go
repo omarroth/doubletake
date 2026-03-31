@@ -222,7 +222,7 @@ func main() {
 	}()
 	log.Println("screen capture started")
 
-	if err := session.StreamFrames(ctx, capture, 2*time.Second); err != nil && ctx.Err() == nil {
+	if err := session.StreamFrames(ctx, capture, 0*time.Second); err != nil && ctx.Err() == nil {
 		log.Fatalf("streaming error: %v", err)
 	}
 	log.Println("stream ended")

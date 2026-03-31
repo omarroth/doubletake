@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"howett.net/plist"
@@ -21,6 +22,7 @@ import (
 type MirrorSession struct {
 	client        *AirPlayClient
 	dataConn      net.Conn
+	dataMu        sync.Mutex // protects writes to dataConn
 	eventConn     net.Conn
 	timingConn    net.PacketConn
 	eventListener net.Listener
@@ -335,11 +337,80 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	parser := newH264Parser()
 
 	var latestSPS, latestPPS []byte // raw NAL data WITHOUT start code
-	var vclBuf []byte               // AVCC-formatted data accumulating for current VCL packet
+	var vclBuf []byte               // AVCC-formatted data accumulating for current access unit
+	var pendingKeyframe bool        // true if vclBuf contains IDR slice(s)
+	var codecSent bool              // true if codec frame sent for current keyframe
 	var frameCount int
 	var nalLog strings.Builder
 	frameInterval := time.Second / 30 // ~33ms at 30fps
 	var lastFrameTime time.Time
+
+	// flushVCL sends the accumulated VCL data as a single encrypted frame.
+	// This handles multi-slice frames by combining all slices of one access unit.
+	flushVCL := func() error {
+		if len(vclBuf) == 0 {
+			return nil
+		}
+
+		// Pace frames at target framerate
+		if !lastFrameTime.IsZero() {
+			elapsed := time.Since(lastFrameTime)
+			if elapsed < frameInterval {
+				time.Sleep(frameInterval - elapsed)
+			}
+		}
+		lastFrameTime = time.Now()
+
+		packetTimestamp := ntpTimeNow()
+
+		// Send SPS+PPS as unencrypted avcC codec frame before keyframes
+		if pendingKeyframe && !codecSent && latestSPS != nil && latestPPS != nil {
+			avcC := buildAVCCConfig(latestSPS, latestPPS)
+			if frameCount < 20 {
+				log.Printf("[STREAM] sending codec frame avcC len=%d hdr=%02x", len(avcC), avcC[:min(8, len(avcC))])
+			}
+			if err := s.sendCodecFrame(avcC, packetTimestamp); err != nil {
+				return fmt.Errorf("send codec: %w", err)
+			}
+			// Signal that the first frame has been sent (unblocks data heartbeat)
+			select {
+			case <-s.firstFrameSent:
+			default:
+				close(s.firstFrameSent)
+			}
+			codecSent = true
+		}
+
+		frameData := vclBuf
+		if s.streamCipher != nil {
+			if frameCount < 5 {
+				log.Printf("[CRYPTO] frame %d plain[0:20]=%02x", frameCount, vclBuf[:min(20, len(vclBuf))])
+			}
+			frameData = s.streamCipher(vclBuf)
+			if frameCount < 5 {
+				log.Printf("[CRYPTO] frame %d  enc[0:20]=%02x", frameCount, frameData[:min(20, len(frameData))])
+			}
+		}
+
+		keyframeStr := "non-IDR"
+		if pendingKeyframe {
+			keyframeStr = "IDR"
+		}
+		if frameCount < 20 {
+			log.Printf("[STREAM] %s frame %d: avcc_payload=%d encrypted=%v", keyframeStr, frameCount, len(vclBuf), s.streamCipher != nil)
+			log.Printf("[STREAM] NAL sequence for frame %d: %s", frameCount, nalLog.String())
+		}
+		nalLog.Reset()
+
+		if err := s.sendFrame(frameData, pendingKeyframe, packetTimestamp); err != nil {
+			return fmt.Errorf("send %s: %w", keyframeStr, err)
+		}
+		vclBuf = vclBuf[:0]
+		pendingKeyframe = false
+		codecSent = false
+		frameCount++
+		return nil
+	}
 
 	for {
 		select {
@@ -351,6 +422,10 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 		n, err := capture.Read(buf)
 		if err != nil {
 			if err == io.EOF {
+				// Flush any remaining VCL data
+				if flushErr := flushVCL(); flushErr != nil {
+					return flushErr
+				}
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -380,6 +455,13 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			}
 
 			switch nt {
+			case 9: // AUD — access unit delimiter, flush previous frame
+				if err := flushVCL(); err != nil {
+					return err
+				}
+				if frameCount < 20 {
+					log.Printf("[STREAM] AUD (access unit delimiter)")
+				}
 			case 7: // SPS
 				latestSPS = raw
 				if frameCount < 20 {
@@ -394,92 +476,11 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 				if frameCount < 20 {
 					log.Printf("[STREAM] skipping SEI NAL len=%d", len(raw))
 				}
-			case 5: // IDR VCL (keyframe)
-				// Pace frames at target framerate
-				if !lastFrameTime.IsZero() {
-					elapsed := time.Since(lastFrameTime)
-					if elapsed < frameInterval {
-						time.Sleep(frameInterval - elapsed)
-					}
-				}
-				lastFrameTime = time.Now()
-
-				packetTimestamp := ntpTimeNow()
-				// Send SPS+PPS as unencrypted avcC codec frame first.
-				if latestSPS != nil && latestPPS != nil {
-					avcC := buildAVCCConfig(latestSPS, latestPPS)
-					if frameCount < 20 {
-						log.Printf("[STREAM] sending codec frame avcC len=%d hdr=%02x", len(avcC), avcC[:min(8, len(avcC))])
-					}
-					if err := s.sendCodecFrame(avcC, packetTimestamp); err != nil {
-						return fmt.Errorf("send codec: %w", err)
-					}
-					// Signal that the first frame has been sent (unblocks data heartbeat)
-					select {
-					case <-s.firstFrameSent:
-					default:
-						close(s.firstFrameSent)
-					}
-				} else {
-					log.Printf("[STREAM] IDR frame but latestSPS=%v latestPPS=%v — skipping keyframe", latestSPS == nil, latestPPS == nil)
-				}
+			case 5: // IDR VCL slice — accumulate (may be multi-slice)
+				pendingKeyframe = true
 				vclBuf = append(vclBuf, avccWrap(raw)...)
-				frameData := vclBuf
-				if s.streamCipher != nil {
-					if frameCount < 5 {
-						log.Printf("[CRYPTO] IDR frame %d plain[0:20]=%02x", frameCount, vclBuf[:min(20, len(vclBuf))])
-					}
-					frameData = s.streamCipher(vclBuf)
-					if frameCount < 5 {
-						log.Printf("[CRYPTO] IDR frame %d  enc[0:20]=%02x", frameCount, frameData[:min(20, len(frameData))])
-					}
-				}
-				if frameCount < 20 {
-					log.Printf("[STREAM] IDR frame %d: avcc_payload=%d encrypted=%v", frameCount, len(vclBuf), s.streamCipher != nil)
-					log.Printf("[STREAM] NAL sequence for frame %d: %s", frameCount, nalLog.String())
-				}
-				nalLog.Reset()
-				if err := s.sendFrame(frameData, true, packetTimestamp); err != nil {
-					return fmt.Errorf("send IDR: %w", err)
-				}
-				vclBuf = vclBuf[:0]
-				frameCount++
-			case 1, 2, 3, 4: // non-IDR VCL
-				// Pace frames at target framerate
-				if !lastFrameTime.IsZero() {
-					elapsed := time.Since(lastFrameTime)
-					if elapsed < frameInterval {
-						time.Sleep(frameInterval - elapsed)
-					}
-				}
-				lastFrameTime = time.Now()
-
+			case 1, 2, 3, 4: // non-IDR VCL slice — accumulate
 				vclBuf = append(vclBuf, avccWrap(raw)...)
-				frameData := vclBuf
-				if s.streamCipher != nil {
-					if frameCount < 5 {
-						log.Printf("[CRYPTO] non-IDR frame %d plain[0:20]=%02x", frameCount, vclBuf[:min(20, len(vclBuf))])
-					}
-					frameData = s.streamCipher(vclBuf)
-					if frameCount < 5 {
-						log.Printf("[CRYPTO] non-IDR frame %d  enc[0:20]=%02x", frameCount, frameData[:min(20, len(frameData))])
-					}
-				}
-				if frameCount < 5 {
-					log.Printf("[STREAM] non-IDR frame %d: avcc_payload=%d encrypted=%v", frameCount, len(vclBuf), s.streamCipher != nil)
-				}
-				nalLog.Reset()
-
-				// Validate frame size before sending
-				if len(frameData) > 10*1024*1024 {
-					log.Printf("[STREAM] warning: non-IDR frame %d is very large: %d bytes", frameCount, len(frameData))
-				}
-
-				if err := s.sendFrame(frameData, false, ntpTimeNow()); err != nil {
-					return fmt.Errorf("send frame: %w", err)
-				}
-				vclBuf = vclBuf[:0]
-				frameCount++
 			default:
 				if frameCount < 20 {
 					log.Printf("[STREAM] ignoring NAL type=%d len=%d", nt, len(raw))
@@ -668,11 +669,11 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 	log.Printf("[SEND] codec full header: %02x", header)
 	log.Printf("[SEND] codec payload: %02x", payload)
 
+	s.dataMu.Lock()
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := writeFull(s.dataConn, frame); err != nil {
-		return err
-	}
-	return nil
+	err := writeFull(s.dataConn, frame)
+	s.dataMu.Unlock()
+	return err
 }
 
 // SendTestCodec sends a codec frame for testing purposes.
@@ -749,8 +750,10 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 	log.Printf("[SEND] %s frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d hdr_hex=%s",
 		keyframeStr, s.frameSeq, len(auData), header[4], header[5], ntpTimestamp, hdrHex)
 
+	s.dataMu.Lock()
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	err := writeFull(s.dataConn, frame)
+	s.dataMu.Unlock()
 	if err != nil {
 		log.Printf("[SEND] write error on frame seq=%d: %v", s.frameSeq, err)
 		// Log first 20 bytes of encrypted payload for debugging
@@ -838,8 +841,11 @@ func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
 			header := make([]byte, 128)
 			header[4] = 0x02
 			header[6] = 0x1e
+			s.dataMu.Lock()
 			s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if err := writeFull(s.dataConn, header); err != nil {
+			err := writeFull(s.dataConn, header)
+			s.dataMu.Unlock()
+			if err != nil {
 				log.Printf("[HEARTBEAT] data channel heartbeat failed: %v", err)
 				return
 			}
@@ -848,7 +854,22 @@ func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
 }
 
 // feedbackLoop sends periodic POST /feedback requests like AirMyPC (every 2s).
+// Sends an immediate first feedback to prevent UxPlay's 3-second timeout from
+// killing the connection before the first ticker fires.
 func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
+	// Wait for first video frame before sending feedback
+	select {
+	case <-ctx.Done():
+		return
+	case <-s.firstFrameSent:
+	}
+
+	// Send immediate first feedback — iPhone does this within ~1s of streaming
+	_, _, err := s.client.rtspRequest("POST", "/feedback", "", nil, nil)
+	if err != nil {
+		log.Printf("[FEEDBACK] initial error: %v", err)
+	}
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -908,13 +929,18 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 			continue
 		}
 
-		// Build response: echo back with our timestamps
+		// Build response: echo back with our timestamps.
+		// Use boot-relative time + NTP epoch, matching what real Apple senders do.
+		// UxPlay subtracts the NTP epoch from timing responses (account_for_epoch=true)
+		// but NOT from video frame timestamps (account_for_epoch=false). Video frames
+		// use raw boot-relative time via ntpTimeNow(). By adding the NTP epoch here,
+		// both resolve to the same boot-relative time base after UxPlay's conversion.
 		reply := make([]byte, 32)
 		copy(reply, buf[:32])
 		reply[0] = 0x80
 		reply[1] = 0xd3
 
-		now := ntpTimestampFromUnix(time.Now())
+		now := ntpBootTimestamp()
 		// Bytes 8-15: Reference = sender's transmit timestamp
 		copy(reply[8:16], buf[24:32])
 		// Bytes 16-23: Receive timestamp = now (NTP format, BE)
@@ -956,21 +982,34 @@ var appStartTime = time.Now()
 // ntpTimeNow returns a 64-bit NTP fixed-point timestamp for mirroring frame headers.
 // Format: upper 32 bits = seconds, lower 32 bits = fractional seconds (1/2^32).
 // Uses boot-relative time (no epoch offset), matching real Apple senders.
+//
+// A small forward bias is added so that the first frame's converted timestamp
+// exceeds the GStreamer pipeline base_time on the receiver. Without this,
+// UxPlay's mismatch retry loop in video_process double-applies its
+// remote_clock_offset, producing a ~56-year PTS on the first buffer. GStreamer
+// prerolls that frame but then drops every subsequent frame whose PTS (correctly
+// at 33 ms, 66 ms, …) looks like a massive backwards time jump.
+const videoTimestampBias = 100 * time.Millisecond
+
 func ntpTimeNow() uint64 {
-	d := time.Since(appStartTime)
+	d := time.Since(appStartTime) + videoTimestampBias
 	sec := uint64(d / time.Second)
 	nsecFrac := uint64(d % time.Second)
 	frac := (nsecFrac << 32) / uint64(time.Second)
 	return (sec << 32) | frac
 }
 
-// ntpTimestampFromUnix converts a Unix time.Time to NTP fixed-point format
-// with the NTP epoch (1900-01-01). Used for NTP timing responses.
+// ntpBootTimestamp returns a 64-bit NTP fixed-point timestamp using boot-relative
+// time with the NTP epoch (1900-01-01) added. Real Apple senders use this format
+// for NTP timing responses: (bootUptime + NTPepoch) as seconds. UxPlay subtracts
+// the NTP epoch when processing timing responses (account_for_epoch=true), yielding
+// the same boot-relative seconds that video frame headers carry via ntpTimeNow().
 const secondsFrom1900To1970 = 2208988800
 
-func ntpTimestampFromUnix(t time.Time) uint64 {
-	sec := uint64(t.Unix()) + secondsFrom1900To1970
-	nsecFrac := uint64(t.Nanosecond())
+func ntpBootTimestamp() uint64 {
+	d := time.Since(appStartTime)
+	sec := uint64(d/time.Second) + secondsFrom1900To1970
+	nsecFrac := uint64(d % time.Second)
 	frac := (nsecFrac << 32) / uint64(time.Second)
 	return (sec << 32) | frac
 }
