@@ -264,17 +264,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		} else {
 			// Derive AES-128-CTR key/IV from shk + streamConnectionID using SHA-512.
 			// Matches UxPlay's mirror_buffer_init_aes.
-			derivationKey := encKey
-			if c.fpEkey != nil && c.pairKeys != nil && c.pairKeys.SharedSecret != nil {
-				// FairPlay mode: combine AES key with pair-verify ECDH shared secret
-				// eaesKey = SHA-512(aesKey || ecdhShared)[:16]
-				h := sha512.New()
-				h.Write(encKey)
-				h.Write(c.pairKeys.SharedSecret)
-				derivationKey = h.Sum(nil)[:16]
-				log.Printf("[SETUP] FairPlay eaesKey (combined hash): %02x", derivationKey)
-			}
-			cipherKey, cipherIV = deriveVideoKeys(derivationKey, streamConnectionID)
+			cipherKey, cipherIV = deriveVideoKeys(encKey, streamConnectionID)
 			log.Printf("[SETUP] using SHA-512 derived keys")
 		}
 		log.Printf("[SETUP] streamConnectionID: %d", streamConnectionID)
