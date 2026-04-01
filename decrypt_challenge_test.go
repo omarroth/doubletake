@@ -1,5 +1,12 @@
 package main
 
+// DEPRECATED: This file contained tests for the old Wine/playfair handshake approach.
+// With the switch to sapsigner-based implementation, these tests are no longer relevant.
+// The new FairPlay SAP implementation is tested in fairplay_practical_test.go.
+
+/*
+Commented-out old test:
+
 import (
 "encoding/hex"
 "fmt"
@@ -117,3 +124,4 @@ matches++
 }
 fmt.Printf("m3A vs m3B same bytes: %d/128 (same across sessions?)\n", matches)
 }
+*/
