@@ -127,10 +127,14 @@ func main() {
 	}
 	log.Println("pairing complete")
 
-	// FairPlay setup — establishes encrypted key wrapping for video stream
-	// Skip if already done pre-auth (saved creds path)
+	// FairPlay setup — establishes encrypted key wrapping for video stream.
+	// Skip when pair-verify already established an encrypted channel (HAP):
+	// the pair-verify shared secret is used to derive stream keys directly.
+	// FairPlay is only needed for the legacy (non-HAP, plaintext) path.
 	if os.Getenv("SKIP_FAIRPLAY") != "" {
 		log.Println("SKIP_FAIRPLAY: skipping FairPlay setup entirely")
+	} else if client.encrypted {
+		log.Println("pair-verify encrypted channel active, skipping FairPlay (using pair-verify derived keys)")
 	} else if client.fpEkey == nil {
 		if err := client.fairPlaySetup(ctx); err != nil {
 			log.Printf("FairPlay setup failed (non-fatal): %v", err)
