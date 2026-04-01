@@ -127,17 +127,18 @@ func main() {
 	}
 	log.Println("pairing complete")
 
-	// FairPlay setup — establishes encrypted key wrapping for video stream.
-	// Skip when pair-verify already established an encrypted channel (HAP):
-	// the pair-verify shared secret is used to derive stream keys directly.
-	// FairPlay is only needed for the legacy (non-HAP, plaintext) path.
+	// FairPlay setup — establishes fp-setup state and ekey/eiv used for the
+	// final encrypted mirror stream. Pair-verify and FairPlay are both needed
+	// for Apple TV compatibility in the normal modern flow.
 	if os.Getenv("SKIP_FAIRPLAY") != "" {
 		log.Println("SKIP_FAIRPLAY: skipping FairPlay setup entirely")
-	} else if client.encrypted {
-		log.Println("pair-verify encrypted channel active, skipping FairPlay (using pair-verify derived keys)")
 	} else if client.fpEkey == nil {
 		if err := client.fairPlaySetup(ctx); err != nil {
-			log.Printf("FairPlay setup failed (non-fatal): %v", err)
+			if os.Getenv("ALLOW_FAIRPLAY_FALLBACK") != "" {
+				log.Printf("FairPlay setup failed (fallback enabled): %v", err)
+			} else {
+				log.Fatalf("FairPlay setup failed: %v", err)
+			}
 		} else {
 			log.Println("FairPlay setup complete")
 		}
