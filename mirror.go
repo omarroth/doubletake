@@ -122,8 +122,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	// Encryption keys: shk/shiv go inside the stream descriptor,
-	// but ekey/eiv go at the ROOT level of the plist (Apple TV reads them from root).
-	if encKey != nil && c.fpEkey == nil {
+	// ekey/eiv go at the ROOT level of the plist (receiver reads them from root).
+	// Always include shk/shiv in the stream descriptor for compatibility.
+	if encKey != nil {
 		streamDesc["shk"] = encKey
 		streamDesc["shiv"] = encIV
 	}
@@ -445,27 +446,31 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 				if err := flushVCL(); err != nil {
 					return err
 				}
-				if frameCount < 20 {
-					log.Printf("[STREAM] AUD (access unit delimiter)")
+			case 7: // SPS — flush before keyframe
+				if err := flushVCL(); err != nil {
+					return err
 				}
-			case 7: // SPS
 				latestSPS = raw
-				if frameCount < 20 {
-					log.Printf("[STREAM] SPS len=%d bytes=%02x", len(raw), raw)
-				}
 			case 8: // PPS
 				latestPPS = raw
-				if frameCount < 20 {
-					log.Printf("[STREAM] PPS len=%d bytes=%02x", len(raw), raw)
-				}
 			case 6: // SEI — skip, don't include in VCL data
-				if frameCount < 20 {
-					log.Printf("[STREAM] skipping SEI NAL len=%d", len(raw))
-				}
 			case 5: // IDR VCL slice — accumulate (may be multi-slice)
+				// If this is the first slice of a new access unit (first_mb_in_slice == 0)
+				// and we already have VCL data buffered, flush the previous frame first.
+				if len(vclBuf) > 0 && isFirstSlice(raw) && !pendingKeyframe {
+					if err := flushVCL(); err != nil {
+						return err
+					}
+				}
 				pendingKeyframe = true
 				vclBuf = append(vclBuf, avccWrap(raw)...)
 			case 1, 2, 3, 4: // non-IDR VCL slice — accumulate
+				// Flush if: new access unit (first_mb_in_slice==0) or transitioning from IDR to non-IDR
+				if len(vclBuf) > 0 && (isFirstSlice(raw) || pendingKeyframe) {
+					if err := flushVCL(); err != nil {
+						return err
+					}
+				}
 				vclBuf = append(vclBuf, avccWrap(raw)...)
 			default:
 				if frameCount < 20 {
@@ -595,6 +600,17 @@ func avccWrap(raw []byte) []byte {
 	binary.BigEndian.PutUint32(b[:4], uint32(len(raw)))
 	copy(b[4:], raw)
 	return b
+}
+
+// isFirstSlice returns true if the raw NAL data (without start code) starts a new
+// access unit, i.e. first_mb_in_slice == 0 in the slice header. In Exp-Golomb
+// coding, value 0 is encoded as a single "1" bit, so the MSB of the second byte
+// (first byte after the NAL header) being set means first_mb_in_slice == 0.
+func isFirstSlice(raw []byte) bool {
+	if len(raw) < 2 {
+		return false
+	}
+	return raw[1]&0x80 != 0
 }
 
 // buildAVCCConfig builds an AVCDecoderConfigurationRecord (avcC) from raw SPS and PPS.
