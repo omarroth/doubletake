@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
@@ -26,8 +27,10 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	defer emu.Close()
 
 	// Initialize FairPlay SAP context
+	// hwInfo: 4-byte IDLength (=20) + 20-byte device ID
 	hwInfo := make([]byte, 24)
-	rand.Read(hwInfo)
+	binary.LittleEndian.PutUint32(hwInfo, 20)
+	rand.Read(hwInfo[4:])
 	sapCtx, err := emu.FPSAPInit(hwInfo)
 	if err != nil {
 		return fmt.Errorf("FPSAPInit: %w", err)
@@ -50,8 +53,8 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	log.Printf("[FP] m2: %d bytes", len(m2))
 
 	// Phase 2: process m2, generate m3
-	m2Payload := fplyUnwrap(m2)
-	m3Raw, rc2, err := emu.FPSAPExchange(3, hwInfo, sapCtx, m2Payload)
+	// The iOS binary handles FPLY framing internally, pass the full FPLY-wrapped m2
+	m3Raw, rc2, err := emu.FPSAPExchange(3, hwInfo, sapCtx, m2)
 	if err != nil {
 		return fmt.Errorf("phase2: %w", err)
 	}
