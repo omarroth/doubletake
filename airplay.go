@@ -65,6 +65,7 @@ type AirPlayClient struct {
 	fpKey  []byte
 	fpIV   []byte
 	fpEkey []byte // 72-byte wrapped key for SETUP
+	fpM3   []byte // 164-byte FPLY-wrapped m3 (needed for ekey construction)
 
 	// Stream encryption key (from FP or pair-verify)
 	streamKey []byte

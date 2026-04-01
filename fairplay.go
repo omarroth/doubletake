@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha512"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
 
 	"airplay/fpemu"
+	"airplay/playfair"
 )
 
 const airplaySenderPath = "original-ios/15A372__iPhone10,5/root/System/Library/PrivateFrameworks/AirPlaySender.framework/AirPlaySender"
@@ -77,6 +80,71 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	c.fpIV = make([]byte, 16)
 	rand.Read(c.fpIV)
 
-	log.Printf("[FP] FairPlay handshake complete! key=%x iv=%x", c.fpKey, c.fpIV)
+	// Save FPLY-wrapped m3 for ekey construction.
+	// The receiver also stores this m3 during fp-setup and uses it with
+	// fairplay_decrypt(m3, ekey) to recover the AES key.
+	c.fpM3 = make([]byte, len(m3))
+	copy(c.fpM3, m3)
+
+	// Construct ekey: 72-byte FPLY-wrapped encrypted key.
+	// Instead of trying to encrypt fpKey into ekey (which requires playfair_encrypt),
+	// we construct ekey with known chunk data and compute what the receiver will
+	// derive via playfair_decrypt(m3, ekey). Then we use that derived key as our
+	// video encryption key. Both sides compute the same key.
+	ekey := buildEkey()
+	aesKey := playfair.Decrypt(c.fpM3, ekey[:])
+	c.fpEkey = ekey[:]
+
+	// If pair-verify produced a shared secret (ecdh_secret), the receiver
+	// hashes the fairplay-decrypted key with it: SHA-512(aeskey + ecdh_secret)[:16].
+	// UxPlay does this in raop_handlers.h; we must match.
+	finalKey := aesKey[:]
+	if c.pairKeys != nil && len(c.pairKeys.SharedSecret) > 0 {
+		h := sha512.New()
+		h.Write(aesKey[:])
+		h.Write(c.pairKeys.SharedSecret)
+		finalKey = h.Sum(nil)[:16]
+		log.Printf("[FP]   raw aesKey:   %s", hex.EncodeToString(aesKey[:]))
+		log.Printf("[FP]   ecdh_secret:  %s", hex.EncodeToString(c.pairKeys.SharedSecret))
+		log.Printf("[FP]   hashed key:   %s", hex.EncodeToString(finalKey))
+	}
+
+	// Override fpKey with the key the receiver will actually derive.
+	// This ensures sender and receiver SHA-512-derive the same AES-CTR key.
+	c.fpKey = finalKey
+
+	log.Printf("[FP] FairPlay handshake complete!")
+	log.Printf("[FP]   m4 payload:  %s", hex.EncodeToString(m4Payload))
+	log.Printf("[FP]   ekey:        %s", hex.EncodeToString(c.fpEkey))
+	log.Printf("[FP]   aesKey:      %s", hex.EncodeToString(c.fpKey))
+	log.Printf("[FP]   iv:          %s", hex.EncodeToString(c.fpIV))
 	return nil
+}
+
+// buildEkey constructs a 72-byte ekey with the FPLY header format.
+// The chunk data is zeros — the actual AES key is determined by what
+// playfair_decrypt produces from this ekey + m3.
+//
+// Format (72 bytes):
+//
+//	[0:4]   "FPLY"
+//	[4:8]   01 02 01 00
+//	[8:12]  00 00 00 3c  (0x3c = 60 = remaining bytes)
+//	[12:16] 00 00 00 00  (padding)
+//	[16:32] chunk1 (16 bytes)
+//	[32:56] padding (24 bytes, zeros)
+//	[56:72] chunk2 (16 bytes)
+func buildEkey() [72]byte {
+	var ekey [72]byte
+	copy(ekey[0:4], []byte("FPLY"))
+	ekey[4] = 0x01
+	ekey[5] = 0x02
+	ekey[6] = 0x01
+	ekey[7] = 0x00
+	ekey[8] = 0x00
+	ekey[9] = 0x00
+	ekey[10] = 0x00
+	ekey[11] = 0x3c
+	// bytes 12-71 are zeros (chunk1, padding, chunk2 all zero)
+	return ekey
 }
