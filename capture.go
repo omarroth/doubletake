@@ -189,7 +189,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 		"-level:v", "4.0",
 		"-tune", "zerolatency",
 		"-preset", "superfast",
-		"-x264-params", fmt.Sprintf("cabac=1:aud=1:repeat-headers=0:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0"),
+		"-x264-params", "cabac=1:aud=1:repeat-headers=1:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0",
 		"-g", fmt.Sprintf("%d", fps*2),
 		"-keyint_min", fmt.Sprintf("%d", fps),
 		"-bf", "0",
@@ -322,7 +322,7 @@ func buildFFmpegEncodeArgs(cfg CaptureConfig, input string) []string {
 		"-level:v", "4.0",
 		"-tune", "zerolatency",
 		"-preset", "superfast",
-		"-x264-params", fmt.Sprintf("cabac=1:aud=1:repeat-headers=0:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0"),
+		"-x264-params", "cabac=1:aud=1:repeat-headers=1:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0",
 		"-g", fmt.Sprintf("%d", fps*2), // keyframe every 2 seconds
 		"-keyint_min", fmt.Sprintf("%d", fps),
 		"-bf", "0",
