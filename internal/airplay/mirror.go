@@ -1,4 +1,4 @@
-package main
+package airplay
 
 import (
 	"context"
@@ -150,10 +150,10 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	// FairPlay ekey/eiv go at the root level (receiver reads them from req_root_node)
 	// Only send when encryption is actually enabled (not in no-encrypt mode)
-	if c.fpEkey != nil && encKey != nil {
-		setupPlist["ekey"] = c.fpEkey
+	if c.FpEkey != nil && encKey != nil {
+		setupPlist["ekey"] = c.FpEkey
 		setupPlist["eiv"] = encIV
-		dbg("[SETUP] FairPlay mode: ekey=%d bytes, eiv=%d bytes (at root level)", len(c.fpEkey), len(encIV))
+		dbg("[SETUP] FairPlay mode: ekey=%d bytes, eiv=%d bytes (at root level)", len(c.FpEkey), len(encIV))
 	}
 	dbg("[SETUP] combined request: %+v", setupPlist)
 
@@ -270,8 +270,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		// does HKDF with the pair-verify X25519 ECDH shared secret as IKM.
 		// Try the pair-verify shared secret first; fall back to raw FP aesKey.
 		ikm := c.fpAesKey
-		if c.pairKeys != nil && len(c.pairKeys.SharedSecret) > 0 {
-			ikm = c.pairKeys.SharedSecret
+		if c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0 {
+			ikm = c.PairKeys.SharedSecret
 			dbg("[SETUP] using pair-verify shared secret as HKDF IKM (%d bytes)", len(ikm))
 		}
 		chachaKey, err := deriveChaChaKey(ikm, streamConnectionID)

@@ -1,4 +1,4 @@
-package main
+package airplay
 
 // Pure Go port of playfair_decrypt and supporting functions.
 // Ported from playfair.c, omg_hax.c, sap_hash.c, hand_garble.c, modified_md5.c.

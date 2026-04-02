@@ -1,13 +1,13 @@
-package main
+package airplay
 
 import "log"
 
-// debugMode controls verbose logging. Set via -debug flag.
-var debugMode bool
+// DebugMode controls verbose logging. Set via -debug flag.
+var DebugMode bool
 
 // dbg logs a message only when debug mode is enabled.
 func dbg(format string, args ...interface{}) {
-	if debugMode {
+	if DebugMode {
 		log.Printf(format, args...)
 	}
 }

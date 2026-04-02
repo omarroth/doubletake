@@ -1,4 +1,4 @@
-package main
+package airplay
 
 // Auto-generated from omg_hax.h - do not edit.
 

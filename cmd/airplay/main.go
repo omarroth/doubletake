@@ -11,13 +11,15 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"airplay/internal/airplay"
 )
 
 func main() {
 	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
 	pin := flag.String("pin", "", "4-digit PIN for pairing (shown on Apple TV)")
-	credFile := flag.String("creds", defaultCredentialsFile, "Path to saved pairing credentials")
+	credFile := flag.String("creds", airplay.DefaultCredentialsFile, "Path to saved pairing credentials")
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
 	width := flag.Int("width", 1920, "Stream width")
 	height := flag.Int("height", 1080, "Stream height")
@@ -30,7 +32,7 @@ func main() {
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	flag.Parse()
 
-	debugMode = *debug
+	airplay.DebugMode = *debug
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -60,7 +62,7 @@ func main() {
 		fmt.Printf("selected: %s (%s:%d)\n", device.Name, device.IP, device.Port)
 	}
 
-	client := NewAirPlayClient(addr, *port)
+	client := airplay.NewAirPlayClient(addr, *port)
 	if err := client.Connect(ctx); err != nil {
 		log.Fatalf("connect failed: %v", err)
 	}
@@ -77,11 +79,11 @@ func main() {
 	// 2. If saved credentials exist, load them and do pair-verify only
 	// 3. Otherwise, do transient (ephemeral) pairing
 	needFullPair := *forcePair || *pin != ""
-	var savedCreds *SavedCredentials
+	var savedCreds *airplay.SavedCredentials
 
 	if !needFullPair {
 		var err error
-		savedCreds, err = LoadCredentials(*credFile)
+		savedCreds, err = airplay.LoadCredentials(*credFile)
 		if err != nil {
 			log.Printf("warning: failed to load credentials: %v", err)
 		}
@@ -102,7 +104,7 @@ func main() {
 			log.Fatalf("pairing failed: %v", err)
 		}
 		// Save credentials for next time
-		if err := SaveCredentials(*credFile, client.pairingID, client.pairKeys.Ed25519Public, client.pairKeys.Ed25519Private); err != nil {
+		if err := airplay.SaveCredentials(*credFile, client.PairingID, client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
 			log.Printf("warning: failed to save credentials: %v", err)
 		} else {
 			log.Printf("credentials saved to %s", *credFile)
@@ -111,12 +113,12 @@ func main() {
 		// Use saved credentials — pair-verify
 		log.Printf("using saved credentials from %s", *credFile)
 		pub, priv := savedCreds.Ed25519Keys()
-		client.pairingID = savedCreds.PairingID
-		client.pairKeys = &PairKeys{
+		client.PairingID = savedCreds.PairingID
+		client.PairKeys = &airplay.PairKeys{
 			Ed25519Public:  pub,
 			Ed25519Private: priv,
 		}
-		if err := client.pairVerify(ctx); err != nil {
+		if err := client.PairVerify(ctx); err != nil {
 			log.Printf("pair-verify with saved creds failed: %v, falling back to transient pairing", err)
 			// Reconnect — the failed pair-verify may have closed the connection
 			client.Close()
@@ -143,8 +145,8 @@ func main() {
 	// for Apple TV compatibility in the normal modern flow.
 	if os.Getenv("SKIP_FAIRPLAY") != "" {
 		log.Println("SKIP_FAIRPLAY: skipping FairPlay setup entirely")
-	} else if client.fpEkey == nil {
-		if err := client.fairPlaySetup(ctx); err != nil {
+	} else if client.FpEkey == nil {
+		if err := client.FairPlaySetup(ctx); err != nil {
 			if os.Getenv("ALLOW_FAIRPLAY_FALLBACK") != "" {
 				log.Printf("FairPlay setup failed (fallback enabled): %v", err)
 			} else {
@@ -155,7 +157,7 @@ func main() {
 		}
 	}
 
-	streamCfg := StreamConfig{
+	streamCfg := airplay.StreamConfig{
 		Width:     *width,
 		Height:    *height,
 		FPS:       *fps,
@@ -205,11 +207,11 @@ func main() {
 		return
 	}
 
-	var capture *ScreenCapture
+	var capture *airplay.ScreenCapture
 	if *testMode {
 		log.Println("using synthetic video (videotestsrc) for debugging")
 		var err error
-		capture, err = StartTestCapture(ctx, CaptureConfig{
+		capture, err = airplay.StartTestCapture(ctx, airplay.CaptureConfig{
 			Width:   *width,
 			Height:  *height,
 			FPS:     *fps,
@@ -220,7 +222,7 @@ func main() {
 			log.Fatalf("test capture failed: %v", err)
 		}
 	} else {
-		captureCfg := CaptureConfig{
+		captureCfg := airplay.CaptureConfig{
 			Width:   *width,
 			Height:  *height,
 			FPS:     *fps,
@@ -228,7 +230,7 @@ func main() {
 			HWAccel: *hwaccel,
 		}
 		var err error
-		capture, err = StartCapture(ctx, captureCfg)
+		capture, err = airplay.StartCapture(ctx, captureCfg)
 		if err != nil {
 			log.Fatalf("screen capture failed: %v", err)
 		}
@@ -247,12 +249,12 @@ func main() {
 	log.Println("stream ended")
 }
 
-func selectDevice(ctx context.Context) (*AirPlayDevice, error) {
+func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 	fmt.Println("searching for Apple TVs...")
 	discoverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	devices, err := DiscoverAirPlayDevices(discoverCtx)
+	devices, err := airplay.DiscoverAirPlayDevices(discoverCtx)
 	if err != nil {
 		return nil, err
 	}

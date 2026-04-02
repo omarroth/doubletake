@@ -1,4 +1,4 @@
-package main
+package airplay
 
 import (
 	"bytes"
@@ -48,9 +48,9 @@ type AirPlayClient struct {
 	mu        sync.Mutex
 	cseq      atomic.Int64
 	info      *ReceiverInfo
-	pairKeys  *PairKeys
+	PairKeys  *PairKeys
 	sessionID string // X-Apple-Session-ID, set once per connection
-	pairingID string // Our pairing identifier (UUID)
+	PairingID string // Our pairing identifier (UUID)
 
 	// Encryption state after pair-verify
 	encrypted     bool
@@ -63,7 +63,7 @@ type AirPlayClient struct {
 	// FairPlay derived key for stream encryption
 	fpKey    []byte
 	fpIV     []byte
-	fpEkey   []byte // 72-byte wrapped key for SETUP
+	FpEkey   []byte // 72-byte wrapped key for SETUP
 	fpM3     []byte // 164-byte FPLY-wrapped m3 (needed for ekey construction)
 	fpAesKey []byte // 16-byte raw aesKey from playfair_decrypt (IKM for HKDF)
 
@@ -77,7 +77,7 @@ func NewAirPlayClient(host string, port int) *AirPlayClient {
 		host:      host,
 		port:      port,
 		sessionID: generateUUID(),
-		pairingID: generateUUID(),
+		PairingID: generateUUID(),
 	}
 }
 
@@ -124,10 +124,6 @@ func (c *AirPlayClient) Pair(ctx context.Context, pin string) error {
 		return c.pairWithPIN(ctx, pin)
 	}
 	return c.pairTransient(ctx)
-}
-
-func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
-	return c.fairPlaySetup(ctx)
 }
 
 func (c *AirPlayClient) SetupMirror(ctx context.Context, cfg StreamConfig) (*MirrorSession, error) {

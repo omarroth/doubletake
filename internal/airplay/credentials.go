@@ -1,4 +1,4 @@
-package main
+package airplay
 
 import (
 	"crypto/ed25519"
@@ -14,7 +14,7 @@ type SavedCredentials struct {
 	Ed25519Seed   []byte `json:"ed25519_seed"` // 32-byte seed (private key is derived from this)
 }
 
-const defaultCredentialsFile = "airplay-credentials.json"
+const DefaultCredentialsFile = "airplay-credentials.json"
 
 // SaveCredentials writes pairing credentials to disk.
 func SaveCredentials(path string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey) error {

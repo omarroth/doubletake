@@ -1,4 +1,4 @@
-package main
+package airplay
 
 import (
 	"context"
@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"os"
 
-	"airplay/fpemu"
+	"airplay/internal/fpemu"
 )
 
 const airplaySenderPath = "thirdparty/apple/AirPlaySender.framework/AirPlaySender"
 
-func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
+func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	binaryPath := os.Getenv("AIRPLAY_SENDER_PATH")
 	if binaryPath == "" {
 		binaryPath = airplaySenderPath
@@ -154,7 +154,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	// video encryption key. Both sides compute the same key.
 	ekey := buildEkey()
 	aesKey := playfairDecrypt(c.fpM3, ekey[:])
-	c.fpEkey = ekey[:]
+	c.FpEkey = ekey[:]
 
 	// Save the raw 16-byte aesKey before any hashing. AppleTV uses this
 	// as the IKM for HKDF-SHA512 to derive ChaCha20-Poly1305 keys.
@@ -165,13 +165,13 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	// hashes the fairplay-decrypted key with it: SHA-512(aeskey + ecdh_secret)[:16].
 	// UxPlay does this in raop_handlers.h; we must match.
 	finalKey := aesKey[:]
-	if c.pairKeys != nil && len(c.pairKeys.SharedSecret) > 0 {
+	if c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0 {
 		h := sha512.New()
 		h.Write(aesKey[:])
-		h.Write(c.pairKeys.SharedSecret)
+		h.Write(c.PairKeys.SharedSecret)
 		finalKey = h.Sum(nil)[:16]
 		dbg("[FP]   raw aesKey:   %s", hex.EncodeToString(aesKey[:]))
-		dbg("[FP]   ecdh_secret:  %s", hex.EncodeToString(c.pairKeys.SharedSecret))
+		dbg("[FP]   ecdh_secret:  %s", hex.EncodeToString(c.PairKeys.SharedSecret))
 		dbg("[FP]   hashed key:   %s", hex.EncodeToString(finalKey))
 	}
 
@@ -181,7 +181,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 
 	dbg("[FP] FairPlay handshake complete!")
 	dbg("[FP]   m4 payload:  %s", hex.EncodeToString(m4Payload))
-	dbg("[FP]   ekey:        %s", hex.EncodeToString(c.fpEkey))
+	dbg("[FP]   ekey:        %s", hex.EncodeToString(c.FpEkey))
 	dbg("[FP]   aesKey:      %s", hex.EncodeToString(c.fpKey))
 	dbg("[FP]   iv:          %s", hex.EncodeToString(c.fpIV))
 	return nil

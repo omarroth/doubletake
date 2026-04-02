@@ -1,4 +1,4 @@
-package main
+package airplay
 
 import (
 	"bytes"
