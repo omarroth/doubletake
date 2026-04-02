@@ -229,7 +229,11 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if err != nil {
 		return nil, fmt.Errorf("connect data port %s: %w", dataAddr, err)
 	}
-	log.Printf("[SETUP] data channel connected: %s", dataAddr)
+	// Disable Nagle's algorithm to reduce frame delivery latency
+	if tc, ok := dataConn.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
+	log.Printf("[SETUP] data channel connected: %s (TCP_NODELAY)", dataAddr)
 
 	// Send RECORD to start the session.
 	// Apple TV expects normal RTSP start headers here; without them it may wait
@@ -357,24 +361,15 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	var codecSent bool              // true if codec frame sent for current keyframe
 	var frameCount int
 	var nalLog strings.Builder
-	frameInterval := time.Second / 30 // ~33ms at 30fps
-	var lastFrameTime time.Time
 
 	// flushVCL sends the accumulated VCL data as a single encrypted frame.
 	// This handles multi-slice frames by combining all slices of one access unit.
+	// No artificial frame pacing — the encoder/capture pipeline provides natural
+	// frame timing. Adding time.Sleep here only increases end-to-end latency.
 	flushVCL := func() error {
 		if len(vclBuf) == 0 {
 			return nil
 		}
-
-		// Pace frames at target framerate
-		if !lastFrameTime.IsZero() {
-			elapsed := time.Since(lastFrameTime)
-			if elapsed < frameInterval {
-				time.Sleep(frameInterval - elapsed)
-			}
-		}
-		lastFrameTime = time.Now()
 
 		packetTimestamp := ntpTimeNow()
 

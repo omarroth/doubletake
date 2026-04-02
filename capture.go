@@ -19,6 +19,7 @@ type CaptureConfig struct {
 	Width   int
 	Height  int
 	FPS     int
+	Bitrate int    // Video bitrate in kbps (0 = auto)
 	HWAccel string // "auto", "vaapi", "none"
 }
 
@@ -29,7 +30,9 @@ type ScreenCapture struct {
 	stdout   io.ReadCloser
 	cancel   context.CancelFunc
 	pwNodeID uint32
-	waitCh   chan error
+	waitCh   chan struct{} // closed when process exits
+	waitErr  error         // set before waitCh is closed
+	stopped  bool
 }
 
 // StartCapture detects the display server (Wayland or X11) and initiates screen
@@ -74,7 +77,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		"--quiet",
 		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
 		"!", "video/x-raw",
-		"!", "queue",
+		"!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "videoconvert",
 		"!", "videoscale",
 		"!", "videorate",
@@ -135,22 +138,22 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	go logStderr("GST", gstStderr)
 	go logStderr("FFMPEG", ffmpegStderr)
 
-	waitCh := make(chan error, 1)
-	go func() {
-		err := ffmpegCmd.Wait()
-		gstCmd.Process.Kill()
-		gstCmd.Wait()
-		waitCh <- err
-	}()
-
-	return &ScreenCapture{
+	capture := &ScreenCapture{
 		cmd:      ffmpegCmd,
 		gstCmd:   gstCmd,
 		stdout:   ffmpegStdout,
 		cancel:   cancel,
 		pwNodeID: nodeID,
-		waitCh:   waitCh,
-	}, nil
+		waitCh:   make(chan struct{}),
+	}
+	go func() {
+		capture.waitErr = ffmpegCmd.Wait()
+		gstCmd.Process.Kill()
+		gstCmd.Wait()
+		close(capture.waitCh)
+	}()
+
+	return capture, nil
 }
 
 func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
@@ -166,6 +169,14 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	}
 
 	display := os.Getenv("DISPLAY")
+
+	bitrate := cfg.Bitrate
+	if bitrate <= 0 {
+		bitrate = 10000
+	}
+	bitrateStr := fmt.Sprintf("%dk", bitrate)
+	bufsizeStr := fmt.Sprintf("%dk", bitrate/fps+1)
+
 	ffmpegArgs := []string{
 		"-nostdin",
 		"-f", "x11grab",
@@ -177,14 +188,14 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 		"-profile:v", "high",
 		"-level:v", "4.0",
 		"-tune", "zerolatency",
-		"-preset", "ultrafast",
-		"-x264-params", "cabac=1:aud=1",
-		"-g", fmt.Sprintf("%d", fps),
+		"-preset", "superfast",
+		"-x264-params", fmt.Sprintf("cabac=1:aud=1:repeat-headers=0:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0"),
+		"-g", fmt.Sprintf("%d", fps*2),
 		"-keyint_min", fmt.Sprintf("%d", fps),
 		"-bf", "0",
-		"-b:v", "4000k",
-		"-maxrate", "4000k",
-		"-bufsize", "8000k",
+		"-b:v", bitrateStr,
+		"-maxrate", bitrateStr,
+		"-bufsize", bufsizeStr,
 		"-f", "h264",
 		"pipe:1",
 	}
@@ -209,24 +220,26 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	}
 
 	go logStderr("FFMPEG", stderr)
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
 
-	return &ScreenCapture{
+	capture := &ScreenCapture{
 		cmd:    cmd,
 		stdout: stdout,
 		cancel: cancel,
-		waitCh: waitCh,
-	}, nil
+		waitCh: make(chan struct{}),
+	}
+	go func() {
+		capture.waitErr = cmd.Wait()
+		close(capture.waitCh)
+	}()
+
+	return capture, nil
 }
 
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 	select {
-	case err := <-sc.waitCh:
-		if err != nil {
-			return 0, fmt.Errorf("gst-launch exited: %w", err)
+	case <-sc.waitCh:
+		if sc.waitErr != nil {
+			return 0, fmt.Errorf("capture exited: %w", sc.waitErr)
 		}
 		return 0, io.EOF
 	default:
@@ -235,28 +248,28 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 }
 
 func (sc *ScreenCapture) Stop() {
-	if sc.cancel == nil || sc.cmd == nil {
+	if sc.stopped || sc.cmd == nil {
 		return
 	}
-	sc.cancel()
+	sc.stopped = true
+	if sc.cancel != nil {
+		sc.cancel()
+	}
+
+	// Close stdout to unblock any pending Read() call
+	if sc.stdout != nil {
+		sc.stdout.Close()
+	}
+
 	if sc.cmd.Process != nil {
 		_ = sc.cmd.Process.Signal(os.Interrupt)
 	}
 	if sc.gstCmd != nil && sc.gstCmd.Process != nil {
 		_ = sc.gstCmd.Process.Signal(os.Interrupt)
 	}
-	done := make(chan struct{})
-	go func() {
-		if sc.waitCh != nil {
-			<-sc.waitCh
-		} else {
-			_ = sc.cmd.Wait()
-		}
-		close(done)
-	}()
 
 	select {
-	case <-done:
+	case <-sc.waitCh:
 	case <-time.After(2 * time.Second):
 		if sc.cmd.Process != nil {
 			_ = sc.cmd.Process.Kill()
@@ -264,7 +277,7 @@ func (sc *ScreenCapture) Stop() {
 		if sc.gstCmd != nil && sc.gstCmd.Process != nil {
 			_ = sc.gstCmd.Process.Kill()
 		}
-		<-done
+		<-sc.waitCh
 	}
 }
 
@@ -275,25 +288,83 @@ func buildFFmpegEncodeArgs(cfg CaptureConfig, input string) []string {
 	if fps <= 0 {
 		fps = 30
 	}
-	return []string{
+	bitrate := cfg.Bitrate
+	if bitrate <= 0 {
+		bitrate = 10000
+	}
+	bitrateStr := fmt.Sprintf("%dk", bitrate)
+	// bufsize = 1 frame worth of data for minimal encoder latency
+	bufsizeStr := fmt.Sprintf("%dk", bitrate/fps+1)
+
+	args := []string{
 		"-nostdin",
 		"-f", "rawvideo",
 		"-pixel_format", "yuv420p",
 		"-video_size", fmt.Sprintf("%dx%d", cfg.Width, cfg.Height),
 		"-framerate", fmt.Sprintf("%d", fps),
 		"-i", input,
+	}
+
+	// Try VAAPI hardware encoding if requested
+	if cfg.HWAccel == "vaapi" || cfg.HWAccel == "auto" {
+		vaArgs := buildVAAPIArgs(cfg, fps, bitrateStr, bufsizeStr, input)
+		if vaArgs != nil {
+			return vaArgs
+		}
+		if cfg.HWAccel == "vaapi" {
+			log.Printf("[CAPTURE] VAAPI explicitly requested but not available, falling back to libx264")
+		}
+	}
+
+	args = append(args,
 		"-c:v", "libx264",
 		"-profile:v", "high",
 		"-level:v", "4.0",
 		"-tune", "zerolatency",
-		"-preset", "ultrafast",
-		"-x264-params", "cabac=1:aud=1",
-		"-g", fmt.Sprintf("%d", fps),
+		"-preset", "superfast",
+		"-x264-params", fmt.Sprintf("cabac=1:aud=1:repeat-headers=0:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0"),
+		"-g", fmt.Sprintf("%d", fps*2), // keyframe every 2 seconds
 		"-keyint_min", fmt.Sprintf("%d", fps),
 		"-bf", "0",
-		"-b:v", "4000k",
-		"-maxrate", "4000k",
-		"-bufsize", "8000k",
+		"-b:v", bitrateStr,
+		"-maxrate", bitrateStr,
+		"-bufsize", bufsizeStr,
+		"-f", "h264",
+		"pipe:1",
+	)
+	return args
+}
+
+// buildVAAPIArgs tries to construct VAAPI hardware encoding args.
+// Returns nil if VAAPI is not available.
+func buildVAAPIArgs(cfg CaptureConfig, fps int, bitrateStr, bufsizeStr, input string) []string {
+	// Check if VAAPI device exists
+	if _, err := os.Stat("/dev/dri/renderD128"); err != nil {
+		return nil
+	}
+	// Check if ffmpeg has vaapi_h264 encoder
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
+	if err != nil || !strings.Contains(string(out), "h264_vaapi") {
+		return nil
+	}
+	log.Printf("[CAPTURE] using VAAPI hardware encoding")
+	return []string{
+		"-nostdin",
+		"-vaapi_device", "/dev/dri/renderD128",
+		"-f", "rawvideo",
+		"-pixel_format", "yuv420p",
+		"-video_size", fmt.Sprintf("%dx%d", cfg.Width, cfg.Height),
+		"-framerate", fmt.Sprintf("%d", fps),
+		"-i", input,
+		"-vf", "format=nv12,hwupload",
+		"-c:v", "h264_vaapi",
+		"-profile:v", "high",
+		"-level", "40",
+		"-g", fmt.Sprintf("%d", fps*2),
+		"-bf", "0",
+		"-b:v", bitrateStr,
+		"-maxrate", bitrateStr,
+		"-bufsize", bufsizeStr,
 		"-f", "h264",
 		"pipe:1",
 	}
@@ -311,6 +382,11 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		fps = 30
 	}
 
+	bitrate := cfg.Bitrate
+	if bitrate <= 0 {
+		bitrate = 10000
+	}
+
 	// GStreamer pipeline: videotestsrc → timeoverlay → x264enc High profile → Annex-B byte stream → stdout
 	// pattern=18 = ball (bouncing ball with motion); timeoverlay adds a frame counter
 	gstArgs := []string{
@@ -321,8 +397,8 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		"!", "videoconvert",
 		"!", "x264enc",
 		"tune=zerolatency",
-		fmt.Sprintf("bitrate=%d", 4000),
-		fmt.Sprintf("key-int-max=%d", fps),
+		fmt.Sprintf("bitrate=%d", bitrate),
+		fmt.Sprintf("key-int-max=%d", fps*2),
 		"bframes=0",
 		"sliced-threads=false",
 		"threads=1",
@@ -351,17 +427,19 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 	}
 
 	go logStderr("GST", stderr)
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
 
-	return &ScreenCapture{
+	capture := &ScreenCapture{
 		cmd:    cmd,
 		stdout: stdout,
 		cancel: cancel,
-		waitCh: waitCh,
-	}, nil
+		waitCh: make(chan struct{}),
+	}
+	go func() {
+		capture.waitErr = cmd.Wait()
+		close(capture.waitCh)
+	}()
+
+	return capture, nil
 }
 
 func logStderr(prefix string, r io.Reader) {

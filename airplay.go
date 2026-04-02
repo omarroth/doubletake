@@ -509,6 +509,7 @@ type StreamConfig struct {
 	Width     int
 	Height    int
 	FPS       int
+	Bitrate   int  // Video bitrate in kbps
 	NoEncrypt bool // Disable encryption for debugging
 	DirectKey bool // Use shk/shiv directly without SHA-512 derivation
 }
