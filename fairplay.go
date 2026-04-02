@@ -9,10 +9,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"unsafe"
 
 	"airplay/fpemu"
-	"airplay/playfair"
 )
+
+/*
+#cgo LDFLAGS: -lm
+#include "playfair.h"
+*/
+import "C"
 
 const airplaySenderPath = "thirdparty/apple/AirPlaySender.framework/AirPlaySender"
 
@@ -155,7 +161,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	// derive via playfair_decrypt(m3, ekey). Then we use that derived key as our
 	// video encryption key. Both sides compute the same key.
 	ekey := buildEkey()
-	aesKey := playfair.Decrypt(c.fpM3, ekey[:])
+	aesKey := playfairDecrypt(c.fpM3, ekey[:])
 	c.fpEkey = ekey[:]
 
 	// Save the raw 16-byte aesKey before any hashing. AppleTV uses this
@@ -215,4 +221,47 @@ func buildEkey() [72]byte {
 	ekey[11] = 0x3c
 	// bytes 12-71 are zeros (chunk1, padding, chunk2 all zero)
 	return ekey
+}
+
+// playfairDecrypt calls the playfair_decrypt C function.
+// m3 is the full 164-byte FairPlay message 3 (including FPLY header).
+// ekey is the 72-byte encrypted key from the SETUP plist.
+// Returns the 16-byte decrypted AES key.
+func playfairDecrypt(m3 []byte, ekey []byte) [16]byte {
+	var key [16]byte
+	C.playfair_decrypt(
+		(*C.uchar)(unsafe.Pointer(&m3[0])),
+		(*C.uchar)(unsafe.Pointer(&ekey[0])),
+		(*C.uchar)(unsafe.Pointer(&key[0])),
+	)
+	return key
+}
+
+// fplyWrap adds FPLY framing header to raw SAP data.
+// If the data already starts with "FPLY", it's returned as-is.
+func fplyWrap(data []byte, msgType byte) []byte {
+	if len(data) >= 4 && string(data[:4]) == "FPLY" {
+		return data
+	}
+	header := make([]byte, 12+len(data))
+	copy(header[0:4], []byte("FPLY"))
+	header[4] = 0x03
+	header[5] = 0x01
+	header[6] = msgType
+	header[7] = 0x00
+	header[8] = byte(len(data) >> 24)
+	header[9] = byte(len(data) >> 16)
+	header[10] = byte(len(data) >> 8)
+	header[11] = byte(len(data))
+	copy(header[12:], data)
+	return header
+}
+
+// fplyUnwrap strips the FPLY framing header and returns the payload.
+// If the data doesn't have FPLY framing, it's returned as-is.
+func fplyUnwrap(data []byte) []byte {
+	if len(data) >= 12 && string(data[:4]) == "FPLY" {
+		return data[12:]
+	}
+	return data
 }
