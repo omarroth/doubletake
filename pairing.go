@@ -176,6 +176,15 @@ func (c *AirPlayClient) pairSetupTransient(ctx context.Context) error {
 	return c.completeSRPExchange(ctx, "", serverSalt, serverPub)
 }
 
+// StartPINDisplay triggers the PIN display on the Apple TV.
+// Call this before prompting the user so the PIN is visible when they're asked.
+func (c *AirPlayClient) StartPINDisplay() error {
+	if _, err := c.httpRequest("POST", "/pair-pin-start", "", nil, c.pairHeaders()); err != nil {
+		return fmt.Errorf("pair-pin-start: %w", err)
+	}
+	return nil
+}
+
 // pairWithPIN performs PIN-based pairing.
 func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -186,11 +195,6 @@ func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
 	c.pairKeys = &PairKeys{
 		Ed25519Public:  pub,
 		Ed25519Private: priv,
-	}
-
-	// Trigger PIN display on the Apple TV
-	if _, err := c.httpRequest("POST", "/pair-pin-start", "", nil, c.pairHeaders()); err != nil {
-		return fmt.Errorf("pair-pin-start: %w", err)
 	}
 
 	return c.performPairSetupAndVerify(ctx, pin)

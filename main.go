@@ -88,7 +88,10 @@ func main() {
 		// Full pair-setup with PIN
 		pinVal := *pin
 		if pinVal == "" {
-			// Trigger PIN display and ask user
+			// Trigger PIN display on the TV first, then ask user
+			if err := client.StartPINDisplay(); err != nil {
+				log.Fatalf("failed to trigger PIN display: %v", err)
+			}
 			fmt.Print("Enter the PIN shown on Apple TV: ")
 			fmt.Scanln(&pinVal)
 		}
