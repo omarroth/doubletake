@@ -1,3 +1,5 @@
+github.com/blacktop/go-dwarf v1.0.10 h1:i9zYgcIROETsNZ6V+zZn3uDH21FCG5BLLZ837GitxS0=
+github.com/blacktop/go-dwarf v1.0.10/go.mod h1:4W2FKgSFYcZLDwnR7k+apv5i3nrau4NGl9N6VQ9DSTo=
 github.com/cenkalti/backoff v2.2.1+incompatible h1:tNowT99t7UNflLxfYYSlKYsBpXdEet03Pg2g16Swow4=
 github.com/cenkalti/backoff v2.2.1+incompatible/go.mod h1:90ReRw6GdpyfrHakVjL/QHaoyV4aDUVVkXQJJJ3NXXM=
 github.com/godbus/dbus/v5 v5.1.0 h1:4KLkAxT3aOY8Li4FRJe/KvhoNFFxo0m6fNuFUO8QJUk=
@@ -12,6 +14,10 @@ github.com/miekg/dns v1.1.62 h1:cN8OuEF1/x5Rq6Np+h1epln8OiyPWV+lROx9LxcGgIQ=
 github.com/miekg/dns v1.1.62/go.mod h1:mvDlcItzm+br7MToIKqkglaGhlFMHJ9DTNNWONWXbNQ=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+github.com/t0rr3sp3dr0/go-macho v0.0.0-20241224072836-20948aaf41de h1:z9ew7QFmlFpK2ts4Eib66GHxcnMOWptklKLZyNzz3y0=
+github.com/t0rr3sp3dr0/go-macho v0.0.0-20241224072836-20948aaf41de/go.mod h1:dtlW2AJKQpFzImBVPWiUKZ6OxrQ2MLfWi/BPPe0EONE=
+github.com/unicorn-engine/unicorn v0.0.0-20241221030228-28990888443e h1:R6Wmt0dFjQG4iyMLTytuQYRRZ5Z66ztsdOYDeHQE6as=
+github.com/unicorn-engine/unicorn v0.0.0-20241221030228-28990888443e/go.mod h1:mcHBrigWSHlMZYol9QOFnK7sbltIt/OaKP5CQBZsC+4=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
 golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
 golang.org/x/crypto v0.31.0 h1:ihbySMvVjLAeSH1IbfcRTkD/iNscyz8rGzjF/E5hV6U=
@@ -42,3 +48,5 @@ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8
 gopkg.in/yaml.v1 v1.0.0-20140924161607-9f9df34309c0/go.mod h1:WDnlLJ4WF5VGsH/HVa3CI79GS0ol3YnhVnKP89i0kNg=
 howett.net/plist v1.0.1 h1:37GdZ8tP09Q35o9ych3ehygcsL+HqKSwzctveSlarvM=
 howett.net/plist v1.0.1/go.mod h1:lqaXoTrLY4hg8tnEzNru53gicrbv7rrk+2xJA/7hw9g=
+howett.net/ranger v0.0.0-20171016084633-e2e137620847 h1:jHX+2Sv8rQNb1nG2G9pcQLdVoWXBLW5fcd2gnfHluCU=
+howett.net/ranger v0.0.0-20171016084633-e2e137620847/go.mod h1:ZWGIG4mR6Ck+CdmFqK2/jox5vO2OAS8Qpb33HB8z0og=
