@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -95,38 +94,38 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 
 // performTransientSetupAndVerify does transient (PIN-less) pair-setup + pair-verify.
 func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) error {
-	log.Printf("[PAIR] starting transient pair-setup")
+	dbg("[PAIR] starting transient pair-setup")
 
 	// Try raw binary pair-setup first (UxPlay / legacy AirPlay protocol).
 	// Send 32-byte Ed25519 public key, expect 32-byte server public key back.
-	log.Printf("[PAIR] trying raw binary pair-setup (UxPlay-compatible)")
+	dbg("[PAIR] trying raw binary pair-setup (UxPlay-compatible)")
 	serverPub, err := c.rawPairSetup(ctx)
 	if err != nil {
 		// Fall back to TLV8/HomeKit-style pair-setup (Apple TV)
-		log.Printf("[PAIR] raw pair-setup failed (%v), trying TLV8 pair-setup", err)
+		dbg("[PAIR] raw pair-setup failed (%v), trying TLV8 pair-setup", err)
 		if err := c.pairSetupTransient(ctx); err != nil {
 			return fmt.Errorf("pair-setup: %w", err)
 		}
-		log.Printf("[PAIR] transient pair-setup complete, starting HAP pair-verify")
+		dbg("[PAIR] transient pair-setup complete, starting HAP pair-verify")
 		if err := c.pairVerify(ctx); err != nil {
 			return fmt.Errorf("pair-verify: %w", err)
 		}
-		log.Printf("[PAIR] pair-verify complete, channel is now encrypted")
+		dbg("[PAIR] pair-verify complete, channel is now encrypted")
 		return nil
 	}
 
 	// Raw pair-setup succeeded — store server's Ed25519 public key and use raw pair-verify
-	log.Printf("[PAIR] raw pair-setup OK, server Ed25519 pub: %02x", serverPub[:8])
+	dbg("[PAIR] raw pair-setup OK, server Ed25519 pub: %02x", serverPub[:8])
 	if c.info == nil {
 		c.info = &ReceiverInfo{}
 	}
 	c.info.PK = serverPub
 
-	log.Printf("[PAIR] starting raw pair-verify (no HAP encryption)")
+	dbg("[PAIR] starting raw pair-verify (no HAP encryption)")
 	if err := c.rawPairVerify(ctx); err != nil {
 		return fmt.Errorf("raw pair-verify: %w", err)
 	}
-	log.Printf("[PAIR] raw pair-verify complete (connection stays plaintext)")
+	dbg("[PAIR] raw pair-verify complete (connection stays plaintext)")
 	return nil
 }
 
@@ -380,7 +379,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 		{Tag: tlvState, Value: []byte{0x01}},
 		{Tag: tlvPublicKey, Value: clientPublic[:]},
 	})
-	log.Printf("[PAIR-VERIFY] V1: sending %d-byte X25519 public key", len(clientPublic[:]))
+	dbg("[PAIR-VERIFY] V1: sending %d-byte X25519 public key", len(clientPublic[:]))
 	v2Bytes, err := c.httpRequest("POST", "/pair-verify", "application/octet-stream", v1, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("V1: %w", err)
@@ -393,7 +392,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 
 	serverKeyData := v2[tlvPublicKey]
 	serverEncrypted := v2[tlvEncryptedData]
-	log.Printf("[PAIR-VERIFY] V2: server pubkey=%d bytes, encrypted=%d bytes", len(serverKeyData), len(serverEncrypted))
+	dbg("[PAIR-VERIFY] V2: server pubkey=%d bytes, encrypted=%d bytes", len(serverKeyData), len(serverEncrypted))
 
 	if len(serverKeyData) < 32 {
 		return fmt.Errorf("V2: server public key too short")
@@ -431,7 +430,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 	clientIDBytes := []byte(c.pairingID)
 	sigInput := bytes.Join([][]byte{clientPublic[:], clientIDBytes, serverPublic[:]}, nil)
 	signature := ed25519.Sign(c.pairKeys.Ed25519Private, sigInput)
-	log.Printf("[PAIR-VERIFY] V3: sig input = clientPub(%d) || pairingID(%d) || serverPub(%d) = %d bytes",
+	dbg("[PAIR-VERIFY] V3: sig input = clientPub(%d) || pairingID(%d) || serverPub(%d) = %d bytes",
 		len(clientPublic), len(clientIDBytes), len(serverPublic), len(sigInput))
 
 	subTLV := tlv8EncodeOrdered([]tlv8Item{
@@ -451,7 +450,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 		{Tag: tlvState, Value: []byte{0x03}},
 		{Tag: tlvEncryptedData, Value: encrypted},
 	})
-	log.Printf("[PAIR-VERIFY] V3: sending encrypted proof")
+	dbg("[PAIR-VERIFY] V3: sending encrypted proof")
 	v4Bytes, err := c.httpRequest("POST", "/pair-verify", "application/octet-stream", v3, c.pairHeaders())
 	if err != nil {
 		return fmt.Errorf("V3: %w", err)
@@ -462,9 +461,9 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 		if errTLV, ok := v4[tlvError]; ok {
 			return fmt.Errorf("pair-verify V4 error: %d", errTLV[0])
 		}
-		log.Printf("[PAIR-VERIFY] V4: response %d bytes, no error", len(v4Bytes))
+		dbg("[PAIR-VERIFY] V4: response %d bytes, no error", len(v4Bytes))
 	} else {
-		log.Printf("[PAIR-VERIFY] V4: empty response (OK)")
+		dbg("[PAIR-VERIFY] V4: empty response (OK)")
 	}
 
 	// After pair-verify, the AirPlay control channel is encrypted using HAP framing.
@@ -475,9 +474,9 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 	c.pairKeys.WriteKey = c.encWriteKey
 	c.pairKeys.ReadKey = c.encReadKey
 
-	log.Printf("[PAIR-VERIFY] shared secret: %s...", hex.EncodeToString(shared[:16]))
-	log.Printf("[PAIR-VERIFY] writeKey: %s...", hex.EncodeToString(c.encWriteKey[:8]))
-	log.Printf("[PAIR-VERIFY] readKey:  %s...", hex.EncodeToString(c.encReadKey[:8]))
+	dbg("[PAIR-VERIFY] shared secret: %s...", hex.EncodeToString(shared[:16]))
+	dbg("[PAIR-VERIFY] writeKey: %s...", hex.EncodeToString(c.encWriteKey[:8]))
+	dbg("[PAIR-VERIFY] readKey:  %s...", hex.EncodeToString(c.encReadKey[:8]))
 
 	writeCipher, err := chacha20poly1305.New(c.encWriteKey)
 	if err != nil {
@@ -487,7 +486,7 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 	c.encWriteNonce = 0
 	c.encReadNonce = 0
 	c.encrypted = true
-	log.Printf("[PAIR-VERIFY] encryption ENABLED (HAP framing, nonces at 0)")
+	dbg("[PAIR-VERIFY] encryption ENABLED (HAP framing, nonces at 0)")
 
 	return nil
 }
@@ -604,13 +603,13 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	copy(v1[4:36], clientPublic[:])
 	copy(v1[36:68], c.pairKeys.Ed25519Public)
 
-	log.Printf("[RAW-PV] V1: sending 68 bytes (X25519 pub + Ed25519 pub)")
-	log.Printf("[RAW-PV] V1 hex: %02x", v1)
+	dbg("[RAW-PV] V1: sending 68 bytes (X25519 pub + Ed25519 pub)")
+	dbg("[RAW-PV] V1 hex: %02x", v1)
 	v2, err := c.rawRequest("POST", "/pair-verify", "application/octet-stream", v1)
 	if err != nil {
 		return fmt.Errorf("V1: %w", err)
 	}
-	log.Printf("[RAW-PV] V2: received %d bytes", len(v2))
+	dbg("[RAW-PV] V2: received %d bytes", len(v2))
 
 	if len(v2) != 96 {
 		return fmt.Errorf("V2: expected 96 bytes, got %d", len(v2))
@@ -652,7 +651,7 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	if !ed25519.Verify(serverEd25519Pub, serverSigMsg, serverSig) {
 		return fmt.Errorf("server signature verification failed")
 	}
-	log.Printf("[RAW-PV] server signature verified OK")
+	dbg("[RAW-PV] server signature verified OK")
 
 	// Sign our proof: Ed25519_sign(client_X25519 || server_X25519)
 	clientSigMsg := make([]byte, 64)
@@ -673,16 +672,16 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	// v3[0:4] = 0x00000000 (already zero)
 	copy(v3[4:68], encryptedClientSig)
 
-	log.Printf("[RAW-PV] V3: sending encrypted proof (68 bytes)")
+	dbg("[RAW-PV] V3: sending encrypted proof (68 bytes)")
 	v4, err := c.rawRequest("POST", "/pair-verify", "application/octet-stream", v3)
 	if err != nil {
 		return fmt.Errorf("V3: %w", err)
 	}
 
 	if len(v4) != 0 {
-		log.Printf("[RAW-PV] V4: unexpected %d bytes in response", len(v4))
+		dbg("[RAW-PV] V4: unexpected %d bytes in response", len(v4))
 	}
-	log.Printf("[RAW-PV] pair-verify complete (connection stays PLAINTEXT)")
+	dbg("[RAW-PV] pair-verify complete (connection stays PLAINTEXT)")
 
 	// Store shared secret for potential stream key derivation,
 	// but do NOT enable HAP encryption on the control channel
