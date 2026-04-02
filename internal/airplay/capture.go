@@ -23,10 +23,9 @@ type CaptureConfig struct {
 	HWAccel string // "auto", "vaapi", "none"
 }
 
-// ScreenCapture manages Wayland screen capture via xdg-desktop-portal + ffmpeg.
+// ScreenCapture manages screen capture via GStreamer.
 type ScreenCapture struct {
-	cmd      *exec.Cmd // primary process (ffmpeg encoder)
-	gstCmd   *exec.Cmd // GStreamer raw capture for Wayland (nil for X11)
+	cmd      *exec.Cmd // gst-launch-1.0 process
 	stdout   io.ReadCloser
 	cancel   context.CancelFunc
 	pwNodeID uint32
@@ -37,8 +36,8 @@ type ScreenCapture struct {
 }
 
 // StartCapture detects the display server (Wayland or X11) and initiates screen
-// capture accordingly. On Wayland it uses xdg-desktop-portal + PipeWire for raw
-// capture and ffmpeg/libx264 for encoding; on X11 it uses ffmpeg x11grab directly.
+// capture accordingly. On Wayland it uses xdg-desktop-portal + PipeWire for
+// capture; on X11 it uses ximagesrc. Both use GStreamer for H.264 encoding.
 func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		return startWaylandCapture(ctx, cfg)
@@ -129,8 +128,8 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 }
 
 func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, fmt.Errorf("ffmpeg not found in PATH; install ffmpeg with libx264 support")
+	if err := exec.Command("gst-inspect-1.0", "ximagesrc").Run(); err != nil {
+		return nil, fmt.Errorf("GStreamer 'ximagesrc' plugin not found; install gst-plugins-good")
 	}
 
 	captureCtx, cancel := context.WithCancel(ctx)
@@ -142,69 +141,40 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 
 	display := os.Getenv("DISPLAY")
 
-	bitrate := cfg.Bitrate
-	if bitrate <= 0 {
-		bitrate = 10000
-	}
-	bitrateStr := fmt.Sprintf("%dk", bitrate)
-	bufsizeStr := fmt.Sprintf("%dk", bitrate/fps+1)
+	encoderParts := detectGstEncoder(cfg)
 
-	ffmpegArgs := []string{
-		"-nostdin",
+	gstArgs := []string{
+		"--quiet",
+		"ximagesrc", fmt.Sprintf("display-name=%s", display), "use-damage=false",
+		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
+		"!", "videoconvert",
+		"!", "videoscale",
+		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d", cfg.Width, cfg.Height),
 	}
-
-	// VAAPI needs the device opened before the input
-	encoder, encoderArgs := detectFFmpegEncoder(cfg)
-	if encoder == "h264_vaapi" {
-		ffmpegArgs = append(ffmpegArgs, "-vaapi_device", "/dev/dri/renderD128")
-	}
-
-	ffmpegArgs = append(ffmpegArgs,
-		"-f", "x11grab",
-		"-framerate", fmt.Sprintf("%d", fps),
-		"-video_size", fmt.Sprintf("%dx%d", cfg.Width, cfg.Height),
-		"-i", display,
+	gstArgs = append(gstArgs, "!")
+	gstArgs = append(gstArgs, encoderParts...)
+	gstArgs = append(gstArgs,
+		"!", "h264parse",
+		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
+		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
 
-	// VAAPI needs hwupload filter
-	if encoder == "h264_vaapi" {
-		ffmpegArgs = append(ffmpegArgs, "-vf", "format=nv12,hwupload")
-	} else {
-		ffmpegArgs = append(ffmpegArgs, "-pix_fmt", "yuv420p")
-	}
-
-	ffmpegArgs = append(ffmpegArgs, encoderArgs...)
-	ffmpegArgs = append(ffmpegArgs,
-		"-g", fmt.Sprintf("%d", fps*2),
-		"-keyint_min", fmt.Sprintf("%d", fps),
-		"-bf", "0",
-		"-b:v", bitrateStr,
-		"-maxrate", bitrateStr,
-		"-bufsize", bufsizeStr,
-		"-f", "h264",
-		"pipe:1",
-	)
-
-	dbg("[CAPTURE] launching ffmpeg (x11) %s", strings.Join(ffmpegArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "ffmpeg", ffmpegArgs...)
+	dbg("[CAPTURE] gst-launch-1.0 (x11) %s", strings.Join(gstArgs, " "))
+	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("ffmpeg stdout pipe: %w", err)
+		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("ffmpeg stderr pipe: %w", err)
-	}
+	stderr, _ := cmd.StderrPipe()
 
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("start ffmpeg: %w", err)
+		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
 
-	go logStderr("FFMPEG", stderr)
+	go logStderr("GST", stderr)
 
 	capture := &ScreenCapture{
 		cmd:    cmd,
@@ -252,18 +222,12 @@ func (sc *ScreenCapture) Stop() {
 	if sc.cmd.Process != nil {
 		_ = sc.cmd.Process.Signal(os.Interrupt)
 	}
-	if sc.gstCmd != nil && sc.gstCmd.Process != nil {
-		_ = sc.gstCmd.Process.Signal(os.Interrupt)
-	}
 
 	select {
 	case <-sc.waitCh:
 	case <-time.After(2 * time.Second):
 		if sc.cmd.Process != nil {
 			_ = sc.cmd.Process.Kill()
-		}
-		if sc.gstCmd != nil && sc.gstCmd.Process != nil {
-			_ = sc.gstCmd.Process.Kill()
 		}
 		<-sc.waitCh
 	}
@@ -329,158 +293,10 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 	}
 }
 
-// detectFFmpegEncoder probes for available ffmpeg H.264 encoders and returns
-// the encoder name and encoder-specific ffmpeg arguments.
-// Priority: h264_nvenc > h264_vaapi > libx264 (software fallback).
-func detectFFmpegEncoder(cfg CaptureConfig) (encoder string, args []string) {
-	hwaccel := cfg.HWAccel
-
-	// Try NVENC
-	if hwaccel == "auto" || hwaccel == "nvenc" {
-		if hasFFmpegEncoder("h264_nvenc") {
-			log.Printf("[CAPTURE] using NVENC hardware encoding (h264_nvenc)")
-			return "h264_nvenc", []string{
-				"-c:v", "h264_nvenc",
-				"-profile:v", "high",
-				"-level:v", "4.0",
-				"-preset", "p4",
-				"-tune", "ll",
-			}
-		}
-		if hwaccel == "nvenc" {
-			dbg("[CAPTURE] h264_nvenc not available, falling back to software")
-		}
-	}
-
-	// Try VAAPI
-	if hwaccel == "auto" || hwaccel == "vaapi" {
-		if _, err := os.Stat("/dev/dri/renderD128"); err == nil && hasFFmpegEncoder("h264_vaapi") {
-			log.Printf("[CAPTURE] using VAAPI hardware encoding (h264_vaapi)")
-			return "h264_vaapi", []string{
-				"-c:v", "h264_vaapi",
-				"-profile:v", "high",
-				"-level", "40",
-			}
-		}
-		if hwaccel == "vaapi" {
-			dbg("[CAPTURE] h264_vaapi not available, falling back to software")
-		}
-	}
-
-	// Software fallback
-	log.Printf("[CAPTURE] using software encoding (libx264)")
-	return "libx264", []string{
-		"-c:v", "libx264",
-		"-profile:v", "high",
-		"-level:v", "4.0",
-		"-tune", "zerolatency",
-		"-preset", "superfast",
-		"-x264-params", "cabac=1:aud=1:repeat-headers=1:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0",
-	}
-}
-
-// hasFFmpegEncoder checks if ffmpeg supports the given encoder.
-func hasFFmpegEncoder(name string) bool {
-	out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), name)
-}
-
-// buildFFmpegEncodeArgs constructs ffmpeg arguments for encoding raw I420 video
-// (or from another input) to H.264 High profile Annex-B byte stream.
-func buildFFmpegEncodeArgs(cfg CaptureConfig, input string) []string {
-	fps := cfg.FPS
-	if fps <= 0 {
-		fps = 30
-	}
-	bitrate := cfg.Bitrate
-	if bitrate <= 0 {
-		bitrate = 10000
-	}
-	bitrateStr := fmt.Sprintf("%dk", bitrate)
-	// bufsize = 1 frame worth of data for minimal encoder latency
-	bufsizeStr := fmt.Sprintf("%dk", bitrate/fps+1)
-
-	args := []string{
-		"-nostdin",
-		"-f", "rawvideo",
-		"-pixel_format", "yuv420p",
-		"-video_size", fmt.Sprintf("%dx%d", cfg.Width, cfg.Height),
-		"-framerate", fmt.Sprintf("%d", fps),
-		"-i", input,
-	}
-
-	// Try VAAPI hardware encoding if requested
-	if cfg.HWAccel == "vaapi" || cfg.HWAccel == "auto" {
-		vaArgs := buildVAAPIArgs(cfg, fps, bitrateStr, bufsizeStr, input)
-		if vaArgs != nil {
-			return vaArgs
-		}
-		if cfg.HWAccel == "vaapi" {
-			dbg("[CAPTURE] VAAPI explicitly requested but not available, falling back to libx264")
-		}
-	}
-
-	args = append(args,
-		"-c:v", "libx264",
-		"-profile:v", "high",
-		"-level:v", "4.0",
-		"-tune", "zerolatency",
-		"-preset", "superfast",
-		"-x264-params", "cabac=1:aud=1:repeat-headers=1:sliced-threads=0:rc-lookahead=0:sync-lookahead=0:bframes=0",
-		"-g", fmt.Sprintf("%d", fps*2), // keyframe every 2 seconds
-		"-keyint_min", fmt.Sprintf("%d", fps),
-		"-bf", "0",
-		"-b:v", bitrateStr,
-		"-maxrate", bitrateStr,
-		"-bufsize", bufsizeStr,
-		"-f", "h264",
-		"pipe:1",
-	)
-	return args
-}
-
-// buildVAAPIArgs tries to construct VAAPI hardware encoding args.
-// Returns nil if VAAPI is not available.
-func buildVAAPIArgs(cfg CaptureConfig, fps int, bitrateStr, bufsizeStr, input string) []string {
-	// Check if VAAPI device exists
-	if _, err := os.Stat("/dev/dri/renderD128"); err != nil {
-		return nil
-	}
-	// Check if ffmpeg has vaapi_h264 encoder
-	out, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
-	if err != nil || !strings.Contains(string(out), "h264_vaapi") {
-		return nil
-	}
-	log.Printf("[CAPTURE] using VAAPI hardware encoding")
-	return []string{
-		"-nostdin",
-		"-vaapi_device", "/dev/dri/renderD128",
-		"-f", "rawvideo",
-		"-pixel_format", "yuv420p",
-		"-video_size", fmt.Sprintf("%dx%d", cfg.Width, cfg.Height),
-		"-framerate", fmt.Sprintf("%d", fps),
-		"-i", input,
-		"-vf", "format=nv12,hwupload",
-		"-c:v", "h264_vaapi",
-		"-profile:v", "high",
-		"-level", "40",
-		"-g", fmt.Sprintf("%d", fps*2),
-		"-bf", "0",
-		"-b:v", bitrateStr,
-		"-maxrate", bitrateStr,
-		"-bufsize", bufsizeStr,
-		"-f", "h264",
-		"pipe:1",
-	}
-}
-
 // StartTestCapture creates a synthetic H.264 video stream using GStreamer's
 // videotestsrc + x264enc, producing High profile Annex-B byte stream output.
 // This replicates the same GStreamer pipeline ecosystem that UxPlay uses on the
-// receiver side, avoiding any ffmpeg/libx264 encoding differences.
+// receiver side.
 func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
