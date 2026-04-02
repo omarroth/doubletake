@@ -648,9 +648,7 @@ func garble(buffer0, buffer1, buffer2, buffer3, buffer4 []byte) {
 	buffer3[0] = byte(92 - b2(int(b1(32)%35)))
 	buffer3[4] = byte(b2(int(b1(15)%35)) + 0x9e)
 	buffer1[34] += byte(b4(int((b2(int(b1(15)%35))+0x9e)&0xff)%21) / 5)
-	buffer0[19] += byte(0xfffffee6 - ((b0(int(b0(19)%20>>0)) >> 1) & 102))
-	// Corrected: buffer0[19] updated using buffer3[4] % 20
-	buffer0[19] = byte(uint32(buffer4[b1(58)%21]) + uint32(byte(0xfffffee6-((b0(int(uint32(buffer3[4])%20))>>1)&102))))
+	buffer0[19] += byte(0xfffffee6 - ((b0(int(uint32(buffer3[4])%20)) >> 1) & 102))
 
 	// buffer1[15]
 	shiftAmt := b4(int(b1(190)%21)) & 7
@@ -928,6 +926,11 @@ func generateSessionKey(oldSap []byte, messageIn []byte, sessionKey []byte) {
 }
 
 // --- Main decrypt function ---
+
+// PlayfairDecryptExported is an exported wrapper for testing.
+func PlayfairDecryptExported(m3 []byte, ekey []byte) [16]byte {
+	return playfairDecrypt(m3, ekey)
+}
 
 func playfairDecrypt(m3 []byte, ekey []byte) [16]byte {
 	chunk1 := ekey[16:32]
