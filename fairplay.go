@@ -9,16 +9,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"unsafe"
 
 	"airplay/fpemu"
 )
-
-/*
-#cgo LDFLAGS: -lm
-#include "playfair.h"
-*/
-import "C"
 
 const airplaySenderPath = "thirdparty/apple/AirPlaySender.framework/AirPlaySender"
 
@@ -221,20 +214,6 @@ func buildEkey() [72]byte {
 	ekey[11] = 0x3c
 	// bytes 12-71 are zeros (chunk1, padding, chunk2 all zero)
 	return ekey
-}
-
-// playfairDecrypt calls the playfair_decrypt C function.
-// m3 is the full 164-byte FairPlay message 3 (including FPLY header).
-// ekey is the 72-byte encrypted key from the SETUP plist.
-// Returns the 16-byte decrypted AES key.
-func playfairDecrypt(m3 []byte, ekey []byte) [16]byte {
-	var key [16]byte
-	C.playfair_decrypt(
-		(*C.uchar)(unsafe.Pointer(&m3[0])),
-		(*C.uchar)(unsafe.Pointer(&ekey[0])),
-		(*C.uchar)(unsafe.Pointer(&key[0])),
-	)
-	return key
 }
 
 // fplyWrap adds FPLY framing header to raw SAP data.
