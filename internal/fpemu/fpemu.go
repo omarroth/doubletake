@@ -1,3 +1,5 @@
+//go:build emulate
+
 // Package fpemu emulates FairPlay SAP functions from an iOS ARM64 AirPlaySender binary
 // using the Unicorn CPU emulator.
 package fpemu
@@ -40,12 +42,25 @@ const (
 )
 
 type Emulator struct {
-	mu      sync.Mutex
-	engine  uc.Unicorn
-	heapPtr uint64
-	stubs   map[uint64]stubFunc
-	shaCtxs map[uint64]hash.Hash
-	aesCtxs map[uint64]*aesCTRCtx
+	mu          sync.Mutex
+	engine      uc.Unicorn
+	heapPtr     uint64
+	stubs       map[uint64]stubFunc
+	stubNames   map[uint64]string
+	shaCtxs     map[uint64]hash.Hash
+	aesCtxs     map[uint64]*aesCTRCtx
+	tracing     bool
+	lastPCTrace map[uint64]int
+}
+
+// SetTracing enables or disables instruction tracing.
+func (e *Emulator) SetTracing(v bool) { e.tracing = v }
+
+// LastPCTrace returns the set of PCs hit during the last traced exchange.
+func (e *Emulator) LastPCTrace() map[uint64]int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastPCTrace
 }
 
 type stubFunc func(e *Emulator) error
@@ -71,11 +86,13 @@ func New(binaryPath string) (*Emulator, error) {
 	}
 
 	e := &Emulator{
-		engine:  engine,
-		heapPtr: heapBase,
-		stubs:   make(map[uint64]stubFunc),
-		shaCtxs: make(map[uint64]hash.Hash),
-		aesCtxs: make(map[uint64]*aesCTRCtx),
+		engine:    engine,
+		heapPtr:   heapBase,
+		stubs:     make(map[uint64]stubFunc),
+		stubNames: make(map[uint64]string),
+		shaCtxs:   make(map[uint64]hash.Hash),
+		aesCtxs:   make(map[uint64]*aesCTRCtx),
+		tracing:   os.Getenv("FPEMU_TRACE") != "",
 	}
 
 	// Map fixed regions
@@ -170,6 +187,7 @@ func New(binaryPath string) (*Emulator, error) {
 				handler = h
 			}
 			e.stubs[stubAddr] = handler
+			e.stubNames[stubAddr] = name
 			e.writeU64(gotSlot, stubAddr)
 			stubAddr += 4
 		}
@@ -216,6 +234,14 @@ func (e *Emulator) execLoop(pc, sentinel uint64) error {
 		}
 
 		if handler, ok := e.stubs[curPC]; ok {
+			if e.tracing {
+				name := e.stubNames[curPC]
+				if name == "" {
+					name = fmt.Sprintf("dyn@0x%x", curPC)
+				}
+				lr, _ := e.engine.RegRead(uc.ARM64_REG_LR)
+				log.Printf("[fpemu-trace] STUB %s (PC=0x%x LR=0x%x)", name, curPC, lr)
+			}
 			if herr := handler(e); herr != nil {
 				return fmt.Errorf("stub 0x%x: %w", curPC, herr)
 			}
@@ -354,6 +380,124 @@ func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, inpu
 	e.writeU64(outPtrAddr, 0)
 	e.writeU32(outLenAddr, 0)
 	e.writeU32(rcAddr, 0)
+
+	// If tracing, add a code hook to log all instructions
+	if e.tracing {
+		log.Printf("[fpemu-trace] FPSAPExchange: input=%d bytes, inAddr=0x%x", len(input), inAddr)
+		// Add instruction tracing hook
+		instrCount := 0
+		pcTrace := make(map[uint64]int) // PC -> first hit instruction count
+		var orderedPCs []uint64
+		type traceEntry struct {
+			pc         uint64
+			x0, x1, x2 uint64
+		}
+		var regTrace []traceEntry
+		var checkpoints []string
+		textInstCount := 0
+		hookCode, _ := e.engine.HookAdd(uc.HOOK_CODE, func(u uc.Unicorn, addr uint64, size uint32) {
+			instrCount++
+			if _, seen := pcTrace[addr]; !seen {
+				pcTrace[addr] = instrCount
+			}
+			// Capture register checkpoints every 1000 TEXT-segment instructions
+			if addr >= 0x1a1210000 && addr < 0x1a1316000 {
+				textInstCount++
+				if len(orderedPCs) < 200000 {
+					orderedPCs = append(orderedPCs, addr)
+					x0, _ := u.RegRead(uc.ARM64_REG_X0)
+					x1, _ := u.RegRead(uc.ARM64_REG_X1)
+					x2, _ := u.RegRead(uc.ARM64_REG_X2)
+					regTrace = append(regTrace, traceEntry{addr, x0, x1, x2})
+				}
+				if textInstCount%1000 == 0 && len(checkpoints) < 2000 {
+					// Capture checkpoint
+					x0, _ := u.RegRead(uc.ARM64_REG_X0)
+					x1, _ := u.RegRead(uc.ARM64_REG_X1)
+					x2, _ := u.RegRead(uc.ARM64_REG_X2)
+					x3, _ := u.RegRead(uc.ARM64_REG_X3)
+					sp, _ := u.RegRead(uc.ARM64_REG_SP)
+					checkpoints = append(checkpoints, fmt.Sprintf("text#%d pc=0x%x x0=0x%x x1=0x%x x2=0x%x x3=0x%x sp=0x%x",
+						textInstCount, addr, x0, x1, x2, x3, sp))
+				}
+				// Full register dump at specific PCs
+				if addr == 0x1a12cf784 || addr == 0x1a12cf744 || addr == 0x1a12cf78c ||
+					addr == 0x1a12d6d48 || addr == 0x1a12d6e10 || addr == 0x1a12d6ed8 ||
+					addr == 0x1a12d6f9c {
+					xregs := []int{uc.ARM64_REG_X0, uc.ARM64_REG_X1, uc.ARM64_REG_X2, uc.ARM64_REG_X3,
+						uc.ARM64_REG_X4, uc.ARM64_REG_X5, uc.ARM64_REG_X6, uc.ARM64_REG_X7,
+						uc.ARM64_REG_X8, uc.ARM64_REG_X9, uc.ARM64_REG_X10, uc.ARM64_REG_X11,
+						uc.ARM64_REG_X12, uc.ARM64_REG_X13, uc.ARM64_REG_X14, uc.ARM64_REG_X15,
+						uc.ARM64_REG_X16, uc.ARM64_REG_X17, uc.ARM64_REG_X18, uc.ARM64_REG_X19,
+						uc.ARM64_REG_X20, uc.ARM64_REG_X21, uc.ARM64_REG_X22, uc.ARM64_REG_X23,
+						uc.ARM64_REG_X24, uc.ARM64_REG_X25, uc.ARM64_REG_X26, uc.ARM64_REG_X27,
+						uc.ARM64_REG_X28, uc.ARM64_REG_X29, uc.ARM64_REG_X30}
+					sp, _ := u.RegRead(uc.ARM64_REG_SP)
+					vals := make([]uint64, len(xregs))
+					for i, r := range xregs {
+						vals[i], _ = u.RegRead(r)
+					}
+					log.Printf("[fpemu-regdump] PC=0x%x SP=0x%x textInst=%d", addr, sp, textInstCount)
+					for i, v := range vals {
+						log.Printf("[fpemu-regdump]   X%d=0x%x", i, v)
+					}
+				}
+				// Dump memory at X9 when about to execute LDR Q0, [X9, #0]
+				if addr == 0x1a12d6e04 {
+					sp, _ := u.RegRead(uc.ARM64_REG_SP)
+					mem, err := u.MemRead(sp, 64)
+					if err == nil {
+						log.Printf("[fpemu-stackdump] PC=0x%x SP=0x%x stack=%x", addr, sp, mem)
+					}
+				}
+				// Dump V-reg values at critical PCs in the SIMD block
+				if addr >= 0x1a12d6d64 && addr <= 0x1a12d6d9c {
+					d0, _ := u.RegRead(uc.ARM64_REG_D0)
+					d1, _ := u.RegRead(uc.ARM64_REG_D1)
+					d2, _ := u.RegRead(uc.ARM64_REG_D2)
+					d3, _ := u.RegRead(uc.ARM64_REG_D3)
+					log.Printf("[fpemu-vreg] PC=0x%x D0=0x%x D2=0x%x D1=0x%x D3=0x%x", addr, d0, d2, d1, d3)
+				}
+				if addr == 0x1a12d6d64 {
+					x9, _ := u.RegRead(uc.ARM64_REG_X9)
+					mem, err := u.MemRead(x9, 64)
+					if err == nil {
+						log.Printf("[fpemu-memdump] PC=0x%x X9=0x%x mem=%x", addr, x9, mem)
+					}
+				}
+			}
+		}, 0, ^uint64(0))
+		defer func() {
+			log.Printf("[fpemu-trace] FPSAPExchange executed %d instructions, %d unique PCs", instrCount, len(pcTrace))
+			// Export the PC trace for analysis
+			e.mu.Lock()
+			e.lastPCTrace = pcTrace
+			e.mu.Unlock()
+			e.engine.HookDel(hookCode)
+			// Write ordered trace to file
+			if len(orderedPCs) > 0 {
+				f, err := os.Create("/tmp/fp_ordered_trace.txt")
+				if err == nil {
+					for i, te := range regTrace {
+						fmt.Fprintf(f, "%d 0x%x x0=0x%x x1=0x%x x2=0x%x\n", i, te.pc, te.x0, te.x1, te.x2)
+					}
+					f.Close()
+					log.Printf("[fpemu-trace] wrote %d PCs to /tmp/fp_ordered_trace.txt", len(regTrace))
+				}
+			}
+			// Write checkpoints
+			if len(checkpoints) > 0 {
+				f, err := os.Create("/tmp/fp_checkpoints.txt")
+				if err == nil {
+					for _, cp := range checkpoints {
+						fmt.Fprintln(f, cp)
+					}
+					f.Close()
+					log.Printf("[fpemu-trace] wrote %d checkpoints to /tmp/fp_checkpoints.txt", len(checkpoints))
+				}
+			}
+		}()
+	}
 
 	ret, err := e.callFunc(symFPSAPExchange,
 		uint64(version), hwAddr, ctx, inAddr,
@@ -518,6 +662,7 @@ func sStrlen(e *Emulator) error {
 }
 
 func sSHA1Init(e *Emulator) error {
+	log.Printf("[fpemu-trace] SHA1_Init(ctx=0x%x)", x0(e))
 	e.shaCtxs[x0(e)] = sha1.New()
 	setX0(e, 1)
 	return nil
@@ -530,7 +675,9 @@ func sSHA1Update(e *Emulator) error {
 		e.shaCtxs[ctx] = h
 	}
 	if n > 0 {
-		h.Write(e.readMem(data, int(n)))
+		buf := e.readMem(data, int(n))
+		log.Printf("[fpemu-trace] SHA1_Update(ctx=0x%x, len=%d, data=%02x)", ctx, n, buf)
+		h.Write(buf)
 	}
 	setX0(e, 1)
 	return nil
@@ -538,7 +685,9 @@ func sSHA1Update(e *Emulator) error {
 func sSHA1Final(e *Emulator) error {
 	digest, ctx := x0(e), x1(e)
 	if h, ok := e.shaCtxs[ctx]; ok {
-		e.engine.MemWrite(digest, h.Sum(nil)[:20])
+		result := h.Sum(nil)[:20]
+		log.Printf("[fpemu-trace] SHA1_Final(ctx=0x%x) => %02x", ctx, result)
+		e.engine.MemWrite(digest, result)
 		delete(e.shaCtxs, ctx)
 	} else {
 		e.engine.MemWrite(digest, make([]byte, 20))
@@ -548,6 +697,7 @@ func sSHA1Final(e *Emulator) error {
 }
 
 func sSHA512Init(e *Emulator) error {
+	log.Printf("[fpemu-trace] SHA512_Init(ctx=0x%x)", x0(e))
 	e.shaCtxs[x0(e)] = sha512.New()
 	setX0(e, 1)
 	return nil
@@ -560,7 +710,9 @@ func sSHA512Update(e *Emulator) error {
 		e.shaCtxs[ctx] = h
 	}
 	if n > 0 {
-		h.Write(e.readMem(data, int(n)))
+		buf := e.readMem(data, int(n))
+		log.Printf("[fpemu-trace] SHA512_Update(ctx=0x%x, len=%d, data=%02x)", ctx, n, buf)
+		h.Write(buf)
 	}
 	setX0(e, 1)
 	return nil
@@ -568,7 +720,9 @@ func sSHA512Update(e *Emulator) error {
 func sSHA512Final(e *Emulator) error {
 	digest, ctx := x0(e), x1(e)
 	if h, ok := e.shaCtxs[ctx]; ok {
-		e.engine.MemWrite(digest, h.Sum(nil)[:64])
+		result := h.Sum(nil)[:64]
+		log.Printf("[fpemu-trace] SHA512_Final(ctx=0x%x) => %02x", ctx, result)
+		e.engine.MemWrite(digest, result)
 		delete(e.shaCtxs, ctx)
 	} else {
 		e.engine.MemWrite(digest, make([]byte, 64))
@@ -581,7 +735,7 @@ func sAESCTRInit(e *Emulator) error {
 	ctxPtr, keyPtr, keyLen, ivPtr := x0(e), x1(e), x2(e), x3(e)
 	key := e.readMem(keyPtr, int(keyLen))
 	iv := e.readMem(ivPtr, 16)
-	log.Printf("[fpemu] AES_CTR_Init: keyLen=%d key=%02x iv=%02x", keyLen, key, iv)
+	log.Printf("[fpemu-trace] AES_CTR_Init(ctx=0x%x, keyLen=%d, key=%02x, iv=%02x)", ctxPtr, keyLen, key, iv)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		setX0(e, ^uint64(0))
@@ -597,6 +751,7 @@ func sAESCTRUpdate(e *Emulator) error {
 		in := e.readMem(inPtr, int(inLen))
 		out := make([]byte, inLen)
 		ctx.stream.XORKeyStream(out, in)
+		log.Printf("[fpemu-trace] AES_CTR_Update(ctx=0x%x, len=%d, in=%02x, out=%02x)", ctxPtr, inLen, in, out)
 		e.engine.MemWrite(outPtr, out)
 	}
 	setX0(e, 0)
