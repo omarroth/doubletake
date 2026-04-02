@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	data, _ := os.ReadFile("original-ios/15A372__iPhone10,5/root/System/Library/PrivateFrameworks/AirPlaySender.framework/AirPlaySender")
+	data, _ := os.ReadFile("thirdparty/apple/AirPlaySender.framework/AirPlaySender")
 	f, err := macho.NewFile(bytes.NewReader(data))
 	if err != nil {
 		fmt.Println("Error:", err)
