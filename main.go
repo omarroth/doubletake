@@ -22,6 +22,7 @@ func main() {
 	width := flag.Int("width", 1920, "Stream width")
 	height := flag.Int("height", 1080, "Stream height")
 	fps := flag.Int("fps", 30, "Frames per second")
+	bitrate := flag.Int("bitrate", 10000, "Video bitrate in kbps (default 10000 = 10 Mbps)")
 	hwaccel := flag.String("hwaccel", "auto", "Hardware acceleration: auto, vaapi, none")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
@@ -37,6 +38,10 @@ func main() {
 		<-sigCh
 		log.Println("shutting down...")
 		cancel()
+		// Force exit on second signal
+		<-sigCh
+		log.Println("forced exit")
+		os.Exit(1)
 	}()
 
 	var addr string
@@ -148,6 +153,7 @@ func main() {
 		Width:     *width,
 		Height:    *height,
 		FPS:       *fps,
+		Bitrate:   *bitrate,
 		NoEncrypt: *noEncrypt,
 		DirectKey: *directKey,
 	}
@@ -201,6 +207,7 @@ func main() {
 			Width:   *width,
 			Height:  *height,
 			FPS:     *fps,
+			Bitrate: *bitrate,
 			HWAccel: *hwaccel,
 		})
 		if err != nil {
@@ -211,6 +218,7 @@ func main() {
 			Width:   *width,
 			Height:  *height,
 			FPS:     *fps,
+			Bitrate: *bitrate,
 			HWAccel: *hwaccel,
 		}
 		var err error
