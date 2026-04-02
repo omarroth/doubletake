@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
@@ -15,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/hkdf"
 	"howett.net/plist"
 )
 
@@ -31,6 +34,8 @@ type MirrorSession struct {
 	videoHeight   int
 
 	streamCipher   func([]byte) []byte // AES-CTR encryption
+	chachaCipher   cipher.AEAD         // ChaCha20-Poly1305 AEAD (nil = use AES-CTR)
+	chachaNonce    uint64              // per-frame nonce counter
 	frameSeq       uint32
 	firstFrameSent chan struct{} // closed after first video frame is sent
 }
@@ -251,22 +256,45 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		firstFrameSent: make(chan struct{}),
 	}
 
-	// Set up video cipher using continuous AES-CTR.
-	// UxPlay's mirror_buffer_decrypt uses a continuous CTR stream across frames:
-	// leftover keystream from one frame carries into the next. No per-frame
-	// block alignment — plain cipher.NewCTR is correct.
-	if encKey != nil {
+	// Set up video cipher.
+	// AppleTV (encrypted pair-verify) uses ChaCha20-Poly1305 with HKDF-derived key.
+	// UxPlay (plaintext pair-verify) uses AES-CTR with SHA-512-derived key.
+	if encKey != nil && c.encrypted && c.fpAesKey != nil {
+		// ChaCha20-Poly1305 path: HKDF-SHA512 key derivation.
+		// The receiver's _GetDataStreamSecurityKeys calls the FP helper's HKDF method.
+		// The sender side uses PairingSessionDeriveKey via the PairingClient, which
+		// does HKDF with the pair-verify X25519 ECDH shared secret as IKM.
+		// Try the pair-verify shared secret first; fall back to raw FP aesKey.
+		ikm := c.fpAesKey
+		if c.pairKeys != nil && len(c.pairKeys.SharedSecret) > 0 {
+			ikm = c.pairKeys.SharedSecret
+			log.Printf("[SETUP] using pair-verify shared secret as HKDF IKM (%d bytes)", len(ikm))
+		}
+		chachaKey, err := deriveChaChaKey(ikm, streamConnectionID)
+		if err != nil {
+			dataConn.Close()
+			return nil, fmt.Errorf("derive chacha key: %w", err)
+		}
+		aead, err := chacha20poly1305.New(chachaKey)
+		if err != nil {
+			dataConn.Close()
+			return nil, fmt.Errorf("chacha20poly1305: %w", err)
+		}
+		session.chachaCipher = aead
+		log.Printf("[SETUP] using ChaCha20-Poly1305 (HKDF-SHA512)")
+		log.Printf("[SETUP] streamConnectionID: %d", streamConnectionID)
+		log.Printf("[SETUP] IKM (%d bytes):   %02x", len(ikm), ikm)
+		log.Printf("[SETUP] chacha key:       %02x", chachaKey)
+	} else if encKey != nil {
+		// AES-CTR path: SHA-512-derived key from shk + streamConnectionID.
 		var cipherKey, cipherIV []byte
 		if cfg.DirectKey {
-			// Use shk/shiv directly without derivation
 			cipherKey = encKey
 			cipherIV = encIV
 			log.Printf("[SETUP] using DIRECT key mode (no SHA-512 derivation)")
 		} else {
-			// Derive AES-128-CTR key/IV from shk + streamConnectionID using SHA-512.
-			// Matches UxPlay's mirror_buffer_init_aes.
 			cipherKey, cipherIV = deriveVideoKeys(encKey, streamConnectionID)
-			log.Printf("[SETUP] using SHA-512 derived keys")
+			log.Printf("[SETUP] using SHA-512 derived keys (AES-CTR)")
 		}
 		log.Printf("[SETUP] streamConnectionID: %d", streamConnectionID)
 		log.Printf("[SETUP] shk (raw key):    %02x", encKey)
@@ -614,20 +642,24 @@ func isFirstSlice(raw []byte) bool {
 }
 
 // buildAVCCConfig builds an AVCDecoderConfigurationRecord (avcC) from raw SPS and PPS.
+// Includes 4-byte trailer (02 00 00 00) observed in iPhone captures.
 func buildAVCCConfig(sps, pps []byte) []byte {
-	payload := make([]byte, 6+2+len(sps)+1+2+len(pps))
-	payload[0] = 0x01   // configurationVersion = 1
-	payload[1] = sps[1] // AVCProfileIndication
-	payload[2] = sps[2] // profile_compatibility
-	payload[3] = sps[3] // AVCLevelIndication
-	payload[4] = 0xff   // lengthSizeMinusOne = 3 (4-byte NALU lengths)
-	payload[5] = 0xe1   // numSequenceParameterSets = 1
+	avcCLen := 6 + 2 + len(sps) + 1 + 2 + len(pps)
+	payload := make([]byte, avcCLen+4) // +4 for trailer
+	payload[0] = 0x01                  // configurationVersion = 1
+	payload[1] = sps[1]                // AVCProfileIndication
+	payload[2] = sps[2]                // profile_compatibility
+	payload[3] = sps[3]                // AVCLevelIndication
+	payload[4] = 0xff                  // lengthSizeMinusOne = 3 (4-byte NALU lengths)
+	payload[5] = 0xe1                  // numSequenceParameterSets = 1
 	binary.BigEndian.PutUint16(payload[6:8], uint16(len(sps)))
 	copy(payload[8:], sps)
 	off := 8 + len(sps)
 	payload[off] = 0x01 // numPictureParameterSets = 1
 	binary.BigEndian.PutUint16(payload[off+1:off+3], uint16(len(pps)))
 	copy(payload[off+3:], pps)
+	// 4-byte trailer observed in iPhone captures
+	payload[avcCLen] = 0x02
 	return payload
 }
 
@@ -718,8 +750,14 @@ func (s *MirrorSession) SendTestEmptyVCL() {
 func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp uint64) error {
 	s.frameSeq++
 
+	// For ChaCha20-Poly1305, the header size includes the 16-byte Poly1305 tag.
+	payloadSize := len(auData)
+	if s.chachaCipher != nil {
+		payloadSize += s.chachaCipher.Overhead() // +16 for Poly1305 tag
+	}
+
 	header := make([]byte, 128)
-	binary.LittleEndian.PutUint32(header[0:4], uint32(len(auData)))
+	binary.LittleEndian.PutUint32(header[0:4], uint32(payloadSize))
 	header[4] = 0x00 // payload type = encrypted video data
 	if isKeyframe {
 		header[5] = 0x10 // IDR frame indicator
@@ -729,9 +767,31 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 	// header[6:8] = 0x00 0x00 for encrypted packets (already zeroed)
 	binary.LittleEndian.PutUint64(header[8:16], ntpTimestamp)
 
-	frame := make([]byte, 128+len(auData))
+	var framePayload []byte
+	if s.chachaCipher != nil {
+		// ChaCha20-Poly1305: encrypt with 128-byte header as AAD.
+		// Receiver uses chacha20_poly1305_init_64x64 (64-bit counter + 64-bit nonce).
+		// Go's IETF ChaCha20-Poly1305 uses 32-bit counter + 96-bit nonce.
+		// To make IETF state match 64x64: nonce = [0,0,0,0] + LE64(N)
+		// so state[13]=0, state[14]=N_lo, state[15]=N_hi (matching 64x64 layout).
+		var nonce [12]byte
+		binary.LittleEndian.PutUint64(nonce[4:], s.chachaNonce)
+		framePayload = s.chachaCipher.Seal(nil, nonce[:], auData, header)
+		if s.frameSeq <= 3 {
+			log.Printf("[CHACHA] nonce=%d nonce_hex=%02x plaintext_len=%d ciphertext_len=%d",
+				s.chachaNonce, nonce[:], len(auData), len(framePayload))
+			log.Printf("[CHACHA] plaintext[0:min(32)]=%02x", auData[:min(32, len(auData))])
+			log.Printf("[CHACHA] ciphertext[0:min(32)]=%02x", framePayload[:min(32, len(framePayload))])
+			log.Printf("[CHACHA] tag=%02x", framePayload[len(framePayload)-16:])
+		}
+		s.chachaNonce++
+	} else {
+		framePayload = auData
+	}
+
+	frame := make([]byte, 128+len(framePayload))
 	copy(frame[:128], header)
-	copy(frame[128:], auData)
+	copy(frame[128:], framePayload)
 
 	keyframeStr := "non-IDR"
 	if isKeyframe {
@@ -799,6 +859,26 @@ func deriveVideoKeys(shk []byte, streamConnectionID int64) (key, iv []byte) {
 	h.Write(shk)
 	iv = h.Sum(nil)[:16]
 	return
+}
+
+// deriveChaChaKey derives a 32-byte ChaCha20-Poly1305 key using HKDF-SHA512.
+// This matches Apple's _GetDataStreamSecurityKeys / PairingSessionDeriveKey:
+//   - IKM: pair-verify X25519 ECDH shared secret (or raw FP aesKey as fallback)
+//   - Salt: "DataStream-Salt" + decimal(streamConnectionID)
+//   - Info: "DataStream-Output-Encryption-Key" (sender→receiver screen data direction)
+//
+// The receiver's _ScreenSetup derives only "DataStream-Output-Encryption-Key" for screen
+// mirroring — "Output" refers to the sender's output direction.
+func deriveChaChaKey(ikm []byte, streamConnectionID int64) ([]byte, error) {
+	salt := []byte(fmt.Sprintf("DataStream-Salt%d", uint64(streamConnectionID)))
+	info := []byte("DataStream-Output-Encryption-Key")
+
+	hkdfReader := hkdf.New(sha512.New, ikm, salt, info)
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(hkdfReader, key); err != nil {
+		return nil, fmt.Errorf("hkdf expand: %w", err)
+	}
+	return key, nil
 }
 
 // heartbeatLoop sends periodic GET_PARAMETER requests to keep the session alive.

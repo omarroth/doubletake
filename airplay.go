@@ -62,10 +62,11 @@ type AirPlayClient struct {
 	encCipher     cipher.AEAD
 
 	// FairPlay derived key for stream encryption
-	fpKey  []byte
-	fpIV   []byte
-	fpEkey []byte // 72-byte wrapped key for SETUP
-	fpM3   []byte // 164-byte FPLY-wrapped m3 (needed for ekey construction)
+	fpKey    []byte
+	fpIV     []byte
+	fpEkey   []byte // 72-byte wrapped key for SETUP
+	fpM3     []byte // 164-byte FPLY-wrapped m3 (needed for ekey construction)
+	fpAesKey []byte // 16-byte raw aesKey from playfair_decrypt (IKM for HKDF)
 
 	// Stream encryption key (from FP or pair-verify)
 	streamKey []byte

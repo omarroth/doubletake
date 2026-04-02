@@ -71,10 +71,73 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	}
 	log.Printf("[FP] m4: %d bytes", len(m4))
 
+	// Phase 3: process m4 to finalize the SAP shared secret.
+	// The receiver's m4 contains the final DH confirmation. Without processing
+	// it, the SAP context may not have the correct shared secret for key derivation.
+	m5Raw, rc3, err := emu.FPSAPExchange(3, hwInfo, sapCtx, m4)
+	if err != nil {
+		log.Printf("[FP] phase3: %v (may be expected for some implementations)", err)
+	} else {
+		log.Printf("[FP] m5: %d bytes, rc=%d", len(m5Raw), rc3)
+	}
+
 	m4Payload := fplyUnwrap(m4)
 	if len(m4Payload) >= 16 {
 		c.fpKey = make([]byte, 16)
 		copy(c.fpKey, m4Payload[:16])
+	}
+
+	// Dump SAP context memory to find shared key material.
+	// After the 3-phase handshake, the SAP context contains a shared secret
+	// that both sides use for HKDF-based key derivation (ChaCha20-Poly1305).
+	sapDump := emu.ReadMem(sapCtx, 512)
+	log.Printf("[FP] SAP context @0x%x dump (512 bytes):", sapCtx)
+	for off := 0; off < len(sapDump); off += 32 {
+		end := off + 32
+		if end > len(sapDump) {
+			end = len(sapDump)
+		}
+		log.Printf("[FP]   +0x%03x: %s", off, hex.EncodeToString(sapDump[off:end]))
+	}
+
+	// Also dump any pointers in the first 64 bytes that point to heap
+	for off := 0; off < 64; off += 8 {
+		ptr := binary.LittleEndian.Uint64(sapDump[off : off+8])
+		if ptr >= 0x80000000 && ptr < 0x84000000 { // heap range
+			ptrData := emu.ReadMem(ptr, 256)
+			log.Printf("[FP]   SAP+0x%02x → heap 0x%x:", off, ptr)
+			for po := 0; po < len(ptrData); po += 32 {
+				pe := po + 32
+				if pe > len(ptrData) {
+					pe = len(ptrData)
+				}
+				log.Printf("[FP]     +0x%03x: %s", po, hex.EncodeToString(ptrData[po:pe]))
+			}
+		}
+	}
+
+	// Dump heap to find FP SAP shared secret material.
+	// The SAP context itself may be at an auto-mapped address, but the actual
+	// key material is on the heap. Scan for non-zero 32-byte aligned blocks.
+	heapAddr, heapData := emu.HeapDump()
+	log.Printf("[FP] heap dump: base=0x%x used=%d bytes", heapAddr, len(heapData))
+	for off := 0; off < len(heapData); off += 32 {
+		end := off + 32
+		if end > len(heapData) {
+			end = len(heapData)
+		}
+		chunk := heapData[off:end]
+		// Only log non-zero chunks
+		allZero := true
+		for _, b := range chunk {
+			if b != 0 {
+				allZero = false
+				break
+			}
+		}
+		if !allZero {
+			log.Printf("[FP]   heap+0x%04x (0x%08x): %s", off, heapAddr+uint64(off), hex.EncodeToString(chunk))
+		}
 	}
 
 	c.fpIV = make([]byte, 16)
@@ -94,6 +157,11 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	ekey := buildEkey()
 	aesKey := playfair.Decrypt(c.fpM3, ekey[:])
 	c.fpEkey = ekey[:]
+
+	// Save the raw 16-byte aesKey before any hashing. AppleTV uses this
+	// as the IKM for HKDF-SHA512 to derive ChaCha20-Poly1305 keys.
+	c.fpAesKey = make([]byte, 16)
+	copy(c.fpAesKey, aesKey[:])
 
 	// If pair-verify produced a shared secret (ecdh_secret), the receiver
 	// hashes the fairplay-decrypted key with it: SHA-512(aeskey + ecdh_secret)[:16].

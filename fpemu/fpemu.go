@@ -275,6 +275,20 @@ func (e *Emulator) readMem(addr uint64, n int) []byte {
 	return b
 }
 
+// ReadMem reads n bytes from the emulated address space.
+func (e *Emulator) ReadMem(addr uint64, n int) []byte {
+	return e.readMem(addr, n)
+}
+
+// HeapDump returns (heapBase, usedBytes, data) for the entire used heap.
+func (e *Emulator) HeapDump() (uint64, []byte) {
+	used := int(e.heapPtr - heapBase)
+	if used <= 0 {
+		return heapBase, nil
+	}
+	return heapBase, e.readMem(heapBase, used)
+}
+
 func (e *Emulator) readU64(addr uint64) uint64 {
 	return binary.LittleEndian.Uint64(e.readMem(addr, 8))
 }
@@ -567,6 +581,7 @@ func sAESCTRInit(e *Emulator) error {
 	ctxPtr, keyPtr, keyLen, ivPtr := x0(e), x1(e), x2(e), x3(e)
 	key := e.readMem(keyPtr, int(keyLen))
 	iv := e.readMem(ivPtr, 16)
+	log.Printf("[fpemu] AES_CTR_Init: keyLen=%d key=%02x iv=%02x", keyLen, key, iv)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		setX0(e, ^uint64(0))
