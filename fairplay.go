@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 
 	"airplay/fpemu"
@@ -21,7 +20,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 		binaryPath = airplaySenderPath
 	}
 
-	log.Printf("[FP] loading AirPlaySender binary: %s", binaryPath)
+	dbg("[FP] loading AirPlaySender binary: %s", binaryPath)
 	emu, err := fpemu.New(binaryPath)
 	if err != nil {
 		return fmt.Errorf("init fpemu: %w", err)
@@ -37,14 +36,14 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("FPSAPInit: %w", err)
 	}
-	log.Printf("[FP] SAP context: 0x%x", sapCtx)
+	dbg("[FP] SAP context: 0x%x", sapCtx)
 
 	// Phase 1: generate m1 (empty input)
 	m1Raw, rc1, err := emu.FPSAPExchange(3, hwInfo, sapCtx, nil)
 	if err != nil {
 		return fmt.Errorf("phase1: %w", err)
 	}
-	log.Printf("[FP] m1: %d bytes, rc=%d", len(m1Raw), rc1)
+	dbg("[FP] m1: %d bytes, rc=%d", len(m1Raw), rc1)
 
 	m1 := fplyWrap(m1Raw, 1)
 	m2, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m1,
@@ -52,7 +51,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fp-setup m1: %w", err)
 	}
-	log.Printf("[FP] m2: %d bytes", len(m2))
+	dbg("[FP] m2: %d bytes", len(m2))
 
 	// Phase 2: process m2, generate m3
 	// The iOS binary handles FPLY framing internally, pass the full FPLY-wrapped m2
@@ -60,7 +59,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("phase2: %w", err)
 	}
-	log.Printf("[FP] m3: %d bytes, rc=%d", len(m3Raw), rc2)
+	dbg("[FP] m3: %d bytes, rc=%d", len(m3Raw), rc2)
 
 	m3 := fplyWrap(m3Raw, 3)
 	m4, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m3,
@@ -68,16 +67,16 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fp-setup m3: %w", err)
 	}
-	log.Printf("[FP] m4: %d bytes", len(m4))
+	dbg("[FP] m4: %d bytes", len(m4))
 
 	// Phase 3: process m4 to finalize the SAP shared secret.
 	// The receiver's m4 contains the final DH confirmation. Without processing
 	// it, the SAP context may not have the correct shared secret for key derivation.
 	m5Raw, rc3, err := emu.FPSAPExchange(3, hwInfo, sapCtx, m4)
 	if err != nil {
-		log.Printf("[FP] phase3: %v (may be expected for some implementations)", err)
+		dbg("[FP] phase3: %v (may be expected for some implementations)", err)
 	} else {
-		log.Printf("[FP] m5: %d bytes, rc=%d", len(m5Raw), rc3)
+		dbg("[FP] m5: %d bytes, rc=%d", len(m5Raw), rc3)
 	}
 
 	m4Payload := fplyUnwrap(m4)
@@ -90,13 +89,13 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	// After the 3-phase handshake, the SAP context contains a shared secret
 	// that both sides use for HKDF-based key derivation (ChaCha20-Poly1305).
 	sapDump := emu.ReadMem(sapCtx, 512)
-	log.Printf("[FP] SAP context @0x%x dump (512 bytes):", sapCtx)
+	dbg("[FP] SAP context @0x%x dump (512 bytes):", sapCtx)
 	for off := 0; off < len(sapDump); off += 32 {
 		end := off + 32
 		if end > len(sapDump) {
 			end = len(sapDump)
 		}
-		log.Printf("[FP]   +0x%03x: %s", off, hex.EncodeToString(sapDump[off:end]))
+		dbg("[FP]   +0x%03x: %s", off, hex.EncodeToString(sapDump[off:end]))
 	}
 
 	// Also dump any pointers in the first 64 bytes that point to heap
@@ -104,13 +103,13 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 		ptr := binary.LittleEndian.Uint64(sapDump[off : off+8])
 		if ptr >= 0x80000000 && ptr < 0x84000000 { // heap range
 			ptrData := emu.ReadMem(ptr, 256)
-			log.Printf("[FP]   SAP+0x%02x → heap 0x%x:", off, ptr)
+			dbg("[FP]   SAP+0x%02x → heap 0x%x:", off, ptr)
 			for po := 0; po < len(ptrData); po += 32 {
 				pe := po + 32
 				if pe > len(ptrData) {
 					pe = len(ptrData)
 				}
-				log.Printf("[FP]     +0x%03x: %s", po, hex.EncodeToString(ptrData[po:pe]))
+				dbg("[FP]     +0x%03x: %s", po, hex.EncodeToString(ptrData[po:pe]))
 			}
 		}
 	}
@@ -119,7 +118,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	// The SAP context itself may be at an auto-mapped address, but the actual
 	// key material is on the heap. Scan for non-zero 32-byte aligned blocks.
 	heapAddr, heapData := emu.HeapDump()
-	log.Printf("[FP] heap dump: base=0x%x used=%d bytes", heapAddr, len(heapData))
+	dbg("[FP] heap dump: base=0x%x used=%d bytes", heapAddr, len(heapData))
 	for off := 0; off < len(heapData); off += 32 {
 		end := off + 32
 		if end > len(heapData) {
@@ -135,7 +134,7 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 			}
 		}
 		if !allZero {
-			log.Printf("[FP]   heap+0x%04x (0x%08x): %s", off, heapAddr+uint64(off), hex.EncodeToString(chunk))
+			dbg("[FP]   heap+0x%04x (0x%08x): %s", off, heapAddr+uint64(off), hex.EncodeToString(chunk))
 		}
 	}
 
@@ -171,20 +170,20 @@ func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 		h.Write(aesKey[:])
 		h.Write(c.pairKeys.SharedSecret)
 		finalKey = h.Sum(nil)[:16]
-		log.Printf("[FP]   raw aesKey:   %s", hex.EncodeToString(aesKey[:]))
-		log.Printf("[FP]   ecdh_secret:  %s", hex.EncodeToString(c.pairKeys.SharedSecret))
-		log.Printf("[FP]   hashed key:   %s", hex.EncodeToString(finalKey))
+		dbg("[FP]   raw aesKey:   %s", hex.EncodeToString(aesKey[:]))
+		dbg("[FP]   ecdh_secret:  %s", hex.EncodeToString(c.pairKeys.SharedSecret))
+		dbg("[FP]   hashed key:   %s", hex.EncodeToString(finalKey))
 	}
 
 	// Override fpKey with the key the receiver will actually derive.
 	// This ensures sender and receiver SHA-512-derive the same AES-CTR key.
 	c.fpKey = finalKey
 
-	log.Printf("[FP] FairPlay handshake complete!")
-	log.Printf("[FP]   m4 payload:  %s", hex.EncodeToString(m4Payload))
-	log.Printf("[FP]   ekey:        %s", hex.EncodeToString(c.fpEkey))
-	log.Printf("[FP]   aesKey:      %s", hex.EncodeToString(c.fpKey))
-	log.Printf("[FP]   iv:          %s", hex.EncodeToString(c.fpIV))
+	dbg("[FP] FairPlay handshake complete!")
+	dbg("[FP]   m4 payload:  %s", hex.EncodeToString(m4Payload))
+	dbg("[FP]   ekey:        %s", hex.EncodeToString(c.fpEkey))
+	dbg("[FP]   aesKey:      %s", hex.EncodeToString(c.fpKey))
+	dbg("[FP]   iv:          %s", hex.EncodeToString(c.fpIV))
 	return nil
 }
 

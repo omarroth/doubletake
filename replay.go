@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 	"time"
 )
@@ -69,8 +68,8 @@ func newCaptureDecrypter(aesKeyHex string, scid uint64) (*mirrorCipher, error) {
 	}
 
 	cipherKey, cipherIV := deriveVideoKeys(aesKey, int64(scid))
-	log.Printf("[REPLAY] original capture cipher key: %02x", cipherKey)
-	log.Printf("[REPLAY] original capture cipher IV:  %02x", cipherIV)
+	dbg("[REPLAY] original capture cipher key: %02x", cipherKey)
+	dbg("[REPLAY] original capture cipher IV:  %02x", cipherIV)
 
 	block, err := aes.NewCipher(cipherKey)
 	if err != nil {
@@ -90,13 +89,13 @@ func (s *MirrorSession) ReplayFrames(ctx context.Context, cfg ReplayConfig) erro
 	if err != nil {
 		return fmt.Errorf("read capture: %w", err)
 	}
-	log.Printf("[REPLAY] loaded %d bytes from %s", len(data), cfg.CaptureFile)
+	dbg("[REPLAY] loaded %d bytes from %s", len(data), cfg.CaptureFile)
 
 	frames, err := parseCaptureFrames(data)
 	if err != nil {
 		return fmt.Errorf("parse capture: %w", err)
 	}
-	log.Printf("[REPLAY] parsed %d frames", len(frames))
+	dbg("[REPLAY] parsed %d frames", len(frames))
 
 	// Create decrypter for the original capture's encryption
 	decrypter, err := newCaptureDecrypter(cfg.AESKeyHex, cfg.SCID)
@@ -118,7 +117,7 @@ func (s *MirrorSession) ReplayFrames(ctx context.Context, cfg ReplayConfig) erro
 			otherCount++
 		}
 	}
-	log.Printf("[REPLAY] frame types: codec=%d VCL=%d heartbeat=%d other=%d",
+	dbg("[REPLAY] frame types: codec=%d VCL=%d heartbeat=%d other=%d",
 		codecCount, vclCount, hbCount, otherCount)
 
 	// Compute timestamp rebasing: map original timestamps to current time
@@ -130,7 +129,7 @@ func (s *MirrorSession) ReplayFrames(ctx context.Context, cfg ReplayConfig) erro
 		}
 	}
 	baseTS := ntpTimeNow()
-	log.Printf("[REPLAY] rebasing timestamps: orig_base=%d -> new_base=%d", firstOrigTS, baseTS)
+	dbg("[REPLAY] rebasing timestamps: orig_base=%d -> new_base=%d", firstOrigTS, baseTS)
 
 	frameInterval := time.Second / 30 // ~33ms
 	var lastSendTime time.Time
@@ -159,9 +158,9 @@ func (s *MirrorSession) ReplayFrames(ctx context.Context, cfg ReplayConfig) erro
 			copy(frame[:128], header[:])
 			copy(frame[128:], f.payload)
 
-			log.Printf("[REPLAY] sending codec frame %d: payLen=%d ts=%d", i, len(f.payload), newTS)
-			log.Printf("[REPLAY] codec header: %02x", header[:16])
-			log.Printf("[REPLAY] codec payload: %02x", f.payload)
+			dbg("[REPLAY] sending codec frame %d: payLen=%d ts=%d", i, len(f.payload), newTS)
+			dbg("[REPLAY] codec header: %02x", header[:16])
+			dbg("[REPLAY] codec payload: %02x", f.payload)
 
 			s.dataMu.Lock()
 			s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -196,7 +195,7 @@ func (s *MirrorSession) ReplayFrames(ctx context.Context, cfg ReplayConfig) erro
 				if dispLen > 32 {
 					dispLen = 32
 				}
-				log.Printf("[REPLAY] frame %d decrypted[0:%d]: %02x", i, dispLen, plaintext[:dispLen])
+				dbg("[REPLAY] frame %d decrypted[0:%d]: %02x", i, dispLen, plaintext[:dispLen])
 			}
 
 			// Re-encrypt with this session's cipher
@@ -216,9 +215,9 @@ func (s *MirrorSession) ReplayFrames(ctx context.Context, cfg ReplayConfig) erro
 			copy(frame[128:], ciphertext)
 
 			if sentFrames < 5 {
-				log.Printf("[REPLAY] sending VCL frame %d: payLen=%d ts=%d hdr[4:8]=%02x",
+				dbg("[REPLAY] sending VCL frame %d: payLen=%d ts=%d hdr[4:8]=%02x",
 					i, len(ciphertext), newTS, header[4:8])
-				log.Printf("[REPLAY] VCL header: %02x", header[:64])
+				dbg("[REPLAY] VCL header: %02x", header[:64])
 			}
 
 			s.dataMu.Lock()
@@ -240,14 +239,14 @@ func (s *MirrorSession) ReplayFrames(ctx context.Context, cfg ReplayConfig) erro
 			}
 
 		default:
-			log.Printf("[REPLAY] skipping unknown frame type 0x%02x at index %d", f.payloadType, i)
+			dbg("[REPLAY] skipping unknown frame type 0x%02x at index %d", f.payloadType, i)
 		}
 	}
 
-	log.Printf("[REPLAY] done: sent %d VCL frames, %d total frames", sentFrames, len(frames))
+	dbg("[REPLAY] done: sent %d VCL frames, %d total frames", sentFrames, len(frames))
 
 	// Keep connection alive for a bit to see if Apple TV stays connected
-	log.Printf("[REPLAY] waiting 10s to observe connection stability...")
+	dbg("[REPLAY] waiting 10s to observe connection stability...")
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

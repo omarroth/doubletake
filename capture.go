@@ -59,7 +59,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
-	log.Printf("pipewire node ID: %d", nodeID)
+	dbg("pipewire node ID: %d", nodeID)
 
 	captureCtx, cancel := context.WithCancel(ctx)
 
@@ -91,7 +91,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
 
-	log.Printf("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
+	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 	cmd.ExtraFiles = []*os.File{pwFd}
 
@@ -185,7 +185,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 		"pipe:1",
 	)
 
-	log.Printf("[CAPTURE] launching ffmpeg (x11) %s", strings.Join(ffmpegArgs, " "))
+	dbg("[CAPTURE] launching ffmpeg (x11) %s", strings.Join(ffmpegArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "ffmpeg", ffmpegArgs...)
 
 	stdout, err := cmd.StdoutPipe()
@@ -297,7 +297,7 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 			}
 		}
 		if hwaccel == "nvenc" {
-			log.Printf("[CAPTURE] nvh264enc not available, falling back to software")
+			dbg("[CAPTURE] nvh264enc not available, falling back to software")
 		}
 	}
 
@@ -311,7 +311,7 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 			}
 		}
 		if hwaccel == "vaapi" {
-			log.Printf("[CAPTURE] vah264enc not available, falling back to software")
+			dbg("[CAPTURE] vah264enc not available, falling back to software")
 		}
 	}
 
@@ -348,7 +348,7 @@ func detectFFmpegEncoder(cfg CaptureConfig) (encoder string, args []string) {
 			}
 		}
 		if hwaccel == "nvenc" {
-			log.Printf("[CAPTURE] h264_nvenc not available, falling back to software")
+			dbg("[CAPTURE] h264_nvenc not available, falling back to software")
 		}
 	}
 
@@ -363,7 +363,7 @@ func detectFFmpegEncoder(cfg CaptureConfig) (encoder string, args []string) {
 			}
 		}
 		if hwaccel == "vaapi" {
-			log.Printf("[CAPTURE] h264_vaapi not available, falling back to software")
+			dbg("[CAPTURE] h264_vaapi not available, falling back to software")
 		}
 	}
 
@@ -419,7 +419,7 @@ func buildFFmpegEncodeArgs(cfg CaptureConfig, input string) []string {
 			return vaArgs
 		}
 		if cfg.HWAccel == "vaapi" {
-			log.Printf("[CAPTURE] VAAPI explicitly requested but not available, falling back to libx264")
+			dbg("[CAPTURE] VAAPI explicitly requested but not available, falling back to libx264")
 		}
 	}
 
@@ -514,7 +514,7 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		"!", "fdsink", "fd=1",
 	}
 
-	log.Printf("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(gstArgs, " "))
+	dbg("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(gstArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 
 	stdout, err := cmd.StdoutPipe()
@@ -557,10 +557,10 @@ func logStderr(prefix string, r io.Reader) {
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
-		log.Printf("[%s] %s", prefix, scanner.Text())
+		dbg("[%s] %s", prefix, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		log.Printf("[%s] stderr read error: %v", prefix, err)
+		dbg("[%s] stderr read error: %v", prefix, err)
 	}
 }
 

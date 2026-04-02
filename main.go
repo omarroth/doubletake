@@ -27,7 +27,10 @@ func main() {
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
+	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	flag.Parse()
+
+	debugMode = *debug
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

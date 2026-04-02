@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log"
 )
 
 // FairPlaySAPClient implements the FairPlay SAP (Secure Association Protocol) handshake
@@ -37,14 +36,14 @@ func NewFairPlaySAPClient(deviceID []byte) *FairPlaySAPClient {
 		rand.Read(deviceID)
 	}
 	if len(deviceID) != 20 {
-		log.Printf("[FP] WARNING: device ID should be 20 bytes, got %d bytes", len(deviceID))
+		dbg("[FP] WARNING: device ID should be 20 bytes, got %d bytes", len(deviceID))
 	}
 
 	c := &FairPlaySAPClient{
 		deviceID: append([]byte{}, deviceID...), // copy to avoid external mutation
 		sapState: make([]byte, 0, 1024),
 	}
-	log.Printf("[FP] initialized SAP client with device ID: %x", c.deviceID[:])
+	dbg("[FP] initialized SAP client with device ID: %x", c.deviceID[:])
 	return c
 }
 
@@ -70,7 +69,7 @@ func (c *FairPlaySAPClient) Message1() ([]byte, error) {
 		return nil, fmt.Errorf("generate m1 challenge: %w", err)
 	}
 
-	log.Printf("[FP] generated m1: %d bytes, challenge=%x", len(m1), m1[8:])
+	dbg("[FP] generated m1: %d bytes, challenge=%x", len(m1), m1[8:])
 	return m1, nil
 }
 
@@ -116,7 +115,7 @@ func (c *FairPlaySAPClient) Message3(m2 []byte) ([]byte, error) {
 		return nil, fmt.Errorf("derive m3: %w", err)
 	}
 
-	log.Printf("[FP] generated m3: %d bytes", len(m3))
+	dbg("[FP] generated m3: %d bytes", len(m3))
 	return m3, nil
 }
 
@@ -178,14 +177,14 @@ func (c *FairPlaySAPClient) SessionKey(m4 []byte) ([16]byte, error) {
 		copy(key[:], m4[12:28])
 	}
 
-	log.Printf("[FP] extracted session key from m4: %x", key[:])
+	dbg("[FP] extracted session key from m4: %x", key[:])
 	return key, nil
 }
 
 // AirPlayFairPlayHandshakeV2 performs the complete FairPlay SAP handshake using
 // the practical pure-Go implementation (no external dependencies).
 func (c *AirPlayClient) AirPlayFairPlayHandshakeV2(ctx context.Context, deviceID []byte) error {
-	log.Printf("[FP] starting FairPlay SAP handshake using practical implementation...")
+	dbg("[FP] starting FairPlay SAP handshake using practical implementation...")
 
 	sap := NewFairPlaySAPClient(deviceID)
 
@@ -195,7 +194,7 @@ func (c *AirPlayClient) AirPlayFairPlayHandshakeV2(ctx context.Context, deviceID
 		return fmt.Errorf("generate m1: %w", err)
 	}
 
-	log.Printf("[FP] posting m1 (%d bytes) to /fp-setup", len(m1))
+	dbg("[FP] posting m1 (%d bytes) to /fp-setup", len(m1))
 	m2, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m1,
 		map[string]string{"X-Apple-ET": "32"})
 	if err != nil {
@@ -205,7 +204,7 @@ func (c *AirPlayClient) AirPlayFairPlayHandshakeV2(ctx context.Context, deviceID
 	if len(m2) < 12 {
 		return fmt.Errorf("m2 response too short: %d bytes", len(m2))
 	}
-	log.Printf("[FP] received m2 (%d bytes) from /fp-setup", len(m2))
+	dbg("[FP] received m2 (%d bytes) from /fp-setup", len(m2))
 
 	// Phase 2: Process m2, generate m3
 	m3, err := sap.Message3(m2)
@@ -213,7 +212,7 @@ func (c *AirPlayClient) AirPlayFairPlayHandshakeV2(ctx context.Context, deviceID
 		return fmt.Errorf("generate m3 from m2: %w", err)
 	}
 
-	log.Printf("[FP] posting m3 (%d bytes) to /fp-setup", len(m3))
+	dbg("[FP] posting m3 (%d bytes) to /fp-setup", len(m3))
 	m4, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m3,
 		map[string]string{"X-Apple-ET": "32"})
 	if err != nil {
@@ -223,7 +222,7 @@ func (c *AirPlayClient) AirPlayFairPlayHandshakeV2(ctx context.Context, deviceID
 	if len(m4) < 12 {
 		return fmt.Errorf("m4 response too short: %d bytes", len(m4))
 	}
-	log.Printf("[FP] received m4 (%d bytes) from /fp-setup", len(m4))
+	dbg("[FP] received m4 (%d bytes) from /fp-setup", len(m4))
 
 	// Extract session key from m4
 	sessionKey, err := sap.SessionKey(m4)
@@ -241,9 +240,9 @@ func (c *AirPlayClient) AirPlayFairPlayHandshakeV2(ctx context.Context, deviceID
 	}
 	c.fpIV = iv[:]
 
-	log.Printf("[FP] FairPlay SAP handshake complete!")
-	log.Printf("[FP] session key: %x", sessionKey[:])
-	log.Printf("[FP] stream IV:  %x", iv[:])
+	dbg("[FP] FairPlay SAP handshake complete!")
+	dbg("[FP] session key: %x", sessionKey[:])
+	dbg("[FP] stream IV:  %x", iv[:])
 
 	return nil
 }
