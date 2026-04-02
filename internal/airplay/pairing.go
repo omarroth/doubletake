@@ -1,4 +1,4 @@
-package main
+package airplay
 
 import (
 	"bytes"
@@ -84,7 +84,7 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 		return fmt.Errorf("generate ed25519: %w", err)
 	}
 
-	c.pairKeys = &PairKeys{
+	c.PairKeys = &PairKeys{
 		Ed25519Public:  pub,
 		Ed25519Private: priv,
 	}
@@ -107,7 +107,7 @@ func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) erro
 			return fmt.Errorf("pair-setup: %w", err)
 		}
 		dbg("[PAIR] transient pair-setup complete, starting HAP pair-verify")
-		if err := c.pairVerify(ctx); err != nil {
+		if err := c.PairVerify(ctx); err != nil {
 			return fmt.Errorf("pair-verify: %w", err)
 		}
 		dbg("[PAIR] pair-verify complete, channel is now encrypted")
@@ -133,7 +133,7 @@ func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) erro
 // a 32-byte server Ed25519 public key back. This is the UxPlay / legacy AirPlay
 // transient pair-setup protocol.
 func (c *AirPlayClient) rawPairSetup(ctx context.Context) ([]byte, error) {
-	resp, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", c.pairKeys.Ed25519Public)
+	resp, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", c.PairKeys.Ed25519Public)
 	if err != nil {
 		return nil, fmt.Errorf("pair-setup: %w", err)
 	}
@@ -191,7 +191,7 @@ func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
 		return fmt.Errorf("generate ed25519: %w", err)
 	}
 
-	c.pairKeys = &PairKeys{
+	c.PairKeys = &PairKeys{
 		Ed25519Public:  pub,
 		Ed25519Private: priv,
 	}
@@ -203,7 +203,7 @@ func (c *AirPlayClient) performPairSetupAndVerify(ctx context.Context, pin strin
 	if err := c.pairSetup(ctx, pin); err != nil {
 		return fmt.Errorf("pair-setup: %w", err)
 	}
-	if err := c.pairVerify(ctx); err != nil {
+	if err := c.PairVerify(ctx); err != nil {
 		return fmt.Errorf("pair-verify: %w", err)
 	}
 	return nil
@@ -325,18 +325,18 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	hkdfInfo := []byte("Pair-Setup-Encrypt-Info")
 	sessionKey := hkdfSHA512(K, hkdfSalt, hkdfInfo, 32)
 
-	clientID := []byte(c.pairingID)
+	clientID := []byte(c.PairingID)
 
 	sigSalt := []byte("Pair-Setup-Controller-Sign-Salt")
 	sigInfo := []byte("Pair-Setup-Controller-Sign-Info")
 	sigKey := hkdfSHA512(K, sigSalt, sigInfo, 32)
 
-	sigInput := bytes.Join([][]byte{sigKey, clientID, c.pairKeys.Ed25519Public}, nil)
-	signature := ed25519.Sign(c.pairKeys.Ed25519Private, sigInput)
+	sigInput := bytes.Join([][]byte{sigKey, clientID, c.PairKeys.Ed25519Public}, nil)
+	signature := ed25519.Sign(c.PairKeys.Ed25519Private, sigInput)
 
 	subTLV := tlv8EncodeOrdered([]tlv8Item{
 		{Tag: tlvIdentifier, Value: clientID},
-		{Tag: tlvPublicKey, Value: c.pairKeys.Ed25519Public},
+		{Tag: tlvPublicKey, Value: c.PairKeys.Ed25519Public},
 		{Tag: tlvSignature, Value: signature},
 	})
 
@@ -362,12 +362,12 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 		return fmt.Errorf("pair-setup M6 error: %d", errTLV[0])
 	}
 
-	c.pairKeys.SharedSecret = K
+	c.PairKeys.SharedSecret = K
 	return nil
 }
 
 // pairVerify establishes an encrypted channel using X25519 + Ed25519.
-func (c *AirPlayClient) pairVerify(ctx context.Context) error {
+func (c *AirPlayClient) PairVerify(ctx context.Context) error {
 	// Generate ephemeral X25519 key pair
 	var clientPrivate, clientPublic [32]byte
 	rand.Read(clientPrivate[:])
@@ -427,9 +427,9 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 
 	// V3: Send our encrypted proof
 	// HAP spec: sign(clientX25519Public || pairingID || serverX25519Public)
-	clientIDBytes := []byte(c.pairingID)
+	clientIDBytes := []byte(c.PairingID)
 	sigInput := bytes.Join([][]byte{clientPublic[:], clientIDBytes, serverPublic[:]}, nil)
-	signature := ed25519.Sign(c.pairKeys.Ed25519Private, sigInput)
+	signature := ed25519.Sign(c.PairKeys.Ed25519Private, sigInput)
 	dbg("[PAIR-VERIFY] V3: sig input = clientPub(%d) || pairingID(%d) || serverPub(%d) = %d bytes",
 		len(clientPublic), len(clientIDBytes), len(serverPublic), len(sigInput))
 
@@ -468,11 +468,11 @@ func (c *AirPlayClient) pairVerify(ctx context.Context) error {
 
 	// After pair-verify, the AirPlay control channel is encrypted using HAP framing.
 	// Derive channel encryption keys from the X25519 shared secret.
-	c.pairKeys.SharedSecret = shared
+	c.PairKeys.SharedSecret = shared
 	c.encWriteKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Write-Encryption-Key"), 32)
 	c.encReadKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Read-Encryption-Key"), 32)
-	c.pairKeys.WriteKey = c.encWriteKey
-	c.pairKeys.ReadKey = c.encReadKey
+	c.PairKeys.WriteKey = c.encWriteKey
+	c.PairKeys.ReadKey = c.encReadKey
 
 	dbg("[PAIR-VERIFY] shared secret: %s...", hex.EncodeToString(shared[:16]))
 	dbg("[PAIR-VERIFY] writeKey: %s...", hex.EncodeToString(c.encWriteKey[:8]))
@@ -601,7 +601,7 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	v1 := make([]byte, 68)
 	v1[0] = 0x01 // flags: auth type=1
 	copy(v1[4:36], clientPublic[:])
-	copy(v1[36:68], c.pairKeys.Ed25519Public)
+	copy(v1[36:68], c.PairKeys.Ed25519Public)
 
 	dbg("[RAW-PV] V1: sending 68 bytes (X25519 pub + Ed25519 pub)")
 	dbg("[RAW-PV] V1 hex: %02x", v1)
@@ -657,7 +657,7 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	clientSigMsg := make([]byte, 64)
 	copy(clientSigMsg[:32], clientPublic[:])
 	copy(clientSigMsg[32:], serverPublic[:])
-	clientSig := ed25519.Sign(c.pairKeys.Ed25519Private, clientSigMsg)
+	clientSig := ed25519.Sign(c.PairKeys.Ed25519Private, clientSigMsg)
 
 	// Encrypt client signature at AES-CTR offset 64 (skip first 64 bytes)
 	block2, _ := aes.NewCipher(aesKey)
@@ -685,7 +685,7 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 
 	// Store shared secret for potential stream key derivation,
 	// but do NOT enable HAP encryption on the control channel
-	c.pairKeys.SharedSecret = shared
+	c.PairKeys.SharedSecret = shared
 	return nil
 }
 
