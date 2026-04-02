@@ -26,7 +26,7 @@ func NewFairPlaySAPExchanger(ctx context.Context) (*FairPlaySAPExchanger, error)
 	// Try loading from local extracted pkg first, fall back to network fetch
 	localDir := os.Getenv("FAIRPLAY_PKG_DIR")
 	if localDir == "" {
-		localDir = "original-ios/OSXUpd10.9.1.pkg"
+		localDir = "thirdparty/apple/OSXUpd10.9.1.pkg"
 	}
 
 	artifacts, err := library.FetchLocal(localDir)

@@ -14,7 +14,7 @@ import (
 	"airplay/playfair"
 )
 
-const airplaySenderPath = "original-ios/15A372__iPhone10,5/root/System/Library/PrivateFrameworks/AirPlaySender.framework/AirPlaySender"
+const airplaySenderPath = "thirdparty/apple/AirPlaySender.framework/AirPlaySender"
 
 func (c *AirPlayClient) fairPlaySetup(ctx context.Context) error {
 	binaryPath := os.Getenv("AIRPLAY_SENDER_PATH")

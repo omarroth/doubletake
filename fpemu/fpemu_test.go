@@ -9,7 +9,7 @@ import (
 func TestFPSAPInit(t *testing.T) {
 	path := os.Getenv("AIRPLAY_SENDER_PATH")
 	if path == "" {
-		path = "../original-ios/15A372__iPhone10,5/root/System/Library/PrivateFrameworks/AirPlaySender.framework/AirPlaySender"
+		path = "../thirdparty/apple/AirPlaySender.framework/AirPlaySender"
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("binary not found: %s", path)

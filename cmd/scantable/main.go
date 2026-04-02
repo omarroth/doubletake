@@ -15,7 +15,7 @@ type memRange struct {
 }
 
 func main() {
-	data, err := os.ReadFile("original-ios/15A372__iPhone10,5/root/System/Library/PrivateFrameworks/AirPlaySender.framework/AirPlaySender")
+	data, err := os.ReadFile("thirdparty/apple/AirPlaySender.framework/AirPlaySender")
 	if err != nil {
 		panic(err)
 	}
