@@ -81,11 +81,12 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		"!", "videoscale",
 		"!", "videorate",
 		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 	}
 	gstArgs = append(gstArgs, "!")
 	gstArgs = append(gstArgs, encoderParts...)
 	gstArgs = append(gstArgs,
-		"!", "h264parse",
+		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
@@ -147,6 +148,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 		"--quiet",
 		"ximagesrc", fmt.Sprintf("display-name=%s", display), "use-damage=false",
 		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "videoconvert",
 		"!", "videoscale",
 		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d", cfg.Width, cfg.Height),
@@ -154,7 +156,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	gstArgs = append(gstArgs, "!")
 	gstArgs = append(gstArgs, encoderParts...)
 	gstArgs = append(gstArgs,
-		"!", "h264parse",
+		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
@@ -258,6 +260,7 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 				"bframes=0",
 				"rc-mode=cbr",
 				"preset=low-latency-hq",
+				"zerolatency=true",
 			}
 		}
 		if hwaccel == "nvenc" {
@@ -272,6 +275,9 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 			return []string{
 				"vah264enc",
 				fmt.Sprintf("bitrate=%d", bitrate),
+				fmt.Sprintf("key-int-max=%d", fps*2),
+				"b-frames=0",
+				"rate-control=cbr",
 			}
 		}
 		if hwaccel == "vaapi" {
@@ -284,12 +290,14 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 	return []string{
 		"x264enc",
 		"tune=zerolatency",
-		"speed-preset=superfast",
+		"speed-preset=ultrafast",
 		fmt.Sprintf("bitrate=%d", bitrate),
 		fmt.Sprintf("key-int-max=%d", fps*2),
 		"bframes=0",
 		"sliced-threads=false",
 		"byte-stream=true",
+		"aud=false",
+		"vbv-buf-capacity=50",
 	}
 }
 

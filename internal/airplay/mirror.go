@@ -675,7 +675,7 @@ func nalType(nal []byte) byte {
 // payload is an AVCDecoderConfigurationRecord (avcC format).
 func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) error {
 	s.frameSeq++
-	header := make([]byte, 128)
+	var header [128]byte
 	binary.LittleEndian.PutUint32(header[0:4], uint32(len(payload)))
 	header[4] = 0x01 // payload type = SPS+PPS codec packet (unencrypted)
 	header[5] = 0x00
@@ -689,18 +689,15 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 	putFloat32LE(header[56:60], float32(s.videoWidth))
 	putFloat32LE(header[60:64], float32(s.videoHeight))
 
-	frame := make([]byte, 128+len(payload))
-	copy(frame[:128], header)
-	copy(frame[128:], payload)
-
 	dbg("[SEND] codec frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d",
 		s.frameSeq, len(payload), header[4], header[5], ntpTimestamp)
 	dbg("[SEND] codec full header: %02x", header)
 	dbg("[SEND] codec payload: %02x", payload)
 
+	bufs := net.Buffers{header[:], payload}
 	s.dataMu.Lock()
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	err := writeFull(s.dataConn, frame)
+	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	return err
 }
@@ -751,7 +748,7 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 		payloadSize += s.chachaCipher.Overhead() // +16 for Poly1305 tag
 	}
 
-	header := make([]byte, 128)
+	var header [128]byte
 	binary.LittleEndian.PutUint32(header[0:4], uint32(payloadSize))
 	header[4] = 0x00 // payload type = encrypted video data
 	if isKeyframe {
@@ -771,7 +768,7 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 		// so state[13]=0, state[14]=N_lo, state[15]=N_hi (matching 64x64 layout).
 		var nonce [12]byte
 		binary.LittleEndian.PutUint64(nonce[4:], s.chachaNonce)
-		framePayload = s.chachaCipher.Seal(nil, nonce[:], auData, header)
+		framePayload = s.chachaCipher.Seal(nil, nonce[:], auData, header[:])
 		if s.frameSeq <= 3 {
 			dbg("[CHACHA] nonce=%d nonce_hex=%02x plaintext_len=%d ciphertext_len=%d",
 				s.chachaNonce, nonce[:], len(auData), len(framePayload))
@@ -784,40 +781,27 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 		framePayload = auData
 	}
 
-	frame := make([]byte, 128+len(framePayload))
-	copy(frame[:128], header)
-	copy(frame[128:], framePayload)
-
 	keyframeStr := "non-IDR"
 	if isKeyframe {
 		keyframeStr = "IDR"
 	}
 
-	// Log detailed frame header in hex
-	hdrHex := fmt.Sprintf("%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
-		header[0], header[1], header[2], header[3],
-		header[4], header[5], header[6], header[7],
-		header[8], header[9], header[10], header[11],
-		header[12], header[13], header[14], header[15])
-
 	if s.frameSeq <= 3 {
 		dbg("[SEND] %s full header: %02x", keyframeStr, header)
 	}
 
-	dbg("[SEND] %s frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d hdr_hex=%s",
-		keyframeStr, s.frameSeq, len(auData), header[4], header[5], ntpTimestamp, hdrHex)
+	dbg("[SEND] %s frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d",
+		keyframeStr, s.frameSeq, len(auData), header[4], header[5], ntpTimestamp)
 
+	// Use vectored I/O (writev) to send header + payload in a single syscall,
+	// avoiding a copy into a combined buffer.
+	bufs := net.Buffers{header[:], framePayload}
 	s.dataMu.Lock()
 	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	err := writeFull(s.dataConn, frame)
+	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	if err != nil {
 		dbg("[SEND] write error on frame seq=%d: %v", s.frameSeq, err)
-		// Log first 20 bytes of encrypted payload for debugging
-		if len(auData) > 0 {
-			payloadHex := fmt.Sprintf("%02x", auData[:min(20, len(auData))])
-			dbg("[SEND] payload[0:20]=%s", payloadHex)
-		}
 	}
 	return err
 }
