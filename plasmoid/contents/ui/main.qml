@@ -69,10 +69,12 @@ PlasmoidItem {
             if (resp.ok) {
                 root.daemonState = resp.state || "idle"
                 root.connectedDevice = resp.device || ""
+                root.connectedIP = resp.device_ip || ""
                 root.errorText = ""
             } else {
                 root.daemonState = "idle"
                 root.connectedDevice = ""
+                root.connectedIP = ""
             }
         } else if (action === "discover") {
             if (resp.ok && resp.devices) {
@@ -210,7 +212,7 @@ PlasmoidItem {
                     topPadding: Kirigami.Units.smallSpacing
                     bottomPadding: Kirigami.Units.smallSpacing
 
-                    readonly property bool isThisDeviceStreaming: root.isStreaming && root.connectedDevice === modelData.name
+                    readonly property bool isThisDeviceStreaming: root.isStreaming && root.connectedIP === modelData.ip
                     readonly property bool isThisDeviceConnecting: root.isConnecting && root.connectedIP === modelData.ip
 
                     contentItem: RowLayout {
