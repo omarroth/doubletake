@@ -4,8 +4,8 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"airplay/internal/airplay"
-	"airplay/playfair"
+	"doubletake/internal/airplay"
+	"doubletake/playfair"
 )
 
 // TestCGoVsGoPlayfairDecrypt compares the C (CGo) playfair_decrypt

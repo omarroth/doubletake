@@ -15,11 +15,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"log"
 	"os"
 	"sync"
 
-	"airplay/internal/arm64emu"
+	"doubletake/internal/arm64emu"
 
 	"github.com/blacktop/go-macho"
 )
@@ -111,7 +110,7 @@ func New(binaryPath string) (*Emulator, error) {
 			segData := data[seg.Offset : seg.Offset+seg.Filesz]
 			mem.Write(seg.Addr, segData)
 		}
-		log.Printf("[fpemu] segment %s: 0x%x size=0x%x", seg.Name, seg.Addr, seg.Memsz)
+		dbg("[EMU] segment %s: 0x%x size=0x%x", seg.Name, seg.Addr, seg.Memsz)
 	}
 
 	// Patch GOT entries with BRK stubs
@@ -164,11 +163,11 @@ func New(binaryPath string) (*Emulator, error) {
 		mem.Write(pc, []byte{0x00, 0x00, 0x20, 0xD4})
 		// Register a dynamic stub using heuristic classification
 		cpu.Stubs[pc] = e.makeDynStub(pc)
-		log.Printf("[fpemu] registered dynamic stub at 0x%x (LR=0x%x X0=0x%x X1=0x%x)", pc, cpu.X[30], cpu.X[0], cpu.X[1])
+		dbg("[EMU] registered dynamic stub at 0x%x (LR=0x%x X0=0x%x X1=0x%x)", pc, cpu.X[30], cpu.X[0], cpu.X[1])
 		return nil
 	}
 
-	log.Printf("[fpemu] loaded binary with pure Go ARM64 interpreter")
+	dbg("[EMU] loaded binary with pure Go ARM64 interpreter")
 	return e, nil
 }
 
@@ -271,7 +270,7 @@ func (e *Emulator) FPSAPInit(hwInfo []byte) (uint64, error) {
 		return 0, fmt.Errorf("FPSAPInit returned %d", int32(ret))
 	}
 	ctx := e.read64(ctxOutAddr)
-	log.Printf("[fpemu] FPSAPInit: ctx=0x%x", ctx)
+	dbg("[EMU] FPSAPInit: ctx=0x%x", ctx)
 	return ctx, nil
 }
 
@@ -562,7 +561,7 @@ func sPthreadOnce(e *Emulator) error {
 	ctrl := x0(e)
 	if e.mem.Read8(ctrl) == 0 {
 		e.mem.Write(ctrl, []byte{1, 0, 0, 0})
-		log.Printf("[fpemu] pthread_once: skipping init routine")
+		dbg("[EMU] pthread_once: skipping init routine")
 	}
 	setX0(e, 0)
 	return nil
@@ -572,7 +571,7 @@ func sDispatchOnce(e *Emulator) error {
 	pred := x0(e)
 	if e.read64(pred) == 0 {
 		e.write64(pred, 1)
-		log.Printf("[fpemu] dispatch_once: skipping block")
+		dbg("[EMU] dispatch_once: skipping block")
 	}
 	return nil
 }
@@ -595,7 +594,7 @@ func (e *Emulator) makeDynStub(addr uint64) func(cpu *arm64emu.CPU) error {
 				initFunc = a2
 			}
 			if initFunc != 0 {
-				log.Printf("[fpemu] dynstub 0x%x: classified as dispatch_once", addr)
+				dbg("[EMU] dynstub 0x%x: classified as dispatch_once", addr)
 				handler := func(cpu *arm64emu.CPU) error {
 					pred := cpu.X[0]
 					fn := cpu.X[1]
@@ -608,12 +607,12 @@ func (e *Emulator) makeDynStub(addr uint64) func(cpu *arm64emu.CPU) error {
 					}
 					if e.read64(pred) == 0 {
 						e.write64(pred, ^uint64(0))
-						log.Printf("[fpemu] dispatch_once 0x%x: calling init 0x%x", addr, fn)
+						dbg("[EMU] dispatch_once 0x%x: calling init 0x%x", addr, fn)
 						savedLR := cpu.X[30]
 						cpu.X[30] = nestedRetAddr
 						cpu.PC = fn
 						if err := cpu.Run(nestedRetAddr); err != nil {
-							log.Printf("[fpemu] dispatch_once init error: %v", err)
+							dbg("[EMU] dispatch_once init error: %v", err)
 						}
 						cpu.X[30] = savedLR
 					}
@@ -627,7 +626,7 @@ func (e *Emulator) makeDynStub(addr uint64) func(cpu *arm64emu.CPU) error {
 
 		// Small X0 → malloc
 		if a0 > 0 && a0 < 0x100000 {
-			log.Printf("[fpemu] dynstub 0x%x: classified as malloc", addr)
+			dbg("[EMU] dynstub 0x%x: classified as malloc", addr)
 			mallocHandler := func(cpu *arm64emu.CPU) error {
 				size := cpu.X[0]
 				if size == 0 {
@@ -641,7 +640,7 @@ func (e *Emulator) makeDynStub(addr uint64) func(cpu *arm64emu.CPU) error {
 		}
 
 		// Default: nop returning 0
-		log.Printf("[fpemu] dynstub 0x%x: classified as nop (X0=0x%x X1=0x%x X2=0x%x)", addr, a0, a1, a2)
+		dbg("[EMU] dynstub 0x%x: classified as nop (X0=0x%x X1=0x%x X2=0x%x)", addr, a0, a1, a2)
 		nopHandler := func(cpu *arm64emu.CPU) error {
 			cpu.X[0] = 0
 			return nil

@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"airplay/internal/fpemu"
+	"doubletake/internal/fpemu"
 )
 
 // TestOracleCompareM1Format compares the emulator's m1 with the native m1.

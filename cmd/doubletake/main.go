@@ -12,7 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"airplay/internal/airplay"
+	"doubletake/internal/airplay"
+	"doubletake/internal/fpemu"
 )
 
 func main() {
@@ -33,6 +34,7 @@ func main() {
 	flag.Parse()
 
 	airplay.DebugMode = *debug
+	fpemu.DebugMode = *debug
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

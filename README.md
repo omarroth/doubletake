@@ -1,4 +1,4 @@
-# airplay
+# doubletake
 
 AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV using the AirPlay 2 mirroring protocol.
 
@@ -30,33 +30,33 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
 ## Build
 
 ```sh
-go build -o airplay ./cmd/airplay
+go build -o doubletake ./cmd/doubletake
 ```
 
 ## Usage
 
 ```sh
 # Discover Apple TVs on the network and stream
-./airplay
+./doubletake
 
 # Connect to a specific Apple TV
-./airplay -target 192.168.1.77
+./doubletake -target 192.168.1.77
 
 # First-time pairing with PIN (saves credentials for reuse)
-./airplay -target 192.168.1.77 -pair
+./doubletake -target 192.168.1.77 -pair
 
 # Use saved credentials
-./airplay -target 192.168.1.77 -creds airplay-credentials.json
+./doubletake -target 192.168.1.77 -creds airplay-credentials.json
 
 # Adjust stream settings
-./airplay -target 192.168.1.77 -width 1920 -height 1080 -fps 30 -bitrate 10000
+./doubletake -target 192.168.1.77 -width 1920 -height 1080 -fps 30 -bitrate 10000
 
 # Hardware encoding
-./airplay -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
-./airplay -target 192.168.1.77 -hwaccel vaapi   # Intel/AMD
+./doubletake -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
+./doubletake -target 192.168.1.77 -hwaccel vaapi   # Intel/AMD
 
 # Debug mode (verbose protocol logging)
-./airplay -target 192.168.1.77 -debug
+./doubletake -target 192.168.1.77 -debug
 ```
 
 ### Flags

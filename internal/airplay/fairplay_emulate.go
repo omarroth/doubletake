@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"os"
 
-	"airplay/internal/fpemu"
+	"doubletake/internal/fpemu"
 )
 
 const airplaySenderPath = "thirdparty/apple/AirPlaySender.framework/AirPlaySender"

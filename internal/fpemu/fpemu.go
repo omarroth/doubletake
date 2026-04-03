@@ -14,7 +14,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"log"
 	"os"
 	"sync"
 
@@ -143,7 +142,7 @@ func New(binaryPath string) (*Emulator, error) {
 			segData := data[seg.Offset : seg.Offset+seg.Filesz]
 			engine.MemWrite(seg.Addr, segData)
 		}
-		log.Printf("[fpemu] segment %s: 0x%x size=0x%x", seg.Name, seg.Addr, seg.Memsz)
+		dbg("[EMU] segment %s: 0x%x size=0x%x", seg.Name, seg.Addr, seg.Memsz)
 	}
 
 	// Patch GOT entries
@@ -193,13 +192,13 @@ func New(binaryPath string) (*Emulator, error) {
 		}
 	}
 
-	log.Printf("[fpemu] patched %d import stubs", len(e.stubs))
+	dbg("[EMU] patched %d import stubs", len(e.stubs))
 
 	// Add hooks for unmapped memory access (shared cache pointers in __DATA)
 	engine.HookAdd(uc.HOOK_MEM_UNMAPPED, func(_ uc.Unicorn, typ int, addr uint64, size int, value int64) bool {
 		pageAddr := addr & ^uint64(0xFFF)
 		if err := engine.MemMap(pageAddr, 0x1000); err != nil {
-			log.Printf("[fpemu] MemMap 0x%x failed: %v", pageAddr, err)
+			dbg("[EMU] MemMap 0x%x failed: %v", pageAddr, err)
 		}
 
 		if typ == uc.MEM_FETCH_UNMAPPED {
@@ -210,7 +209,7 @@ func New(binaryPath string) (*Emulator, error) {
 				lr, _ := engine.RegRead(uc.ARM64_REG_LR)
 				x0v, _ := engine.RegRead(uc.ARM64_REG_X0)
 				x1v, _ := engine.RegRead(uc.ARM64_REG_X1)
-				log.Printf("[fpemu] registered dynamic stub 0x%x (LR=0x%x X0=0x%x X1=0x%x)", addr, lr, x0v, x1v)
+				dbg("[EMU] registered dynamic stub 0x%x (LR=0x%x X0=0x%x X1=0x%x)", addr, lr, x0v, x1v)
 			}
 		}
 		// Read/write unmapped: zero page is fine
@@ -240,7 +239,7 @@ func (e *Emulator) execLoop(pc, sentinel uint64) error {
 					name = fmt.Sprintf("dyn@0x%x", curPC)
 				}
 				lr, _ := e.engine.RegRead(uc.ARM64_REG_LR)
-				log.Printf("[fpemu-trace] STUB %s (PC=0x%x LR=0x%x)", name, curPC, lr)
+				dbg("[EMU-trace] STUB %s (PC=0x%x LR=0x%x)", name, curPC, lr)
 			}
 			if herr := handler(e); herr != nil {
 				return fmt.Errorf("stub 0x%x: %w", curPC, herr)
@@ -359,7 +358,7 @@ func (e *Emulator) FPSAPInit(hwInfo []byte) (uint64, error) {
 		return 0, fmt.Errorf("FPSAPInit returned %d", int32(ret))
 	}
 	ctx := e.readU64(ctxOutAddr)
-	log.Printf("[fpemu] FPSAPInit: ctx=0x%x", ctx)
+	dbg("[EMU] FPSAPInit: ctx=0x%x", ctx)
 	return ctx, nil
 }
 
@@ -383,7 +382,7 @@ func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, inpu
 
 	// If tracing, add a code hook to log all instructions
 	if e.tracing {
-		log.Printf("[fpemu-trace] FPSAPExchange: input=%d bytes, inAddr=0x%x", len(input), inAddr)
+		dbg("[EMU-trace] FPSAPExchange: input=%d bytes, inAddr=0x%x", len(input), inAddr)
 		// Add instruction tracing hook
 		instrCount := 0
 		pcTrace := make(map[uint64]int) // PC -> first hit instruction count
@@ -437,9 +436,9 @@ func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, inpu
 					for i, r := range xregs {
 						vals[i], _ = u.RegRead(r)
 					}
-					log.Printf("[fpemu-regdump] PC=0x%x SP=0x%x textInst=%d", addr, sp, textInstCount)
+					dbg("[EMU-regdump] PC=0x%x SP=0x%x textInst=%d", addr, sp, textInstCount)
 					for i, v := range vals {
-						log.Printf("[fpemu-regdump]   X%d=0x%x", i, v)
+						dbg("[EMU-regdump]   X%d=0x%x", i, v)
 					}
 				}
 				// Dump memory at X9 when about to execute LDR Q0, [X9, #0]
@@ -447,7 +446,7 @@ func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, inpu
 					sp, _ := u.RegRead(uc.ARM64_REG_SP)
 					mem, err := u.MemRead(sp, 64)
 					if err == nil {
-						log.Printf("[fpemu-stackdump] PC=0x%x SP=0x%x stack=%x", addr, sp, mem)
+						dbg("[EMU-stackdump] PC=0x%x SP=0x%x stack=%x", addr, sp, mem)
 					}
 				}
 				// Dump V-reg values at critical PCs in the SIMD block
@@ -456,19 +455,19 @@ func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, inpu
 					d1, _ := u.RegRead(uc.ARM64_REG_D1)
 					d2, _ := u.RegRead(uc.ARM64_REG_D2)
 					d3, _ := u.RegRead(uc.ARM64_REG_D3)
-					log.Printf("[fpemu-vreg] PC=0x%x D0=0x%x D2=0x%x D1=0x%x D3=0x%x", addr, d0, d2, d1, d3)
+					dbg("[EMU-vreg] PC=0x%x D0=0x%x D2=0x%x D1=0x%x D3=0x%x", addr, d0, d2, d1, d3)
 				}
 				if addr == 0x1a12d6d64 {
 					x9, _ := u.RegRead(uc.ARM64_REG_X9)
 					mem, err := u.MemRead(x9, 64)
 					if err == nil {
-						log.Printf("[fpemu-memdump] PC=0x%x X9=0x%x mem=%x", addr, x9, mem)
+						dbg("[EMU-memdump] PC=0x%x X9=0x%x mem=%x", addr, x9, mem)
 					}
 				}
 			}
 		}, 0, ^uint64(0))
 		defer func() {
-			log.Printf("[fpemu-trace] FPSAPExchange executed %d instructions, %d unique PCs", instrCount, len(pcTrace))
+			dbg("[EMU-trace] FPSAPExchange executed %d instructions, %d unique PCs", instrCount, len(pcTrace))
 			// Export the PC trace for analysis
 			e.mu.Lock()
 			e.lastPCTrace = pcTrace
@@ -482,7 +481,7 @@ func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, inpu
 						fmt.Fprintf(f, "%d 0x%x x0=0x%x x1=0x%x x2=0x%x\n", i, te.pc, te.x0, te.x1, te.x2)
 					}
 					f.Close()
-					log.Printf("[fpemu-trace] wrote %d PCs to /tmp/fp_ordered_trace.txt", len(regTrace))
+					dbg("[EMU-trace] wrote %d PCs to /tmp/fp_ordered_trace.txt", len(regTrace))
 				}
 			}
 			// Write checkpoints
@@ -493,7 +492,7 @@ func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, inpu
 						fmt.Fprintln(f, cp)
 					}
 					f.Close()
-					log.Printf("[fpemu-trace] wrote %d checkpoints to /tmp/fp_checkpoints.txt", len(checkpoints))
+					dbg("[EMU-trace] wrote %d checkpoints to /tmp/fp_checkpoints.txt", len(checkpoints))
 				}
 			}
 		}()
@@ -662,7 +661,7 @@ func sStrlen(e *Emulator) error {
 }
 
 func sSHA1Init(e *Emulator) error {
-	log.Printf("[fpemu-trace] SHA1_Init(ctx=0x%x)", x0(e))
+	dbg("[EMU-trace] SHA1_Init(ctx=0x%x)", x0(e))
 	e.shaCtxs[x0(e)] = sha1.New()
 	setX0(e, 1)
 	return nil
@@ -676,7 +675,7 @@ func sSHA1Update(e *Emulator) error {
 	}
 	if n > 0 {
 		buf := e.readMem(data, int(n))
-		log.Printf("[fpemu-trace] SHA1_Update(ctx=0x%x, len=%d, data=%02x)", ctx, n, buf)
+		dbg("[EMU-trace] SHA1_Update(ctx=0x%x, len=%d, data=%02x)", ctx, n, buf)
 		h.Write(buf)
 	}
 	setX0(e, 1)
@@ -686,7 +685,7 @@ func sSHA1Final(e *Emulator) error {
 	digest, ctx := x0(e), x1(e)
 	if h, ok := e.shaCtxs[ctx]; ok {
 		result := h.Sum(nil)[:20]
-		log.Printf("[fpemu-trace] SHA1_Final(ctx=0x%x) => %02x", ctx, result)
+		dbg("[EMU-trace] SHA1_Final(ctx=0x%x) => %02x", ctx, result)
 		e.engine.MemWrite(digest, result)
 		delete(e.shaCtxs, ctx)
 	} else {
@@ -697,7 +696,7 @@ func sSHA1Final(e *Emulator) error {
 }
 
 func sSHA512Init(e *Emulator) error {
-	log.Printf("[fpemu-trace] SHA512_Init(ctx=0x%x)", x0(e))
+	dbg("[EMU-trace] SHA512_Init(ctx=0x%x)", x0(e))
 	e.shaCtxs[x0(e)] = sha512.New()
 	setX0(e, 1)
 	return nil
@@ -711,7 +710,7 @@ func sSHA512Update(e *Emulator) error {
 	}
 	if n > 0 {
 		buf := e.readMem(data, int(n))
-		log.Printf("[fpemu-trace] SHA512_Update(ctx=0x%x, len=%d, data=%02x)", ctx, n, buf)
+		dbg("[EMU-trace] SHA512_Update(ctx=0x%x, len=%d, data=%02x)", ctx, n, buf)
 		h.Write(buf)
 	}
 	setX0(e, 1)
@@ -721,7 +720,7 @@ func sSHA512Final(e *Emulator) error {
 	digest, ctx := x0(e), x1(e)
 	if h, ok := e.shaCtxs[ctx]; ok {
 		result := h.Sum(nil)[:64]
-		log.Printf("[fpemu-trace] SHA512_Final(ctx=0x%x) => %02x", ctx, result)
+		dbg("[EMU-trace] SHA512_Final(ctx=0x%x) => %02x", ctx, result)
 		e.engine.MemWrite(digest, result)
 		delete(e.shaCtxs, ctx)
 	} else {
@@ -735,7 +734,7 @@ func sAESCTRInit(e *Emulator) error {
 	ctxPtr, keyPtr, keyLen, ivPtr := x0(e), x1(e), x2(e), x3(e)
 	key := e.readMem(keyPtr, int(keyLen))
 	iv := e.readMem(ivPtr, 16)
-	log.Printf("[fpemu-trace] AES_CTR_Init(ctx=0x%x, keyLen=%d, key=%02x, iv=%02x)", ctxPtr, keyLen, key, iv)
+	dbg("[EMU-trace] AES_CTR_Init(ctx=0x%x, keyLen=%d, key=%02x, iv=%02x)", ctxPtr, keyLen, key, iv)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		setX0(e, ^uint64(0))
@@ -751,7 +750,7 @@ func sAESCTRUpdate(e *Emulator) error {
 		in := e.readMem(inPtr, int(inLen))
 		out := make([]byte, inLen)
 		ctx.stream.XORKeyStream(out, in)
-		log.Printf("[fpemu-trace] AES_CTR_Update(ctx=0x%x, len=%d, in=%02x, out=%02x)", ctxPtr, inLen, in, out)
+		dbg("[EMU-trace] AES_CTR_Update(ctx=0x%x, len=%d, in=%02x, out=%02x)", ctxPtr, inLen, in, out)
 		e.engine.MemWrite(outPtr, out)
 	}
 	setX0(e, 0)
@@ -779,7 +778,7 @@ func sPthreadOnce(e *Emulator) error {
 	if e.readMem(ctrl, 1)[0] == 0 {
 		e.engine.MemWrite(ctrl, []byte{1, 0, 0, 0})
 		// Cannot call init routine recursively; skip for now
-		log.Printf("[fpemu] pthread_once: skipping init routine")
+		dbg("[EMU] pthread_once: skipping init routine")
 	}
 	setX0(e, 0)
 	return nil
@@ -788,7 +787,7 @@ func sDispatchOnce(e *Emulator) error {
 	pred := x0(e)
 	if e.readU64(pred) == 0 {
 		e.writeU64(pred, 1)
-		log.Printf("[fpemu] dispatch_once: skipping block")
+		dbg("[EMU] dispatch_once: skipping block")
 	}
 	return nil
 }
@@ -816,7 +815,7 @@ func (e *Emulator) makeDynStub(addr uint64) stubFunc {
 				initFunc = a2
 			}
 			if initFunc != 0 {
-				log.Printf("[fpemu] dynstub 0x%x: classified as dispatch_once", addr)
+				dbg("[EMU] dynstub 0x%x: classified as dispatch_once", addr)
 				handler := func(e *Emulator) error {
 					pred := x0(e)
 					fn := x1(e)
@@ -829,11 +828,11 @@ func (e *Emulator) makeDynStub(addr uint64) stubFunc {
 					}
 					if e.readU64(pred) == 0 {
 						e.writeU64(pred, ^uint64(0))
-						log.Printf("[fpemu] dispatch_once 0x%x: calling init 0x%x", addr, fn)
+						dbg("[EMU] dispatch_once 0x%x: calling init 0x%x", addr, fn)
 						savedLR, _ := e.engine.RegRead(uc.ARM64_REG_LR)
 						e.engine.RegWrite(uc.ARM64_REG_LR, nestedRetAddr)
 						if err := e.execLoop(fn, nestedRetAddr); err != nil {
-							log.Printf("[fpemu] dispatch_once init error: %v", err)
+							dbg("[EMU] dispatch_once init error: %v", err)
 						}
 						e.engine.RegWrite(uc.ARM64_REG_LR, savedLR)
 					}
@@ -847,13 +846,13 @@ func (e *Emulator) makeDynStub(addr uint64) stubFunc {
 
 		// Small X0 → malloc(size)
 		if a0 > 0 && a0 < 0x100000 {
-			log.Printf("[fpemu] dynstub 0x%x: classified as malloc", addr)
+			dbg("[EMU] dynstub 0x%x: classified as malloc", addr)
 			e.stubs[addr] = sMalloc
 			return sMalloc(e)
 		}
 
 		// Default: nop returning 0
-		log.Printf("[fpemu] dynstub 0x%x: classified as nop (X0=0x%x X1=0x%x X2=0x%x)", addr, a0, a1, a2)
+		dbg("[EMU] dynstub 0x%x: classified as nop (X0=0x%x X1=0x%x X2=0x%x)", addr, a0, a1, a2)
 		e.stubs[addr] = sNop
 		return sNop(e)
 	}
