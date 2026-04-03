@@ -35,11 +35,12 @@ type Request struct {
 
 // Response is returned to the caller for every request.
 type Response struct {
-	OK      bool         `json:"ok"`
-	State   State        `json:"state"`
-	Device  string       `json:"device,omitempty"`
-	Error   string       `json:"error,omitempty"`
-	Devices []DeviceInfo `json:"devices,omitempty"`
+	OK       bool         `json:"ok"`
+	State    State        `json:"state"`
+	Device   string       `json:"device,omitempty"`
+	DeviceIP string       `json:"device_ip,omitempty"`
+	Error    string       `json:"error,omitempty"`
+	Devices  []DeviceInfo `json:"devices,omitempty"`
 }
 
 // DeviceInfo is a simplified view of a discovered AirPlay device.
@@ -77,16 +78,18 @@ func DefaultSocketPath() string {
 
 // Daemon manages a long-running doubletake service.
 type Daemon struct {
-	cfg      Config
-	mu       sync.Mutex
-	state    State
-	devices  []airplay.AirPlayDevice
-	client   *airplay.AirPlayClient
-	session  *airplay.MirrorSession
-	capture  *airplay.ScreenCapture
-	device   string // name of connected device
-	cancelFn context.CancelFunc
-	listener net.Listener
+	cfg         Config
+	mu          sync.Mutex
+	state       State
+	discovering bool // true while discover is in-flight, independent of state
+	devices     []airplay.AirPlayDevice
+	client      *airplay.AirPlayClient
+	session     *airplay.MirrorSession
+	capture     *airplay.ScreenCapture
+	device      string // name of connected device
+	deviceIP    string // IP of connected device
+	cancelFn    context.CancelFunc
+	listener    net.Listener
 }
 
 // New creates a new Daemon with the given configuration.
@@ -187,19 +190,21 @@ func (d *Daemon) handleStatus() Response {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return Response{
-		OK:     true,
-		State:  d.state,
-		Device: d.device,
+		OK:       true,
+		State:    d.state,
+		Device:   d.device,
+		DeviceIP: d.deviceIP,
 	}
 }
 
 func (d *Daemon) handleDiscover() Response {
 	d.mu.Lock()
-	if d.state == StateDiscovering {
+	if d.discovering {
+		st := d.state
 		d.mu.Unlock()
-		return Response{OK: false, State: StateDiscovering, Error: "discovery already in progress"}
+		return Response{OK: false, State: st, Error: "discovery already in progress"}
 	}
-	d.state = StateDiscovering
+	d.discovering = true
 	d.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -209,9 +214,7 @@ func (d *Daemon) handleDiscover() Response {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.state == StateDiscovering {
-		d.state = StateIdle
-	}
+	d.discovering = false
 
 	if err != nil {
 		return Response{OK: false, State: d.state, Error: "discovery failed: " + err.Error()}
@@ -288,6 +291,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 		d.mu.Lock()
 		d.state = StateIdle
 		d.device = ""
+		d.deviceIP = ""
 		d.client = nil
 		d.session = nil
 		d.capture = nil
@@ -310,6 +314,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	d.mu.Lock()
 	d.device = info.Name
+	d.deviceIP = target
 	d.mu.Unlock()
 
 	log.Printf("[daemon] connected to %s (model: %s)", info.Name, info.Model)
@@ -413,6 +418,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	d.mu.Lock()
 	d.state = StateIdle
 	d.device = ""
+	d.deviceIP = ""
 	d.client = nil
 	d.session = nil
 	d.capture = nil
@@ -454,6 +460,7 @@ func (d *Daemon) stopLocked() {
 	}
 	d.state = StateIdle
 	d.device = ""
+	d.deviceIP = ""
 }
 
 func toDeviceInfos(devices []airplay.AirPlayDevice) []DeviceInfo {
