@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net"
 	"strconv"
@@ -861,10 +860,14 @@ func deriveChaChaKey(ikm []byte, streamConnectionID int64) ([]byte, error) {
 }
 
 // heartbeatLoop sends periodic GET_PARAMETER requests to keep the session alive.
+// Some receivers (e.g. Apple TV) may return 400 for GET_PARAMETER; in that case
+// we silently stop — the /feedback POST and data-channel heartbeat provide
+// redundant keepalive.
 func (s *MirrorSession) heartbeatLoop(ctx context.Context, uri, sessionID string) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	consecutiveFailures := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -874,7 +877,14 @@ func (s *MirrorSession) heartbeatLoop(ctx context.Context, uri, sessionID string
 				"Session": sessionID,
 			})
 			if err != nil {
-				log.Printf("heartbeat failed: %v", err)
+				consecutiveFailures++
+				dbg("[HEARTBEAT] GET_PARAMETER failed (%d): %v", consecutiveFailures, err)
+				if consecutiveFailures >= 3 {
+					dbg("[HEARTBEAT] disabling GET_PARAMETER after %d failures", consecutiveFailures)
+					return
+				}
+			} else {
+				consecutiveFailures = 0
 			}
 		}
 	}
@@ -1057,7 +1067,7 @@ var appStartTime = time.Now()
 // remote_clock_offset, producing a ~56-year PTS on the first buffer. GStreamer
 // prerolls that frame but then drops every subsequent frame whose PTS (correctly
 // at 33 ms, 66 ms, …) looks like a massive backwards time jump.
-const videoTimestampBias = 100 * time.Millisecond
+const videoTimestampBias = 5 * time.Millisecond
 
 func ntpTimeNow() uint64 {
 	d := time.Since(appStartTime) + videoTimestampBias
