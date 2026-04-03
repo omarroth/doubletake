@@ -47,12 +47,13 @@ type aesCTRCtx struct {
 }
 
 type Emulator struct {
-	mu      sync.Mutex
-	cpu     *arm64emu.CPU
-	mem     *arm64emu.Memory
-	heapPtr uint64
-	shaCtxs map[uint64]hash.Hash
-	aesCtxs map[uint64]*aesCTRCtx
+	mu        sync.Mutex
+	cpu       *arm64emu.CPU
+	mem       *arm64emu.Memory
+	heapPtr   uint64
+	shaCtxs   map[uint64]hash.Hash
+	aesCtxs   map[uint64]*aesCTRCtx
+	stubNames map[uint64]string
 }
 
 func New(binaryPath string) (*Emulator, error) {
@@ -70,11 +71,12 @@ func New(binaryPath string) (*Emulator, error) {
 	cpu := arm64emu.NewCPU(mem)
 
 	e := &Emulator{
-		cpu:     cpu,
-		mem:     mem,
-		heapPtr: heapBase,
-		shaCtxs: make(map[uint64]hash.Hash),
-		aesCtxs: make(map[uint64]*aesCTRCtx),
+		cpu:       cpu,
+		mem:       mem,
+		heapPtr:   heapBase,
+		shaCtxs:   make(map[uint64]hash.Hash),
+		aesCtxs:   make(map[uint64]*aesCTRCtx),
+		stubNames: make(map[uint64]string),
 	}
 
 	// Map fixed regions
@@ -174,6 +176,7 @@ func New(binaryPath string) (*Emulator, error) {
 func (e *Emulator) Close() error { return nil }
 
 func (e *Emulator) registerStub(addr uint64, name string, handler stubFunc) {
+	e.stubNames[addr] = name
 	e.cpu.Stubs[addr] = func(cpu *arm64emu.CPU) error {
 		return handler(e)
 	}
@@ -648,4 +651,22 @@ func (e *Emulator) makeDynStub(addr uint64) func(cpu *arm64emu.CPU) error {
 		cpu.Stubs[addr] = nopHandler
 		return nopHandler(cpu)
 	}
+}
+
+// Mem returns the underlying Memory for snapshot generation.
+func (e *Emulator) Mem() *arm64emu.Memory { return e.mem }
+
+// HeapPtr returns the current heap allocation pointer.
+func (e *Emulator) HeapPtr() uint64 { return e.heapPtr }
+
+// SetHeapPtr sets the heap allocation pointer (used when restoring from snapshot).
+func (e *Emulator) SetHeapPtr(v uint64) { e.heapPtr = v }
+
+// StubNames returns a map from stub addresses to their handler names.
+func (e *Emulator) StubNames() map[uint64]string {
+	names := make(map[uint64]string)
+	for addr, name := range e.stubNames {
+		names[addr] = name
+	}
+	return names
 }

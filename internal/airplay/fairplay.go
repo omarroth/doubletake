@@ -6,13 +6,16 @@ import (
 )
 
 func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
-	// Use the pure Go implementation by default.
-	// Set FAIRPLAY_EMULATE=1 to force ARM64 emulation (requires "emulate" build tag
-	// + unicorn + AirPlaySender binary).
+	// Default: snapshot-based approach (no external binary needed).
+	// Set FAIRPLAY_NATIVE=1 to use the full ARM64 emulation (requires AirPlaySender binary).
+	// Set FAIRPLAY_EMULATE=1 to force Unicorn-based emulation (requires "emulate" build tag).
 	if os.Getenv("FAIRPLAY_EMULATE") != "" {
 		return c.fairPlaySetupEmulated(ctx)
 	}
-	return c.FairPlaySetupNative(ctx)
+	if os.Getenv("FAIRPLAY_NATIVE") != "" {
+		return c.FairPlaySetupNative(ctx)
+	}
+	return c.FairPlaySetupSnapshot(ctx)
 }
 
 // buildEkey constructs a 72-byte ekey with the FPLY header format.

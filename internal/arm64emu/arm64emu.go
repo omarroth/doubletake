@@ -96,6 +96,18 @@ func (c *CPU) step(inst uint32) error {
 			c.PC = c.X[30] // return to LR
 			return nil
 		}
+		// No stub registered — try OnFault to dynamically register one.
+		if c.OnFault != nil {
+			if err := c.OnFault(c, c.PC, inst); err == nil {
+				if h, ok := c.Stubs[c.PC]; ok {
+					if err := h(c); err != nil {
+						return err
+					}
+					c.PC = c.X[30]
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("BRK at 0x%x with no stub", c.PC)
 	}
 
@@ -255,11 +267,14 @@ func shiftVal(val uint64, shiftType, amount uint32, is64 bool) uint64 {
 
 // Memory provides a paged address space.
 type Memory struct {
-	pages map[uint64][]byte
+	pages     map[uint64][]byte
+	ReadPages map[uint64]bool // tracks which page addresses have been read
+	OnRead    func(addr uint64, n int)
+	OnWrite   func(addr uint64, n int)
 }
 
 func NewMemory() *Memory {
-	return &Memory{pages: make(map[uint64][]byte)}
+	return &Memory{pages: make(map[uint64][]byte), ReadPages: make(map[uint64]bool)}
 }
 
 func (m *Memory) page(addr uint64) []byte {
@@ -272,10 +287,54 @@ func (m *Memory) page(addr uint64) []byte {
 	return p
 }
 
-func (m *Memory) Read8(addr uint64) uint8     { return m.page(addr)[addr&0xFFF] }
-func (m *Memory) Write8(addr uint64, v uint8) { m.page(addr)[addr&0xFFF] = v }
+// Pages returns a map of all allocated page addresses to their data.
+func (m *Memory) Pages() map[uint64][]byte {
+	return m.pages
+}
+
+// Snapshot returns a copy of all allocated pages.
+func (m *Memory) Snapshot() map[uint64][]byte {
+	snap := make(map[uint64][]byte, len(m.pages))
+	for addr, p := range m.pages {
+		cp := make([]byte, 4096)
+		copy(cp, p)
+		snap[addr] = cp
+	}
+	return snap
+}
+
+// Restore replaces the memory contents with a previously captured snapshot.
+func (m *Memory) Restore(snap map[uint64][]byte) {
+	m.pages = make(map[uint64][]byte, len(snap))
+	for addr, p := range snap {
+		cp := make([]byte, 4096)
+		copy(cp, p)
+		m.pages[addr] = cp
+	}
+	m.ReadPages = make(map[uint64]bool)
+}
+
+func (m *Memory) Read8(addr uint64) uint8 {
+	pa := addr &^ 0xFFF
+	m.ReadPages[pa] = true
+	if m.OnRead != nil {
+		m.OnRead(addr, 1)
+	}
+	return m.page(addr)[addr&0xFFF]
+}
+
+func (m *Memory) Write8(addr uint64, v uint8) {
+	m.page(addr)[addr&0xFFF] = v
+	if m.OnWrite != nil {
+		m.OnWrite(addr, 1)
+	}
+}
 
 func (m *Memory) Read16(a uint64) uint16 {
+	m.ReadPages[a&^0xFFF] = true
+	if m.OnRead != nil {
+		m.OnRead(a, 2)
+	}
 	if a&0xFFF <= 0xFFE {
 		return binary.LittleEndian.Uint16(m.page(a)[a&0xFFF:])
 	}
@@ -285,6 +344,9 @@ func (m *Memory) Read16(a uint64) uint16 {
 func (m *Memory) Write16(a uint64, v uint16) {
 	if a&0xFFF <= 0xFFE {
 		binary.LittleEndian.PutUint16(m.page(a)[a&0xFFF:], v)
+		if m.OnWrite != nil {
+			m.OnWrite(a, 2)
+		}
 		return
 	}
 	m.Write8(a, uint8(v))
@@ -292,6 +354,10 @@ func (m *Memory) Write16(a uint64, v uint16) {
 }
 
 func (m *Memory) Read32(a uint64) uint32 {
+	m.ReadPages[a&^0xFFF] = true
+	if m.OnRead != nil {
+		m.OnRead(a, 4)
+	}
 	if a&0xFFF <= 0xFFC {
 		return binary.LittleEndian.Uint32(m.page(a)[a&0xFFF:])
 	}
@@ -302,6 +368,9 @@ func (m *Memory) Read32(a uint64) uint32 {
 func (m *Memory) Write32(a uint64, v uint32) {
 	if a&0xFFF <= 0xFFC {
 		binary.LittleEndian.PutUint32(m.page(a)[a&0xFFF:], v)
+		if m.OnWrite != nil {
+			m.OnWrite(a, 4)
+		}
 		return
 	}
 	m.Write8(a, uint8(v))
@@ -311,6 +380,10 @@ func (m *Memory) Write32(a uint64, v uint32) {
 }
 
 func (m *Memory) Read64(a uint64) uint64 {
+	m.ReadPages[a&^0xFFF] = true
+	if m.OnRead != nil {
+		m.OnRead(a, 8)
+	}
 	if a&0xFFF <= 0xFF8 {
 		return binary.LittleEndian.Uint64(m.page(a)[a&0xFFF:])
 	}
@@ -320,6 +393,9 @@ func (m *Memory) Read64(a uint64) uint64 {
 func (m *Memory) Write64(a uint64, v uint64) {
 	if a&0xFFF <= 0xFF8 {
 		binary.LittleEndian.PutUint64(m.page(a)[a&0xFFF:], v)
+		if m.OnWrite != nil {
+			m.OnWrite(a, 8)
+		}
 		return
 	}
 	m.Write32(a, uint32(v))
@@ -328,10 +404,14 @@ func (m *Memory) Write64(a uint64, v uint64) {
 
 // Read reads n bytes starting at addr.
 func (m *Memory) Read(addr uint64, n int) []byte {
+	if m.OnRead != nil {
+		m.OnRead(addr, n)
+	}
 	b := make([]byte, n)
 	off := 0
 	for off < n {
 		pa := (addr + uint64(off)) &^ 0xFFF
+		m.ReadPages[pa] = true
 		pageOff := int((addr + uint64(off)) & 0xFFF)
 		p := m.page(pa)
 		nc := copy(b[off:], p[pageOff:])
@@ -342,6 +422,9 @@ func (m *Memory) Read(addr uint64, n int) []byte {
 
 // Write writes data starting at addr.
 func (m *Memory) Write(addr uint64, data []byte) {
+	if m.OnWrite != nil {
+		m.OnWrite(addr, len(data))
+	}
 	off := 0
 	for off < len(data) {
 		pa := (addr + uint64(off)) &^ 0xFFF
