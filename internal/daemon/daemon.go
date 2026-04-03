@@ -60,6 +60,10 @@ type Config struct {
 	Bitrate    int
 	HWAccel    string
 	Debug      bool
+	TestMode   bool
+	NoEncrypt  bool
+	DirectKey  bool
+	NoAudio    bool
 }
 
 // DefaultSocketPath returns the default socket path using XDG_RUNTIME_DIR.
@@ -352,10 +356,13 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	}
 
 	streamCfg := airplay.StreamConfig{
-		Width:   d.cfg.Width,
-		Height:  d.cfg.Height,
-		FPS:     d.cfg.FPS,
-		Bitrate: d.cfg.Bitrate,
+		Width:     d.cfg.Width,
+		Height:    d.cfg.Height,
+		FPS:       d.cfg.FPS,
+		Bitrate:   d.cfg.Bitrate,
+		NoEncrypt: d.cfg.NoEncrypt,
+		DirectKey: d.cfg.DirectKey,
+		NoAudio:   d.cfg.NoAudio,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {
@@ -364,13 +371,19 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 		return
 	}
 
-	capture, err := airplay.StartCapture(ctx, airplay.CaptureConfig{
+	capCfg := airplay.CaptureConfig{
 		Width:   d.cfg.Width,
 		Height:  d.cfg.Height,
 		FPS:     d.cfg.FPS,
 		Bitrate: d.cfg.Bitrate,
 		HWAccel: d.cfg.HWAccel,
-	})
+	}
+	var capture *airplay.ScreenCapture
+	if d.cfg.TestMode {
+		capture, err = airplay.StartTestCapture(ctx, capCfg)
+	} else {
+		capture, err = airplay.StartCapture(ctx, capCfg)
+	}
 	if err != nil {
 		session.Close()
 		client.Close()
