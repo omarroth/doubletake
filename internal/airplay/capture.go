@@ -286,6 +286,10 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 	}
 
 	// Software fallback: x264enc
+	// NOTE: Do NOT set sliced-threads=false here — tune=zerolatency enables
+	// sliced-threads which allows parallel encoding within a frame with zero
+	// frame-level latency. Disabling it forces frame-level multithreading
+	// which adds N-1 frames of encoding delay (100-300ms at 30fps).
 	log.Printf("[CAPTURE] using software encoding (x264enc)")
 	return []string{
 		"x264enc",
@@ -293,8 +297,6 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 		"speed-preset=ultrafast",
 		fmt.Sprintf("bitrate=%d", bitrate),
 		fmt.Sprintf("key-int-max=%d", fps*2),
-		"bframes=0",
-		"sliced-threads=false",
 		"byte-stream=true",
 		"aud=false",
 		"vbv-buf-capacity=50",
@@ -330,8 +332,6 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		"tune=zerolatency",
 		fmt.Sprintf("bitrate=%d", bitrate),
 		fmt.Sprintf("key-int-max=%d", fps*2),
-		"bframes=0",
-		"sliced-threads=false",
 		"threads=1",
 		"byte-stream=true",
 		"!", "video/x-h264,profile=high,stream-format=byte-stream",
