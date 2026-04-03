@@ -1,4 +1,4 @@
-module airplay
+module doubletake
 
 go 1.23
 
