@@ -136,15 +136,17 @@ PlasmoidItem {
 
     fullRepresentation: PlasmaExtras.Representation {
         Layout.preferredWidth: Kirigami.Units.gridUnit * 20
-        Layout.preferredHeight: mainColumn.implicitHeight + Kirigami.Units.smallSpacing * 2
         Layout.minimumWidth: Kirigami.Units.gridUnit * 16
         Layout.maximumHeight: Kirigami.Units.gridUnit * 24
 
+        implicitHeight: mainColumn.implicitHeight
         collapseMarginsHint: true
 
         ColumnLayout {
             id: mainColumn
-            anchors.fill: parent
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
             spacing: 0
 
             // Header bar: title + refresh button
@@ -205,6 +207,8 @@ PlasmoidItem {
                 delegate: PlasmaComponents.ItemDelegate {
                     id: deviceDelegate
                     Layout.fillWidth: true
+                    topPadding: Kirigami.Units.smallSpacing
+                    bottomPadding: Kirigami.Units.smallSpacing
 
                     readonly property bool isThisDeviceStreaming: root.isStreaming && root.connectedDevice === modelData.name
                     readonly property bool isThisDeviceConnecting: root.isConnecting && root.connectedIP === modelData.ip
@@ -288,7 +292,7 @@ PlasmoidItem {
             // Empty state
             PlasmaComponents.Label {
                 Layout.fillWidth: true
-                Layout.margins: Kirigami.Units.largeSpacing * 2
+                Layout.margins: Kirigami.Units.largeSpacing
                 text: root.isBusy ? "Searching for devices…" : "No AirPlay devices found"
                 visible: root.deviceList.length === 0
                 horizontalAlignment: Text.AlignHCenter
