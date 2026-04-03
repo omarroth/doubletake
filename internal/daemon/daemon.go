@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"doubletake/internal/airplay"
-	"doubletake/internal/fpemu"
 )
 
 // State represents the daemon's current lifecycle state.
@@ -122,7 +121,6 @@ func New(cfg Config) (*Daemon, error) {
 // Run starts the daemon control socket and blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
 	airplay.DebugMode = d.cfg.Debug
-	fpemu.DebugMode = d.cfg.Debug
 
 	// Clean up stale socket
 	if err := os.Remove(d.cfg.SocketPath); err != nil && !os.IsNotExist(err) {
@@ -472,10 +470,14 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	// FairPlay setup
 	if err := client.FairPlaySetup(ctx); err != nil {
-		log.Printf("[daemon] FairPlay setup failed: %v", err)
-		client.Close()
-		setErr(fmt.Sprintf("FairPlay setup failed: %v", err))
-		return
+		if os.Getenv("ALLOW_FAIRPLAY_FALLBACK") != "" {
+			log.Printf("[daemon] FairPlay setup failed (fallback enabled): %v", err)
+		} else {
+			log.Printf("[daemon] FairPlay setup failed: %v", err)
+			client.Close()
+			setErr(fmt.Sprintf("FairPlay setup failed: %v", err))
+			return
+		}
 	}
 
 	streamCfg := airplay.StreamConfig{

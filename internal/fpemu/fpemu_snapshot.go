@@ -9,7 +9,6 @@ import (
 	"crypto/cipher"
 	"crypto/sha1"
 	"crypto/sha512"
-	_ "embed"
 	"encoding/binary"
 	"fmt"
 	"hash"
@@ -18,9 +17,6 @@ import (
 
 	"doubletake/internal/arm64emu"
 )
-
-//go:embed snapshot_data.gz
-var snapshotData []byte
 
 // NewFromSnapshot creates an Emulator from the embedded memory snapshot.
 // This eliminates the need for the Apple AirPlaySender binary — it contains

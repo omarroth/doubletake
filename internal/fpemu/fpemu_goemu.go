@@ -1,12 +1,10 @@
 //go:build !emulate
 
-// fpemu_goemu.go provides the same Emulator API as the Unicorn-based fpemu.go,
-// but uses the pure Go ARM64 interpreter from internal/arm64emu instead.
-// This eliminates the CGo/Unicorn dependency for the default build.
+// fpemu_goemu.go provides the FairPlay emulator API using the pure Go ARM64
+// interpreter from internal/arm64emu.
 package fpemu
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -15,12 +13,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"os"
 	"sync"
 
 	"doubletake/internal/arm64emu"
-
-	"github.com/blacktop/go-macho"
 )
 
 const (
@@ -36,7 +31,6 @@ const (
 )
 
 const (
-	symFPSAPInit     uint64 = 0x1a12c6468
 	symFPSAPExchange uint64 = 0x1a12bfb88
 )
 
@@ -54,123 +48,6 @@ type Emulator struct {
 	shaCtxs   map[uint64]hash.Hash
 	aesCtxs   map[uint64]*aesCTRCtx
 	stubNames map[uint64]string
-}
-
-func New(binaryPath string) (*Emulator, error) {
-	data, err := os.ReadFile(binaryPath)
-	if err != nil {
-		return nil, fmt.Errorf("read binary: %w", err)
-	}
-
-	f, err := macho.NewFile(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("parse macho: %w", err)
-	}
-
-	mem := arm64emu.NewMemory()
-	cpu := arm64emu.NewCPU(mem)
-
-	e := &Emulator{
-		cpu:       cpu,
-		mem:       mem,
-		heapPtr:   heapBase,
-		shaCtxs:   make(map[uint64]hash.Hash),
-		aesCtxs:   make(map[uint64]*aesCTRCtx),
-		stubNames: make(map[uint64]string),
-	}
-
-	// Map fixed regions
-	mem.Map(trampolineAddr, 0x1000)
-	mem.Map(stackBase, stackSize)
-	mem.Map(heapBase, heapSize)
-	mem.Map(stubPageBase, stubPageSize)
-	mem.Map(miscBase, 0x1000)
-
-	// Trampoline: BLR X8; BRK #0
-	mem.Write(trampolineAddr, []byte{0x00, 0x01, 0x3F, 0xD6, 0x00, 0x00, 0x20, 0xD4})
-
-	// Fill stub page with BRK #0
-	brks := make([]byte, stubPageSize)
-	for i := 0; i < len(brks); i += 4 {
-		binary.LittleEndian.PutUint32(brks[i:], 0xD4200000)
-	}
-	mem.Write(stubPageBase, brks)
-
-	// Stack canary
-	mem.Write(miscBase, []byte{0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE})
-
-	// BRK at nested-return sentinel
-	mem.Write(nestedRetAddr, []byte{0x00, 0x00, 0x20, 0xD4})
-
-	// Load Mach-O segments
-	for _, seg := range f.Segments() {
-		if seg.Name == "__LINKEDIT" || seg.Memsz == 0 {
-			continue
-		}
-		mem.Map(seg.Addr, seg.Memsz)
-		if seg.Filesz > 0 {
-			segData := data[seg.Offset : seg.Offset+seg.Filesz]
-			mem.Write(seg.Addr, segData)
-		}
-		dbg("[EMU] segment %s: 0x%x size=0x%x", seg.Name, seg.Addr, seg.Memsz)
-	}
-
-	// Patch GOT entries with BRK stubs
-	handlers := e.makeHandlers()
-	stubAddr := stubPageBase + 4
-	for _, sec := range f.Sections {
-		if sec.Name != "__la_symbol_ptr" && sec.Name != "__got" {
-			continue
-		}
-		nEntries := int(sec.Size / 8)
-		for i := 0; i < nEntries; i++ {
-			isymIdx := int(sec.Reserved1) + i
-			if isymIdx >= len(f.Dysymtab.IndirectSyms) {
-				continue
-			}
-			symIdx := f.Dysymtab.IndirectSyms[isymIdx]
-			if symIdx == 0x40000000 || symIdx == 0x80000000 || symIdx == 0xC0000000 {
-				continue
-			}
-			if int(symIdx) >= len(f.Symtab.Syms) {
-				continue
-			}
-			name := f.Symtab.Syms[symIdx].Name
-			gotSlot := sec.Addr + uint64(i)*8
-
-			if sec.Name == "__got" {
-				if name == "___stack_chk_guard" {
-					e.write64(gotSlot, miscBase)
-					continue
-				}
-				zeroAddr := e.heapAlloc(256)
-				e.write64(gotSlot, zeroAddr)
-				continue
-			}
-
-			// __la_symbol_ptr
-			handler := handlers[name]
-			if handler == nil {
-				handler = sNop
-			}
-			e.registerStub(stubAddr, name, handler)
-			e.write64(gotSlot, stubAddr)
-			stubAddr += 4
-		}
-	}
-
-	// Register fault handler for shared-cache function calls
-	cpu.OnFault = func(cpu *arm64emu.CPU, pc uint64, inst uint32) error {
-		// Write BRK at this address so future hits are caught by Stubs
-		mem.Write(pc, []byte{0x00, 0x00, 0x20, 0xD4})
-		// Register a dynamic stub using heuristic classification
-		cpu.Stubs[pc] = e.makeDynStub(pc)
-		dbg("[EMU] registered dynamic stub at 0x%x (LR=0x%x X0=0x%x X1=0x%x)", pc, cpu.X[30], cpu.X[0], cpu.X[1])
-		return nil
-	}
-
-	dbg("[EMU] loaded binary with pure Go ARM64 interpreter")
-	return e, nil
 }
 
 func (e *Emulator) Close() error { return nil }
@@ -235,47 +112,11 @@ func (e *Emulator) read32(addr uint64) uint32 {
 	return e.mem.Read32(addr)
 }
 
-// ReadMem reads n bytes from the emulated address space.
-func (e *Emulator) ReadMem(addr uint64, n int) []byte {
-	return e.mem.Read(addr, n)
-}
-
-// HeapDump returns (heapBase, usedBytes) for the entire used heap.
-func (e *Emulator) HeapDump() (uint64, []byte) {
-	used := int(e.heapPtr - heapBase)
-	if used <= 0 {
-		return heapBase, nil
-	}
-	return heapBase, e.mem.Read(heapBase, used)
-}
-
 func x0(e *Emulator) uint64       { return e.cpu.X[0] }
 func x1(e *Emulator) uint64       { return e.cpu.X[1] }
 func x2(e *Emulator) uint64       { return e.cpu.X[2] }
 func x3(e *Emulator) uint64       { return e.cpu.X[3] }
 func setX0(e *Emulator, v uint64) { e.cpu.X[0] = v }
-
-// FPSAPInit calls _cp2g1b9ro(&ctxRef, hwInfo).
-func (e *Emulator) FPSAPInit(hwInfo []byte) (uint64, error) {
-	if len(hwInfo) == 0 {
-		hwInfo = make([]byte, 24)
-		binary.LittleEndian.PutUint32(hwInfo, 20)
-	}
-	hwAddr := e.writeToHeap(hwInfo)
-	ctxOutAddr := e.heapAlloc(8)
-	e.write64(ctxOutAddr, 0)
-
-	ret, err := e.callFunc(symFPSAPInit, ctxOutAddr, hwAddr)
-	if err != nil {
-		return 0, fmt.Errorf("FPSAPInit: %w", err)
-	}
-	if int32(ret) != 0 {
-		return 0, fmt.Errorf("FPSAPInit returned %d", int32(ret))
-	}
-	ctx := e.read64(ctxOutAddr)
-	dbg("[EMU] FPSAPInit: ctx=0x%x", ctx)
-	return ctx, nil
-}
 
 // FPSAPExchange calls _Mib5yocT(version, hwInfo, ctx, inBuf, inLen, &outBuf, &outLen, &rc).
 func (e *Emulator) FPSAPExchange(version uint32, hwInfo []byte, ctx uint64, input []byte) ([]byte, int32, error) {
