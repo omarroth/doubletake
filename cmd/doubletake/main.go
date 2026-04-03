@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"doubletake/internal/airplay"
+	"doubletake/internal/daemon"
 	"doubletake/internal/fpemu"
 )
 
@@ -32,10 +33,17 @@ func main() {
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
+	daemonize := flag.Bool("daemonize", false, "Run as background daemon with Unix socket control interface")
+	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
 	flag.Parse()
 
 	airplay.DebugMode = *debug
 	fpemu.DebugMode = *debug
+
+	if *daemonize {
+		runDaemon(*socketPath, *credFile, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio)
+		return
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -306,4 +314,42 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 		return nil, fmt.Errorf("invalid selection")
 	}
 	return &devices[idx-1], nil
+}
+
+func runDaemon(socketPath, credFile string, width, height, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio bool) {
+	cfg := daemon.Config{
+		SocketPath: socketPath,
+		CredFile:   credFile,
+		Width:      width,
+		Height:     height,
+		FPS:        fps,
+		Bitrate:    bitrate,
+		HWAccel:    hwaccel,
+		Debug:      debug,
+		TestMode:   testMode,
+		NoEncrypt:  noEncrypt,
+		DirectKey:  directKey,
+		NoAudio:    noAudio,
+	}
+
+	d := daemon.New(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("[daemon] shutting down...")
+		cancel()
+		d.Shutdown()
+		<-sigCh
+		log.Println("[daemon] forced exit")
+		os.Exit(1)
+	}()
+
+	if err := d.Run(ctx); err != nil {
+		log.Fatalf("[daemon] %v", err)
+	}
 }

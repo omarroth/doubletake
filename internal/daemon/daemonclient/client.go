@@ -9,7 +9,7 @@ import (
 	"doubletake/internal/daemon"
 )
 
-// Client communicates with a running doubletake-daemon over its Unix socket.
+// Client communicates with a running doubletake daemon over its Unix socket.
 type Client struct {
 	SocketPath string
 }

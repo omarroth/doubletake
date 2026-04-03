@@ -56,7 +56,7 @@ func parseServiceEntry(entry *zeroconf.ServiceEntry) *AirPlayDevice {
 	}
 
 	dev := &AirPlayDevice{
-		Name: entry.Instance,
+		Name: unescapeDNSName(entry.Instance),
 		Port: entry.Port,
 	}
 
@@ -90,6 +90,22 @@ func parseTXT(records []string) map[string]string {
 	return m
 }
 
+// unescapeDNSName removes DNS-SD backslash escapes from an mDNS instance name.
+// e.g. "Living\ Room\ \(2\)" -> "Living Room (2)"
+func unescapeDNSName(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			b.WriteByte(s[i])
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
 // parseFeatures parses the AirPlay features string "0xHIGH,0xLOW" into a 64-bit value.
 func parseFeatures(s string) uint64 {
 	parts := strings.Split(s, ",")
@@ -106,12 +122,12 @@ func parseFeatures(s string) uint64 {
 
 // Feature bit constants for AirPlay receivers.
 const (
-	FeatureScreen          uint64 = 1 << 8
-	FeatureAudio           uint64 = 1 << 10
-	FeatureFPSAP25         uint64 = 1 << 14
-	FeatureHomeKitPairing  uint64 = 1 << 17
+	FeatureScreen           uint64 = 1 << 8
+	FeatureAudio            uint64 = 1 << 10
+	FeatureFPSAP25          uint64 = 1 << 14
+	FeatureHomeKitPairing   uint64 = 1 << 17
 	FeatureTransientPairing uint64 = 1 << 19
-	FeatureUDPMirroring    uint64 = 1 << 49
+	FeatureUDPMirroring     uint64 = 1 << 49
 )
 
 func (d *AirPlayDevice) SupportsScreen() bool {
