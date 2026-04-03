@@ -1,0 +1,23 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "doubletake"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "AirPlay screen mirroring control",
+        "EnabledByDefault": true,
+        "Icon": "video-display",
+        "Id": "org.doubletake.plasmoid",
+        "License": "MIT",
+        "Name": "doubletake",
+        "Version": "0.1.0"
+    },
+    "X-Plasma-API": "declarativeappletscript",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-MainScript": "ui/main.qml",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "SystemServices"
+}
