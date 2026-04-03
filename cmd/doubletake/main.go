@@ -14,7 +14,6 @@ import (
 
 	"doubletake/internal/airplay"
 	"doubletake/internal/daemon"
-	"doubletake/internal/fpemu"
 )
 
 func main() {
@@ -38,7 +37,6 @@ func main() {
 	flag.Parse()
 
 	airplay.DebugMode = *debug
-	fpemu.DebugMode = *debug
 
 	if *daemonize {
 		runDaemon(*socketPath, *credFile, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio)
