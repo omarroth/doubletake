@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,8 +84,11 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 	}
+	if encoderParts.needsVulkan {
+		gstArgs = append(gstArgs, "!", "vulkanupload")
+	}
 	gstArgs = append(gstArgs, "!")
-	gstArgs = append(gstArgs, encoderParts...)
+	gstArgs = append(gstArgs, encoderParts.parts...)
 	gstArgs = append(gstArgs,
 		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
@@ -142,19 +146,38 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 
 	display := os.Getenv("DISPLAY")
 
-	encoderParts := detectGstEncoder(cfg)
+	encoder := detectGstEncoder(cfg)
 
-	gstArgs := []string{
-		"--quiet",
+	// Detect primary monitor geometry — ximagesrc captures the full X screen
+	// (all monitors combined). On multi-monitor setups this wastes CPU on
+	// pixels we don't need. Crop to the primary monitor.
+	startX, endX := detectPrimaryMonitor(display, cfg.Width)
+
+	ximageSrcArgs := []string{
 		"ximagesrc", fmt.Sprintf("display-name=%s", display), "use-damage=false",
+	}
+	if endX > startX {
+		ximageSrcArgs = append(ximageSrcArgs,
+			fmt.Sprintf("startx=%d", startX),
+			fmt.Sprintf("endx=%d", endX-1),
+		)
+		dbg("[CAPTURE] cropping ximagesrc to x=%d..%d", startX, endX-1)
+	}
+
+	gstArgs := []string{"--quiet"}
+	gstArgs = append(gstArgs, ximageSrcArgs...)
+	gstArgs = append(gstArgs,
 		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "videoconvert",
 		"!", "videoscale",
 		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d", cfg.Width, cfg.Height),
+	)
+	if encoder.needsVulkan {
+		gstArgs = append(gstArgs, "!", "vulkanupload")
 	}
 	gstArgs = append(gstArgs, "!")
-	gstArgs = append(gstArgs, encoderParts...)
+	gstArgs = append(gstArgs, encoder.parts...)
 	gstArgs = append(gstArgs,
 		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
@@ -172,6 +195,13 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	stderr, _ := cmd.StderrPipe()
 
 	if err := cmd.Start(); err != nil {
+		// If Vulkan encoder failed, retry with software fallback
+		if encoder.needsVulkan {
+			log.Printf("[CAPTURE] vulkanh264enc pipeline failed, falling back to x264enc")
+			cancel()
+			cfg.HWAccel = "none"
+			return startX11Capture(ctx, cfg)
+		}
 		cancel()
 		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
@@ -235,10 +265,103 @@ func (sc *ScreenCapture) Stop() {
 	}
 }
 
+// detectPrimaryMonitor queries xrandr to find the primary monitor's X offset
+// and width. Returns (startX, endX) where endX = startX + monitor_width.
+// If detection fails or the screen is already <= targetWidth, returns (0, 0)
+// meaning no cropping is needed.
+func detectPrimaryMonitor(display string, targetWidth int) (int, int) {
+	// Run xrandr to get connected outputs with geometry
+	out, err := exec.Command("xrandr", "--display", display, "--query").Output()
+	if err != nil {
+		dbg("[CAPTURE] xrandr failed: %v, skipping monitor crop", err)
+		return 0, 0
+	}
+
+	// Parse lines like: "DP-3 connected primary 1920x1080+0+0"
+	// or "DP-1 connected 1920x1080+1920+0"
+	// Format: <name> connected [primary] <W>x<H>+<X>+<Y>
+	var primaryX, primaryW int
+	var found bool
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, " connected") {
+			continue
+		}
+		// Try primary first
+		if strings.Contains(line, " primary ") {
+			if x, w, ok := parseXrandrGeometry(line); ok {
+				primaryX, primaryW = x, w
+				found = true
+				break
+			}
+		}
+	}
+	// If no primary found, use the first connected output
+	if !found {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, " connected") {
+				continue
+			}
+			if x, w, ok := parseXrandrGeometry(line); ok {
+				primaryX, primaryW = x, w
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		dbg("[CAPTURE] couldn't parse xrandr output, skipping monitor crop")
+		return 0, 0
+	}
+
+	// Only crop if the monitor width is close to or larger than targetWidth
+	// and we're actually on a multi-monitor setup (total screen > single monitor)
+	if primaryW <= 0 || primaryW < targetWidth {
+		return 0, 0
+	}
+
+	dbg("[CAPTURE] primary monitor: %dx? at x=%d", primaryW, primaryX)
+	return primaryX, primaryX + primaryW
+}
+
+// parseXrandrGeometry extracts the X offset and width from an xrandr output line.
+func parseXrandrGeometry(line string) (xOffset, width int, ok bool) {
+	// Match WxH+X+Y pattern
+	for _, field := range strings.Fields(line) {
+		// e.g. "1920x1080+0+0" or "3840x2160+1920+0"
+		parts := strings.SplitN(field, "x", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		w, err := strconv.Atoi(parts[0])
+		if err != nil || w < 640 {
+			continue
+		}
+		rest := parts[1] // e.g. "1080+0+0"
+		plusParts := strings.SplitN(rest, "+", 3)
+		if len(plusParts) != 3 {
+			continue
+		}
+		x, err := strconv.Atoi(plusParts[1])
+		if err != nil {
+			continue
+		}
+		return x, w, true
+	}
+	return 0, 0, false
+}
+
+// encoderResult holds the detected encoder pipeline parts and whether it needs
+// a vulkanupload step before the encoder.
+type encoderResult struct {
+	parts      []string
+	needsVulkan bool // encoder needs vulkanupload ! before it
+}
+
 // detectGstEncoder probes for available GStreamer H.264 encoders and returns
 // the encoder element + properties as gst-launch-1.0 arguments.
-// Priority: nvh264enc > vah264enc > x264enc (software fallback).
-func detectGstEncoder(cfg CaptureConfig) []string {
+// Priority: vulkanh264enc (NVENC via Vulkan) > nvh264enc > vah264enc > x264enc.
+func detectGstEncoder(cfg CaptureConfig) encoderResult {
 	fps := cfg.FPS
 	if fps <= 0 {
 		fps = 30
@@ -249,11 +372,28 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 	}
 	hwaccel := cfg.HWAccel
 
-	// Try NVENC
+	// Try Vulkan H.264 (NVENC via Vulkan API) — lowest latency, no CPU usage
+	if hwaccel == "auto" || hwaccel == "nvenc" {
+		if exec.Command("gst-inspect-1.0", "vulkanh264enc").Run() == nil {
+			log.Printf("[CAPTURE] using NVENC hardware encoding (vulkanh264enc)")
+			return encoderResult{
+				parts: []string{
+					"vulkanh264enc",
+					"b-frames=0",
+					fmt.Sprintf("idr-period=%d", fps*2),
+					"rate-control=cbr",
+					fmt.Sprintf("bitrate=%d", bitrate),
+				},
+				needsVulkan: true,
+			}
+		}
+	}
+
+	// Try legacy NVENC
 	if hwaccel == "auto" || hwaccel == "nvenc" {
 		if exec.Command("gst-inspect-1.0", "nvh264enc").Run() == nil {
 			log.Printf("[CAPTURE] using NVENC hardware encoding (nvh264enc)")
-			return []string{
+			return encoderResult{parts: []string{
 				"nvh264enc",
 				fmt.Sprintf("bitrate=%d", bitrate),
 				fmt.Sprintf("gop-size=%d", fps*2),
@@ -261,7 +401,7 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 				"rc-mode=cbr",
 				"preset=low-latency-hq",
 				"zerolatency=true",
-			}
+			}}
 		}
 		if hwaccel == "nvenc" {
 			dbg("[CAPTURE] nvh264enc not available, falling back to software")
@@ -272,13 +412,13 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 	if hwaccel == "auto" || hwaccel == "vaapi" {
 		if exec.Command("gst-inspect-1.0", "vah264enc").Run() == nil {
 			log.Printf("[CAPTURE] using VAAPI hardware encoding (vah264enc)")
-			return []string{
+			return encoderResult{parts: []string{
 				"vah264enc",
 				fmt.Sprintf("bitrate=%d", bitrate),
 				fmt.Sprintf("key-int-max=%d", fps*2),
 				"b-frames=0",
 				"rate-control=cbr",
-			}
+			}}
 		}
 		if hwaccel == "vaapi" {
 			dbg("[CAPTURE] vah264enc not available, falling back to software")
@@ -286,21 +426,18 @@ func detectGstEncoder(cfg CaptureConfig) []string {
 	}
 
 	// Software fallback: x264enc
-	// NOTE: Do NOT set sliced-threads=false here — tune=zerolatency enables
-	// sliced-threads which allows parallel encoding within a frame with zero
-	// frame-level latency. Disabling it forces frame-level multithreading
-	// which adds N-1 frames of encoding delay (100-300ms at 30fps).
 	log.Printf("[CAPTURE] using software encoding (x264enc)")
-	return []string{
+	return encoderResult{parts: []string{
 		"x264enc",
 		"tune=zerolatency",
 		"speed-preset=ultrafast",
 		fmt.Sprintf("bitrate=%d", bitrate),
 		fmt.Sprintf("key-int-max=%d", fps*2),
+		"bframes=0",
 		"byte-stream=true",
 		"aud=false",
 		"vbv-buf-capacity=50",
-	}
+	}}
 }
 
 // StartTestCapture creates a synthetic H.264 video stream using GStreamer's

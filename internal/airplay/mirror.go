@@ -228,11 +228,15 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if err != nil {
 		return nil, fmt.Errorf("connect data port %s: %w", dataAddr, err)
 	}
-	// Disable Nagle's algorithm to reduce frame delivery latency
+	// Reduce TCP buffering for lowest possible latency.
+	// TCP_NODELAY disables Nagle's algorithm (send immediately, don't coalesce).
+	// Small send buffer limits how much data can queue in kernel space — at
+	// 10 Mbps, the default ~200KB buffer holds ~160ms of video; 32KB holds ~25ms.
 	if tc, ok := dataConn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
+		tc.SetWriteBuffer(32 * 1024)
 	}
-	dbg("[SETUP] data channel connected: %s (TCP_NODELAY)", dataAddr)
+	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=32K)", dataAddr)
 
 	// Send RECORD to start the session.
 	// Apple TV expects normal RTSP start headers here; without them it may wait
@@ -695,7 +699,7 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 
 	bufs := net.Buffers{header[:], payload}
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	s.dataConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	return err
@@ -796,7 +800,7 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 	// avoiding a copy into a combined buffer.
 	bufs := net.Buffers{header[:], framePayload}
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	s.dataConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	if err != nil {
