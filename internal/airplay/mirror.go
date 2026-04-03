@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,10 @@ type MirrorSession struct {
 	chachaNonce    uint64              // per-frame nonce counter
 	frameSeq       uint32
 	firstFrameSent chan struct{} // closed after first video frame is sent
+
+	// Audio
+	audioStream *AudioStream
+	noAudio     bool
 }
 
 // setupMirrorSession negotiates the mirroring stream with the Apple TV.
@@ -133,6 +138,46 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		streamDesc["shiv"] = encIV
 	}
 
+	streams := []interface{}{streamDesc}
+
+	// Add audio stream (type 96) unless disabled
+	var audioControlLPort int
+	if !cfg.NoAudio {
+		// Create local UDP control listener for audio to get a port number
+		audioCtrlListener, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			timingConn.Close()
+			eventListener.Close()
+			return nil, fmt.Errorf("listen audio control port: %w", err)
+		}
+		audioControlLPort = audioCtrlListener.LocalAddr().(*net.UDPAddr).Port
+		audioCtrlListener.Close() // We'll re-create in setupAudioStream
+
+		// Detect audio codec type: use AAC-ELD (8) if fdkaacenc is available, else AAC-LC (4)
+		audioCT := int64(8) // AAC-ELD
+		audioSPF := int64(480)
+		if exec.Command("gst-inspect-1.0", "fdkaacenc").Run() != nil {
+			audioCT = 4 // AAC-LC
+			audioSPF = 1024
+		}
+
+		audioStreamDesc := map[string]interface{}{
+			"type":        int64(96),
+			"ct":          audioCT,
+			"spf":         audioSPF,
+			"audioFormat": int64(0x40000), // AAC-ELD 44100/16/2 or AAC-LC equivalent
+			"controlPort": int64(audioControlLPort),
+			"usingScreen": true,
+			"isMedia":     false,
+		}
+		if encKey != nil {
+			audioStreamDesc["shk"] = encKey
+			audioStreamDesc["shiv"] = encIV
+		}
+		streams = append(streams, audioStreamDesc)
+		dbg("[SETUP] adding audio stream: ct=%d spf=%d controlPort=%d", audioCT, audioSPF, audioControlLPort)
+	}
+
 	setupPlist := map[string]interface{}{
 		"deviceID":                 clientDeviceID,
 		"macAddress":               clientDeviceID,
@@ -144,7 +189,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		"osBuildVersion":           "13F69",
 		"model":                    "Linux",
 		"name":                     "Linux",
-		"streams":                  []interface{}{streamDesc},
+		"streams":                  streams,
 	}
 
 	// FairPlay ekey/eiv go at the root level (receiver reads them from req_root_node)
@@ -201,17 +246,22 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	// Extract data port from streams response
 	dataPort := 0
-	if streams, ok := setupResp["streams"].([]interface{}); ok && len(streams) > 0 {
-		if stream, ok := streams[0].(map[string]interface{}); ok {
-			if dp, ok := stream["dataPort"]; ok {
-				switch v := dp.(type) {
-				case uint64:
-					dataPort = int(v)
-				case int64:
-					dataPort = int(v)
-				case float64:
-					dataPort = int(v)
-				}
+	audioDataPort := 0
+	audioControlPort := 0
+	if streams, ok := setupResp["streams"].([]interface{}); ok {
+		for _, s := range streams {
+			stream, ok := s.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			streamType := plistInt(stream["type"])
+			switch streamType {
+			case 110: // Video/mirroring
+				dataPort = plistInt(stream["dataPort"])
+			case 96: // Audio
+				audioDataPort = plistInt(stream["dataPort"])
+				audioControlPort = plistInt(stream["controlPort"])
+				dbg("[SETUP] audio stream response: dataPort=%d controlPort=%d", audioDataPort, audioControlPort)
 			}
 		}
 	}
@@ -261,6 +311,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		videoWidth:     cfg.Width,
 		videoHeight:    cfg.Height,
 		firstFrameSent: make(chan struct{}),
+		noAudio:        cfg.NoAudio,
 	}
 
 	// Set up video cipher.
@@ -316,6 +367,23 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		session.streamCipher = mc.EncryptFrame
 	} else {
 		dbg("[SETUP] no video cipher — frames will be sent unencrypted")
+	}
+
+	// Set up audio stream if the receiver provided audio ports
+	if !cfg.NoAudio && audioDataPort > 0 {
+		audioCT := byte(8) // AAC-ELD
+		if exec.Command("gst-inspect-1.0", "fdkaacenc").Run() != nil {
+			audioCT = 4 // AAC-LC
+		}
+		as, err := session.setupAudioStream(audioDataPort, audioControlPort, encKey, encIV, audioCT)
+		if err != nil {
+			dbg("[SETUP] audio stream setup failed: %v (continuing without audio)", err)
+		} else {
+			session.audioStream = as
+			dbg("[SETUP] audio stream ready")
+		}
+	} else if !cfg.NoAudio {
+		dbg("[SETUP] receiver did not provide audio ports, skipping audio")
 	}
 
 	// Monitor data connection for incoming data from Apple TV
@@ -971,6 +1039,9 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
 }
 
 func (s *MirrorSession) Close() error {
+	if s.audioStream != nil {
+		s.audioStream.Close()
+	}
 	if s.eventConn != nil {
 		s.eventConn.Close()
 	}
@@ -984,6 +1055,29 @@ func (s *MirrorSession) Close() error {
 		return s.dataConn.Close()
 	}
 	return nil
+}
+
+// plistInt extracts an integer from a plist value (uint64, int64, or float64).
+func plistInt(v interface{}) int {
+	switch n := v.(type) {
+	case uint64:
+		return int(n)
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	}
+	return 0
+}
+
+// HasAudio returns true if the session has an active audio stream.
+func (s *MirrorSession) HasAudio() bool {
+	return s.audioStream != nil
+}
+
+// AudioStream returns the audio stream for this session (may be nil).
+func (s *MirrorSession) AudioStream() *AudioStream {
+	return s.audioStream
 }
 
 // ntpTimingResponder replies to NTP timing requests from the Apple TV.

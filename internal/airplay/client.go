@@ -507,6 +507,7 @@ type StreamConfig struct {
 	Bitrate   int  // Video bitrate in kbps
 	NoEncrypt bool // Disable encryption for debugging
 	DirectKey bool // Use shk/shiv directly without SHA-512 derivation
+	NoAudio   bool // Disable audio streaming
 }
 
 // generateStreamKey creates a random AES-128 key for stream encryption.
