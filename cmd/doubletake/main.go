@@ -332,7 +332,10 @@ func runDaemon(socketPath, credFile string, width, height, fps, bitrate int, hwa
 		NoAudio:    noAudio,
 	}
 
-	d := daemon.New(cfg)
+	d, err := daemon.New(cfg)
+	if err != nil {
+		log.Fatalf("[daemon] %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

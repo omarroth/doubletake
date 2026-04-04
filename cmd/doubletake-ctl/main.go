@@ -35,10 +35,20 @@ func main() {
 		resp, err = client.Devices()
 	case "connect":
 		target := ""
+		pin := ""
 		if len(os.Args) >= 3 {
 			target = os.Args[2]
 		}
-		resp, err = client.Connect(target, 0, "")
+		if len(os.Args) >= 4 {
+			pin = os.Args[3]
+		}
+		resp, err = client.Connect(target, 0, pin)
+	case "pin":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl pin <4-digit-PIN>\n")
+			os.Exit(1)
+		}
+		resp, err = client.Connect("", 0, os.Args[2])
 	case "disconnect":
 		resp, err = client.Disconnect()
 	default:
@@ -62,5 +72,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl <command> [args]\n\nCommands:\n  status              Show daemon state\n  discover            Discover AirPlay devices on the network\n  devices             List cached discovered devices\n  connect [target]    Start mirroring (to target IP, or first discovered device)\n  disconnect          Stop mirroring\n\nEnvironment:\n  DOUBLETAKE_SOCKET   Override daemon socket path (default: $XDG_RUNTIME_DIR/doubletake.sock)\n")
+	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl <command> [args]\n\nCommands:\n  status              Show daemon state\n  discover            Discover AirPlay devices on the network\n  devices             List cached discovered devices\n  connect [target] [pin]  Start mirroring (to target IP, or first discovered device)\n  pin <4-digit-PIN>   Submit PIN for a device waiting for pairing\n  disconnect          Stop mirroring\n\nEnvironment:\n  DOUBLETAKE_SOCKET   Override daemon socket path (default: $XDG_RUNTIME_DIR/doubletake.sock)\n")
 }
