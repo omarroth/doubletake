@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	StateDiscovering State = "discovering"
 	StateConnecting  State = "connecting"
 	StateStreaming   State = "streaming"
+	StatePINRequired State = "pin_required"
 )
 
 // Request is a command sent to the daemon over the control socket.
@@ -39,16 +41,18 @@ type Response struct {
 	State    State        `json:"state"`
 	Device   string       `json:"device,omitempty"`
 	DeviceIP string       `json:"device_ip,omitempty"`
+	NeedsPIN bool         `json:"needs_pin,omitempty"`
 	Error    string       `json:"error,omitempty"`
 	Devices  []DeviceInfo `json:"devices,omitempty"`
 }
 
 // DeviceInfo is a simplified view of a discovered AirPlay device.
 type DeviceInfo struct {
-	Name  string `json:"name"`
-	Model string `json:"model"`
-	IP    string `json:"ip"`
-	Port  int    `json:"port"`
+	Name     string `json:"name"`
+	Model    string `json:"model"`
+	IP       string `json:"ip"`
+	Port     int    `json:"port"`
+	DeviceID string `json:"device_id"`
 }
 
 // Config holds daemon configuration.
@@ -78,26 +82,41 @@ func DefaultSocketPath() string {
 
 // Daemon manages a long-running doubletake service.
 type Daemon struct {
-	cfg         Config
-	mu          sync.Mutex
-	state       State
-	discovering bool // true while discover is in-flight, independent of state
-	devices     []airplay.AirPlayDevice
-	client      *airplay.AirPlayClient
-	session     *airplay.MirrorSession
-	capture     *airplay.ScreenCapture
-	device      string // name of connected device
-	deviceIP    string // IP of connected device
-	cancelFn    context.CancelFunc
-	listener    net.Listener
+	cfg            Config
+	mu             sync.Mutex
+	state          State
+	devices        []airplay.AirPlayDevice
+	deviceLastSeen map[string]time.Time // keyed by IP
+	credStore      *airplay.CredentialStore
+	client         *airplay.AirPlayClient
+	session        *airplay.MirrorSession
+	capture        *airplay.ScreenCapture
+	device         string // name of connected device
+	deviceIP       string // IP of connected device
+	deviceIDStr    string // DeviceID of connected/pending device
+	pendingTarget  string // target IP waiting for PIN
+	pendingPort    int    // port waiting for PIN
+	cancelFn       context.CancelFunc
+	discoverCancel context.CancelFunc
+	listener       net.Listener
 }
 
 // New creates a new Daemon with the given configuration.
-func New(cfg Config) *Daemon {
-	return &Daemon{
-		cfg:   cfg,
-		state: StateIdle,
+func New(cfg Config) (*Daemon, error) {
+	credPath := cfg.CredFile
+	if credPath == "" || credPath == airplay.DefaultCredentialsFile {
+		credPath = airplay.DefaultCredentialStorePath()
 	}
+	cs, err := airplay.NewCredentialStore(credPath)
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	return &Daemon{
+		cfg:            cfg,
+		state:          StateIdle,
+		deviceLastSeen: make(map[string]time.Time),
+		credStore:      cs,
+	}, nil
 }
 
 // Run starts the daemon control socket and blocks until ctx is cancelled.
@@ -123,6 +142,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	log.Printf("[daemon] listening on %s", d.cfg.SocketPath)
 
+	// Start continuous mDNS discovery in the background
+	discoverCtx, discoverCancel := context.WithCancel(ctx)
+	d.discoverCancel = discoverCancel
+	go d.backgroundDiscover(discoverCtx)
+
 	go func() {
 		<-ctx.Done()
 		ln.Close()
@@ -145,11 +169,72 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (d *Daemon) Shutdown() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.discoverCancel != nil {
+		d.discoverCancel()
+		d.discoverCancel = nil
+	}
 	d.stopLocked()
 	if d.listener != nil {
 		d.listener.Close()
 	}
 	os.Remove(d.cfg.SocketPath)
+}
+
+// backgroundDiscover continuously browses mDNS for AirPlay devices.
+// Each scan runs for 5 seconds. Devices not seen for >30 seconds are removed.
+func (d *Daemon) backgroundDiscover(ctx context.Context) {
+	const (
+		scanDuration = 5 * time.Second
+		deviceTTL    = 30 * time.Second
+	)
+	log.Printf("[daemon] starting continuous mDNS discovery")
+	for {
+		browseCtx, cancel := context.WithTimeout(ctx, scanDuration)
+		found, err := airplay.DiscoverAirPlayDevices(browseCtx)
+		cancel()
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		now := time.Now()
+		d.mu.Lock()
+		if err == nil {
+			// Build a map of currently known devices by IP for quick lookup
+			known := make(map[string]airplay.AirPlayDevice, len(d.devices))
+			for _, dev := range d.devices {
+				known[dev.IP] = dev
+			}
+
+			// Update last-seen timestamps and merge new devices
+			for _, dev := range found {
+				d.deviceLastSeen[dev.IP] = now
+				known[dev.IP] = dev // add or update
+			}
+
+			// Rebuild device list, dropping anything older than TTL
+			devices := make([]airplay.AirPlayDevice, 0, len(known))
+			for ip, dev := range known {
+				if now.Sub(d.deviceLastSeen[ip]) <= deviceTTL {
+					devices = append(devices, dev)
+				} else {
+					delete(d.deviceLastSeen, ip)
+				}
+			}
+			d.devices = devices
+			sort.Slice(d.devices, func(i, j int) bool {
+				return d.devices[i].IP < d.devices[j].IP
+			})
+		} else {
+			log.Printf("[daemon] mDNS browse error: %v", err)
+		}
+		d.mu.Unlock()
+
+		// Next scan starts immediately (no extra wait — the 5s scan is the cadence)
+		if ctx.Err() != nil {
+			return
+		}
+	}
 }
 
 func (d *Daemon) handleConn(conn net.Conn) {
@@ -194,37 +279,18 @@ func (d *Daemon) handleStatus() Response {
 		State:    d.state,
 		Device:   d.device,
 		DeviceIP: d.deviceIP,
+		NeedsPIN: d.state == StatePINRequired,
 	}
 }
 
 func (d *Daemon) handleDiscover() Response {
-	d.mu.Lock()
-	if d.discovering {
-		st := d.state
-		d.mu.Unlock()
-		return Response{OK: false, State: st, Error: "discovery already in progress"}
-	}
-	d.discovering = true
-	d.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	devices, err := airplay.DiscoverAirPlayDevices(ctx)
-
+	// Return the continuously-updated device list
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.discovering = false
-
-	if err != nil {
-		return Response{OK: false, State: d.state, Error: "discovery failed: " + err.Error()}
-	}
-
-	d.devices = devices
 	return Response{
 		OK:      true,
 		State:   d.state,
-		Devices: toDeviceInfos(devices),
+		Devices: toDeviceInfos(d.devices),
 	}
 }
 
@@ -240,9 +306,30 @@ func (d *Daemon) handleDevices() Response {
 
 func (d *Daemon) handleConnect(req Request) Response {
 	d.mu.Lock()
-	if d.state == StateStreaming || d.state == StateConnecting {
+
+	// If we're waiting for a PIN and one was provided, resume
+	if d.state == StatePINRequired && req.Pin != "" {
+		target := d.pendingTarget
+		port := d.pendingPort
+		d.state = StateConnecting
 		d.mu.Unlock()
-		return Response{OK: false, State: d.state, Error: "already connected or connecting"}
+
+		connCtx, cancel := context.WithCancel(context.Background())
+		d.mu.Lock()
+		d.cancelFn = cancel
+		d.mu.Unlock()
+
+		go d.connectAndStream(connCtx, target, port, req.Pin)
+
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return Response{OK: true, State: d.state, Device: target}
+	}
+
+	if d.state == StateStreaming || d.state == StateConnecting || d.state == StatePINRequired {
+		st := d.state
+		d.mu.Unlock()
+		return Response{OK: false, State: st, Error: "already connected or connecting"}
 	}
 	d.state = StateConnecting
 	d.mu.Unlock()
@@ -253,22 +340,17 @@ func (d *Daemon) handleConnect(req Request) Response {
 		port = 7000
 	}
 
-	// If no target specified, discover and use first device
+	// If no target specified, use first cached device
 	if target == "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		devices, err := airplay.DiscoverAirPlayDevices(ctx)
-		cancel()
-		if err != nil || len(devices) == 0 {
-			d.mu.Lock()
+		d.mu.Lock()
+		if len(d.devices) == 0 {
 			d.state = StateIdle
 			d.mu.Unlock()
 			return Response{OK: false, State: StateIdle, Error: "no devices found"}
 		}
-		d.mu.Lock()
-		d.devices = devices
+		target = d.devices[0].IP
+		port = d.devices[0].Port
 		d.mu.Unlock()
-		target = devices[0].IP
-		port = devices[0].Port
 	}
 
 	// Launch connection in background goroutine
@@ -292,6 +374,9 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 		d.state = StateIdle
 		d.device = ""
 		d.deviceIP = ""
+		d.deviceIDStr = ""
+		d.pendingTarget = ""
+		d.pendingPort = 0
 		d.client = nil
 		d.session = nil
 		d.capture = nil
@@ -312,15 +397,18 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 		return
 	}
 
+	deviceID := info.DeviceID
 	d.mu.Lock()
 	d.device = info.Name
 	d.deviceIP = target
+	d.deviceIDStr = deviceID
 	d.mu.Unlock()
 
-	log.Printf("[daemon] connected to %s (model: %s)", info.Name, info.Model)
+	log.Printf("[daemon] connected to %s (model: %s, deviceID: %s)", info.Name, info.Model, deviceID)
 
-	// Try saved credentials first
-	savedCreds, _ := airplay.LoadCredentials(d.cfg.CredFile)
+	// Try saved credentials by DeviceID
+	paired := false
+	savedCreds := d.credStore.Lookup(deviceID)
 	if savedCreds != nil {
 		pub, priv := savedCreds.Ed25519Keys()
 		client.PairingID = savedCreds.PairingID
@@ -329,7 +417,8 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 			Ed25519Private: priv,
 		}
 		if err := client.PairVerify(ctx); err != nil {
-			log.Printf("[daemon] pair-verify failed, falling back: %v", err)
+			log.Printf("[daemon] pair-verify with saved creds failed: %v", err)
+			// Reconnect for fresh pairing attempt
 			client.Close()
 			client = airplay.NewAirPlayClient(target, port)
 			if err := client.Connect(ctx); err != nil {
@@ -340,15 +429,44 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 				setErr(fmt.Sprintf("get info after reconnect failed: %v", err))
 				return
 			}
-			if err := client.Pair(ctx, pin); err != nil {
-				setErr(fmt.Sprintf("pairing failed: %v", err))
-				return
-			}
+		} else {
+			paired = true
+			log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
 		}
-	} else {
+	}
+
+	// If not paired, we need a PIN
+	if !paired {
+		if pin == "" {
+			// Trigger PIN display on the device and ask the user
+			if err := client.StartPINDisplay(); err != nil {
+				log.Printf("[daemon] start PIN display failed: %v", err)
+			}
+			// Pause connection — wait for PIN via a subsequent connect command
+			client.Close()
+			d.mu.Lock()
+			d.state = StatePINRequired
+			d.pendingTarget = target
+			d.pendingPort = port
+			d.cancelFn = nil
+			d.mu.Unlock()
+			log.Printf("[daemon] PIN required for %s — waiting for user input", info.Name)
+			return
+		}
+
+		// PIN was provided — do full pair-setup
 		if err := client.Pair(ctx, pin); err != nil {
 			setErr(fmt.Sprintf("pairing failed: %v", err))
 			return
+		}
+		// Save the new credentials
+		if client.PairKeys != nil {
+			if err := d.credStore.Save(deviceID, client.PairingID,
+				client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
+				log.Printf("[daemon] warning: failed to save credentials: %v", err)
+			} else {
+				log.Printf("[daemon] credentials saved for %s (deviceID: %s)", info.Name, deviceID)
+			}
 		}
 	}
 
@@ -419,6 +537,9 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	d.state = StateIdle
 	d.device = ""
 	d.deviceIP = ""
+	d.deviceIDStr = ""
+	d.pendingTarget = ""
+	d.pendingPort = 0
 	d.client = nil
 	d.session = nil
 	d.capture = nil
@@ -461,16 +582,20 @@ func (d *Daemon) stopLocked() {
 	d.state = StateIdle
 	d.device = ""
 	d.deviceIP = ""
+	d.deviceIDStr = ""
+	d.pendingTarget = ""
+	d.pendingPort = 0
 }
 
 func toDeviceInfos(devices []airplay.AirPlayDevice) []DeviceInfo {
 	infos := make([]DeviceInfo, len(devices))
 	for i, d := range devices {
 		infos[i] = DeviceInfo{
-			Name:  d.Name,
-			Model: d.Model,
-			IP:    d.IP,
-			Port:  d.Port,
+			Name:     d.Name,
+			Model:    d.Model,
+			IP:       d.IP,
+			Port:     d.Port,
+			DeviceID: d.DeviceID,
 		}
 	}
 	return infos
