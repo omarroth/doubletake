@@ -111,15 +111,6 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
 
-	// If the credential store is empty, try importing from the legacy file
-	if cs.Len() == 0 && cfg.CredFile != "" {
-		legacyCreds, lerr := airplay.LoadCredentials(cfg.CredFile)
-		if lerr == nil && legacyCreds != nil {
-			cs.Import("", legacyCreds)
-			log.Printf("[daemon] imported legacy credentials from %s", cfg.CredFile)
-		}
-	}
-
 	return &Daemon{
 		cfg:            cfg,
 		state:          StateIdle,
