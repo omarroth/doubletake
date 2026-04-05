@@ -11,6 +11,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 - Hardware-accelerated H.264 encoding (NVENC, VA-API) with software fallback
 - ChaCha20-Poly1305 stream encryption
 - mDNS device discovery
+- KDE Plasma widget for quick access (see [plasmoid/](plasmoid/))
 
 ## Requirements
 
@@ -82,9 +83,16 @@ go build -o doubletake ./cmd/doubletake
 | `-fps` | 30 | Frames per second |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
 | `-hwaccel` | auto | Hardware accel: `auto`, `nvenc`, `vaapi`, `none` |
+| `-audio` | false | Enable audio streaming (experimental) |
 | `-test` | false | Use synthetic video source |
 | `-debug` | false | Verbose debug logging |
 
+## Disclaimer
+
+The majority of code for this project was written by LLMs. I've read through the code to make sure there's nothing obviously stupid, but if you're in a production or security-sensitive environment and need to use AirPlay (for whatever reason), do not use this project.
+
+Since I assume most of the code for this project was trained from [UxPlay](https://github.com/FDH2/UxPlay) and similar projects, I've provided this project under the same license. Most of the reverse engineering work has already been done by many other people and this project would not be possible without them.
+
 ## License
 
-This project is for educational and research purposes.
+This project is licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, modify, and redistribute this software under the terms of the GPL-3.0. See the LICENSE file for full details.
