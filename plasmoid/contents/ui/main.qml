@@ -163,6 +163,29 @@ PlasmoidItem {
             anchors.fill: parent
             spacing: 0
 
+            // Header bar: title + refresh button
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: Kirigami.Units.smallSpacing
+                Layout.rightMargin: Kirigami.Units.smallSpacing
+                Layout.topMargin: Kirigami.Units.smallSpacing
+                PlasmaExtras.Heading {
+                    Layout.fillWidth: true
+                    level: 4
+                    text: "AirPlay Devices"
+                }
+                Controls.ToolButton {
+                    icon.name: "view-refresh"
+                    display: Controls.ToolButton.IconOnly
+                    Controls.ToolTip.text: "Refresh devices"
+                    Controls.ToolTip.visible: hovered
+                    enabled: !root.isBusy
+                    onClicked: {
+                        root.runCtl(["discover"], "discover")
+                    }
+                }
+            }
+
             Kirigami.Separator {
                 Layout.fillWidth: true
             }
