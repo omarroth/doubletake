@@ -25,7 +25,7 @@ func main() {
 	width := flag.Int("width", 1920, "Stream width")
 	height := flag.Int("height", 1080, "Stream height")
 	fps := flag.Int("fps", 30, "Frames per second")
-	bitrate := flag.Int("bitrate", 10000, "Video bitrate in kbps (default 10000 = 10 Mbps)")
+	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = auto, default tunes for resolution/FPS)")
 	hwaccel := flag.String("hwaccel", "auto", "Hardware acceleration: auto, nvenc, vaapi, none")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
