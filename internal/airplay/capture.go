@@ -80,6 +80,9 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	// Keep the pipeline simple — pipewiresrc ! videoconvert handles DMA-BUF to
 	// system memory conversion automatically.  videoscale and videorate are applied
 	// after conversion so caps negotiation isn't blocked.
+	// videorate drop-only=true passes frames through without duplicating during
+	// idle periods (avoids wasting bandwidth on static screens). skip-to-first
+	// avoids buffering before the first frame.
 	const pwFdNum = 3
 	gstArgs := []string{
 		"--quiet",
@@ -447,7 +450,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 		"bframes=0",
 		"sliced-threads=true",
 		"byte-stream=true",
-		"aud=false",
+		"aud=true",
 	}}
 }
 
