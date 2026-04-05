@@ -88,14 +88,15 @@ func main() {
 	// 2. If saved credentials exist, load them and do pair-verify only
 	// 3. Otherwise, do transient (ephemeral) pairing
 	needFullPair := *forcePair || *pin != ""
-	var savedCreds *airplay.SavedCredentials
 
+	credStore, err := airplay.NewCredentialStore(*credFile)
+	if err != nil {
+		log.Fatalf("failed to load credentials: %v", err)
+	}
+
+	var savedCreds *airplay.SavedCredentials
 	if !needFullPair {
-		var err error
-		savedCreds, err = airplay.LoadCredentials(*credFile)
-		if err != nil {
-			log.Printf("warning: failed to load credentials: %v", err)
-		}
+		savedCreds = credStore.Lookup(info.DeviceID)
 	}
 
 	if needFullPair {
@@ -113,7 +114,7 @@ func main() {
 			log.Fatalf("pairing failed: %v", err)
 		}
 		// Save credentials for next time
-		if err := airplay.SaveCredentials(*credFile, client.PairingID, client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
+		if err := credStore.Save(info.DeviceID, client.PairingID, client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
 			log.Printf("warning: failed to save credentials: %v", err)
 		} else {
 			log.Printf("credentials saved to %s", *credFile)
