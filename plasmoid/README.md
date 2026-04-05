@@ -35,7 +35,7 @@ kpackagetool6 -t Plasma/Applet -r org.doubletake.plasmoid
 
 1. Start the daemon:
    ```sh
-   doubletake -creds ~/.config/doubletake/credentials.json &
+   doubletake -daemonize -creds ~/.config/doubletake/credentials.json &
    ```
 
 2. Add "doubletake" to your system tray (right-click tray → Configure System Tray → Entries)
