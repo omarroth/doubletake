@@ -58,7 +58,8 @@ jobs:
       - name: Extract release notes from tag
         id: notes
         run: |
-          # Get the annotated tag message (or commit message for lightweight tags)
+          # Re-fetch the tag to ensure the annotated tag object is present
+          git fetch origin tag "${GITHUB_REF_NAME}" --force --no-tags
           NOTES=$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}")
           if [ -z "$NOTES" ]; then
             NOTES=$(git log -1 --format='%B' "${GITHUB_REF_NAME}")
