@@ -344,9 +344,6 @@ func (d *Daemon) handleConnect(req Request) Response {
 
 	target := req.Target
 	port := req.Port
-	if port == 0 {
-		port = 7000
-	}
 
 	// If no target specified, use first cached device
 	if target == "" {
@@ -359,6 +356,21 @@ func (d *Daemon) handleConnect(req Request) Response {
 		target = d.devices[0].IP
 		port = d.devices[0].Port
 		d.mu.Unlock()
+	}
+
+	// Look up the discovered port for this target if not explicitly provided.
+	if port == 0 {
+		d.mu.Lock()
+		for _, dev := range d.devices {
+			if dev.IP == target {
+				port = dev.Port
+				break
+			}
+		}
+		d.mu.Unlock()
+	}
+	if port == 0 {
+		port = 7000
 	}
 
 	// Launch connection in background goroutine
