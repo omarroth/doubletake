@@ -30,7 +30,7 @@ func main() {
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
-	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
+	audio := flag.Bool("audio", false, "Enable audio streaming (currently non-functional)")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	daemonize := flag.Bool("daemonize", false, "Run as background daemon with Unix socket control interface")
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
@@ -39,7 +39,7 @@ func main() {
 	airplay.DebugMode = *debug
 
 	if *daemonize {
-		runDaemon(*socketPath, *credFile, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio)
+		runDaemon(*socketPath, *credFile, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, !*audio)
 		return
 	}
 
@@ -173,7 +173,7 @@ func main() {
 		Bitrate:   *bitrate,
 		NoEncrypt: *noEncrypt,
 		DirectKey: *directKey,
-		NoAudio:   *noAudio,
+		NoAudio:   !*audio,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {
@@ -254,7 +254,7 @@ func main() {
 	log.Println("screen capture started")
 
 	// Start audio capture and streaming if audio is enabled
-	if !*noAudio && session.HasAudio() {
+	if *audio && session.HasAudio() {
 		audioCapture, err := airplay.StartAudioCapture(ctx)
 		if err != nil {
 			log.Printf("warning: audio capture failed: %v (continuing without audio)", err)
@@ -267,7 +267,7 @@ func main() {
 			}()
 			log.Println("audio capture started")
 		}
-	} else if !*noAudio {
+	} else if *audio {
 		log.Println("audio disabled (receiver did not provide audio ports)")
 	}
 
