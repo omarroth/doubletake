@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net"
 	"os"
@@ -279,15 +280,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if err != nil {
 		return nil, fmt.Errorf("connect data port %s: %w", dataAddr, err)
 	}
-	// Reduce TCP buffering for lowest possible latency.
-	// TCP_NODELAY disables Nagle's algorithm (send immediately, don't coalesce).
-	// Small send buffer limits how much data can queue in kernel space — at
-	// 10 Mbps, the default ~200KB buffer holds ~160ms of video; 32KB holds ~25ms.
+	// Reduce TCP buffering for low latency while leaving enough room for one
+	// full keyframe (~15-20KB at typical bitrates). 64KB balances latency
+	// against false congestion signals from momentarily full buffers.
 	if tc, ok := dataConn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
-		tc.SetWriteBuffer(32 * 1024)
+		tc.SetWriteBuffer(64 * 1024)
 	}
-	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=32K)", dataAddr)
+	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
 
 	// Send RECORD to start the session.
 	// Apple TV expects normal RTSP start headers here; without them it may wait
@@ -438,12 +438,22 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	var frameCount int
 	var nalLog strings.Builder
 
+	// Congestion controller: EWMA-smoothed send rate vs. bitrate budget.
+	// Graduated response avoids oscillating between "all frames" and "no frames".
+	cc := newCongestionController()
+
 	// flushVCL sends the accumulated VCL data as a single encrypted frame.
 	// This handles multi-slice frames by combining all slices of one access unit.
-	// No artificial frame pacing — the encoder/capture pipeline provides natural
-	// frame timing. Adding time.Sleep here only increases end-to-end latency.
 	flushVCL := func() error {
 		if len(vclBuf) == 0 {
+			return nil
+		}
+
+		// Graduated P-frame dropping based on congestion level.
+		// Keyframes are never dropped — the decoder needs them.
+		if !pendingKeyframe && cc.shouldDrop(frameCount) {
+			vclBuf = vclBuf[:0]
+			nalLog.Reset()
 			return nil
 		}
 
@@ -488,9 +498,11 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 		}
 		nalLog.Reset()
 
+		sendStart := time.Now()
 		if err := s.sendFrame(frameData, pendingKeyframe, packetTimestamp); err != nil {
 			return fmt.Errorf("send %s: %w", keyframeStr, err)
 		}
+		cc.recordSend(len(frameData)+128, time.Since(sendStart))
 		vclBuf = vclBuf[:0]
 		pendingKeyframe = false
 		codecSent = false
@@ -861,7 +873,7 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 	// avoiding a copy into a combined buffer.
 	bufs := net.Buffers{header[:], framePayload}
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	s.dataConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	if err != nil {
@@ -887,6 +899,113 @@ func writeFull(conn net.Conn, data []byte) error {
 
 func putFloat32LE(dst []byte, value float32) {
 	binary.LittleEndian.PutUint32(dst, math.Float32bits(value))
+}
+
+// ---------------------------------------------------------------------------
+// congestionController — EWMA-based send-rate tracker with graduated response
+// ---------------------------------------------------------------------------
+
+// congestionLevel represents the graduated congestion state.
+type congestionLevel int
+
+const (
+	congestionNone   congestionLevel = 0 // send every frame
+	congestionLight  congestionLevel = 1 // drop every 3rd P-frame
+	congestionMedium congestionLevel = 2 // drop every 2nd P-frame
+	congestionHeavy  congestionLevel = 3 // drop every P-frame
+)
+
+type congestionController struct {
+	// EWMA of write duration per byte (nanoseconds/byte). A rising value
+	// means the TCP send buffer is filling up, i.e. the link is saturated.
+	ewmaNsPerByte float64
+	samples       int
+	level         congestionLevel
+	skipped       int
+	lastLog       time.Time
+}
+
+func newCongestionController() *congestionController {
+	return &congestionController{}
+}
+
+// recordSend updates the EWMA with one frame's write timing and adjusts the
+// congestion level. Called after every successful sendFrame.
+func (cc *congestionController) recordSend(bytes int, dur time.Duration) {
+	if bytes <= 0 {
+		return
+	}
+	nsPerByte := float64(dur.Nanoseconds()) / float64(bytes)
+
+	const alpha = 0.3 // weight of new sample (reacts in ~3 frames)
+	if cc.samples == 0 {
+		cc.ewmaNsPerByte = nsPerByte
+	} else {
+		cc.ewmaNsPerByte = alpha*nsPerByte + (1-alpha)*cc.ewmaNsPerByte
+	}
+	cc.samples++
+
+	// Thresholds in ns/byte. On Wi-Fi, kernel-buffered writes typically
+	// complete in 10-500 ns/byte even under normal load. Only trigger
+	// congestion when the socket is clearly blocking for extended periods.
+	//   light:  ~50ms per 5KB frame  → 10000 ns/byte
+	//   medium: ~100ms per 5KB frame → 20000 ns/byte
+	//   heavy:  ~250ms per 5KB frame → 50000 ns/byte
+	switch {
+	case cc.ewmaNsPerByte > 50000:
+		cc.setLevel(congestionHeavy)
+	case cc.ewmaNsPerByte > 20000:
+		cc.setLevel(congestionMedium)
+	case cc.ewmaNsPerByte > 10000:
+		cc.setLevel(congestionLight)
+	default:
+		cc.setLevel(congestionNone)
+	}
+}
+
+func (cc *congestionController) setLevel(l congestionLevel) {
+	if l != cc.level {
+		if l > congestionNone {
+			log.Printf("[STREAM] congestion level %d → %d (ewma %.0f ns/byte)", cc.level, l, cc.ewmaNsPerByte)
+		} else if cc.skipped > 0 {
+			log.Printf("[STREAM] congestion cleared after skipping %d frames", cc.skipped)
+			cc.skipped = 0
+		}
+		cc.level = l
+	}
+}
+
+// shouldDrop returns true if the current frame (identified by count) should be
+// dropped based on the congestion level. Keyframes are never passed here.
+func (cc *congestionController) shouldDrop(frameCount int) bool {
+	switch cc.level {
+	case congestionLight:
+		if frameCount%3 == 0 {
+			cc.skipped++
+			cc.logDrop()
+			return true
+		}
+	case congestionMedium:
+		if frameCount%2 == 0 {
+			cc.skipped++
+			cc.logDrop()
+			return true
+		}
+	case congestionHeavy:
+		cc.skipped++
+		cc.logDrop()
+		return true
+	}
+	return false
+}
+
+func (cc *congestionController) logDrop() {
+	now := time.Now()
+	if now.Sub(cc.lastLog) > 500*time.Millisecond {
+		dbg("[STREAM] congestion: dropped %d P-frame(s) (level %d, ewma %.0f ns/byte)",
+			cc.skipped, cc.level, cc.ewmaNsPerByte)
+		cc.lastLog = now
+	}
 }
 
 // deriveVideoKeys derives the AES-128-CTR key/IV for video encryption.

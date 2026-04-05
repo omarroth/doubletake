@@ -47,8 +47,11 @@ go build -o doubletake ./cmd/doubletake
 # Use saved credentials
 ./doubletake -target 192.168.1.77 -creds airplay-credentials.json
 
-# Adjust stream settings
-./doubletake -target 192.168.1.77 -width 1920 -height 1080 -fps 30 -bitrate 10000
+# Adjust stream settings (bitrate 0 = auto)
+./doubletake -target 192.168.1.77 -width 1920 -height 1080 -fps 30 -bitrate 0
+
+# Force a lower bitrate on weaker Wi-Fi
+./doubletake -target 192.168.1.77 -bitrate 4500
 
 # Hardware encoding
 ./doubletake -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
@@ -70,7 +73,7 @@ go build -o doubletake ./cmd/doubletake
 | `-width` | 1920 | Stream width |
 | `-height` | 1080 | Stream height |
 | `-fps` | 30 | Frames per second |
-| `-bitrate` | 10000 | Video bitrate (kbps) |
+| `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
 | `-hwaccel` | auto | Hardware accel: `auto`, `nvenc`, `vaapi`, `none` |
 | `-test` | false | Use synthetic video source |
 | `-debug` | false | Verbose debug logging |

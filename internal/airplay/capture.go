@@ -24,6 +24,12 @@ type CaptureConfig struct {
 	HWAccel string // "auto", "vaapi", "none"
 }
 
+const (
+	defaultVideoBitrateKbps = 4500
+	minVideoBitrateKbps     = 1800
+	maxVideoBitrateKbps     = 12000
+)
+
 // ScreenCapture manages screen capture via GStreamer.
 type ScreenCapture struct {
 	cmd      *exec.Cmd // gst-launch-1.0 process
@@ -80,7 +86,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
 		"!", "videoconvert",
 		"!", "videoscale",
-		"!", "videorate",
+		"!", "videorate", "drop-only=true", "skip-to-first=true",
 		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 	}
@@ -90,7 +96,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	gstArgs = append(gstArgs, "!")
 	gstArgs = append(gstArgs, encoderParts.parts...)
 	gstArgs = append(gstArgs,
-		"!", "h264parse", "config-interval=-1",
+		"!", "h264parse", "config-interval=0",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
@@ -179,7 +185,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	gstArgs = append(gstArgs, "!")
 	gstArgs = append(gstArgs, encoder.parts...)
 	gstArgs = append(gstArgs,
-		"!", "h264parse", "config-interval=-1",
+		"!", "h264parse", "config-interval=0",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
@@ -354,7 +360,7 @@ func parseXrandrGeometry(line string) (xOffset, width int, ok bool) {
 // encoderResult holds the detected encoder pipeline parts and whether it needs
 // a vulkanupload step before the encoder.
 type encoderResult struct {
-	parts      []string
+	parts       []string
 	needsVulkan bool // encoder needs vulkanupload ! before it
 }
 
@@ -366,10 +372,8 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 	if fps <= 0 {
 		fps = 30
 	}
-	bitrate := cfg.Bitrate
-	if bitrate <= 0 {
-		bitrate = 10000
-	}
+	bitrate := captureBitrateKbps(cfg)
+	keyframeInterval := keyframeIntervalFrames(fps)
 	hwaccel := cfg.HWAccel
 
 	// Try Vulkan H.264 (NVENC via Vulkan API) — lowest latency, no CPU usage
@@ -380,7 +384,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 				parts: []string{
 					"vulkanh264enc",
 					"b-frames=0",
-					fmt.Sprintf("idr-period=%d", fps*2),
+					fmt.Sprintf("idr-period=%d", keyframeInterval),
 					"rate-control=cbr",
 					fmt.Sprintf("bitrate=%d", bitrate),
 				},
@@ -396,7 +400,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 			return encoderResult{parts: []string{
 				"nvh264enc",
 				fmt.Sprintf("bitrate=%d", bitrate),
-				fmt.Sprintf("gop-size=%d", fps*2),
+				fmt.Sprintf("gop-size=%d", keyframeInterval),
 				"bframes=0",
 				"rc-mode=cbr",
 				"preset=low-latency-hq",
@@ -415,7 +419,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 			return encoderResult{parts: []string{
 				"vah264enc",
 				fmt.Sprintf("bitrate=%d", bitrate),
-				fmt.Sprintf("key-int-max=%d", fps*2),
+				fmt.Sprintf("key-int-max=%d", keyframeInterval),
 				"b-frames=0",
 				"rate-control=cbr",
 			}}
@@ -427,16 +431,23 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 
 	// Software fallback: x264enc
 	log.Printf("[CAPTURE] using software encoding (x264enc)")
+	vbvBuf := vbvBufferKbit(bitrate, fps)
+	// Use VBR (pass=0) so the encoder can undershoot on simple scenes, saving
+	// headroom for complex frames. vbv-buf-capacity + vbv-maxrate cap bursts.
+	maxrate := bitrate + bitrate/4 // allow 25% overshoot on peaks
 	return encoderResult{parts: []string{
 		"x264enc",
 		"tune=zerolatency",
-		"speed-preset=ultrafast",
+		"speed-preset=superfast",
 		fmt.Sprintf("bitrate=%d", bitrate),
-		fmt.Sprintf("key-int-max=%d", fps*2),
+		fmt.Sprintf("vbv-buf-capacity=%d", vbvBuf),
+		fmt.Sprintf("key-int-max=%d", keyframeInterval),
+		"pass=0",
+		"option-string=" + fmt.Sprintf("vbv-maxrate=%d", maxrate),
 		"bframes=0",
+		"sliced-threads=true",
 		"byte-stream=true",
 		"aud=false",
-		"vbv-buf-capacity=50",
 	}}
 }
 
@@ -452,10 +463,8 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		fps = 30
 	}
 
-	bitrate := cfg.Bitrate
-	if bitrate <= 0 {
-		bitrate = 10000
-	}
+	bitrate := captureBitrateKbps(cfg)
+	keyframeInterval := keyframeIntervalFrames(fps)
 
 	// GStreamer pipeline: videotestsrc → timeoverlay → x264enc High profile → Annex-B byte stream → stdout
 	// pattern=18 = ball (bouncing ball with motion); timeoverlay adds a frame counter
@@ -467,9 +476,11 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 		"!", "videoconvert",
 		"!", "x264enc",
 		"tune=zerolatency",
+		"speed-preset=superfast",
 		fmt.Sprintf("bitrate=%d", bitrate),
-		fmt.Sprintf("key-int-max=%d", fps*2),
+		fmt.Sprintf("key-int-max=%d", keyframeInterval),
 		"threads=1",
+		"sliced-threads=true",
 		"byte-stream=true",
 		"!", "video/x-h264,profile=high,stream-format=byte-stream",
 		"!", "fdsink", "fd=1",
@@ -523,6 +534,66 @@ func logStderr(prefix string, r io.Reader) {
 	if err := scanner.Err(); err != nil {
 		dbg("[%s] stderr read error: %v", prefix, err)
 	}
+}
+
+func captureBitrateKbps(cfg CaptureConfig) int {
+	if cfg.Bitrate > 0 {
+		return cfg.Bitrate
+	}
+
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+	width := cfg.Width
+	if width <= 0 {
+		width = 1920
+	}
+	height := cfg.Height
+	if height <= 0 {
+		height = 1080
+	}
+
+	bitrate := recommendedBitrateKbps(width, height, fps)
+	log.Printf("[CAPTURE] auto bitrate selected: %d kbps for %dx%d@%dfps", bitrate, width, height, fps)
+	return bitrate
+}
+
+func recommendedBitrateKbps(width, height, fps int) int {
+	if width <= 0 || height <= 0 || fps <= 0 {
+		return defaultVideoBitrateKbps
+	}
+
+	bitrate := (width*height*fps + 7500) / 15000
+	if bitrate < minVideoBitrateKbps {
+		return minVideoBitrateKbps
+	}
+	if bitrate > maxVideoBitrateKbps {
+		return maxVideoBitrateKbps
+	}
+	return bitrate
+}
+
+func keyframeIntervalFrames(fps int) int {
+	if fps <= 0 {
+		fps = 30
+	}
+	return fps * 4
+}
+
+// vbvBufferKbit returns the x264 VBV buffer size in kbit for the given bitrate
+// and FPS. Sized at ~2 frames of data — enough headroom for the encoder to
+// handle scene changes without severe quality oscillation, but tight enough to
+// prevent large burst spikes that choke Wi-Fi links.
+func vbvBufferKbit(bitrateKbps, fps int) int {
+	if bitrateKbps <= 0 || fps <= 0 {
+		return 300
+	}
+	vbv := bitrateKbps * 2 / fps
+	if vbv < 200 {
+		return 200
+	}
+	return vbv
 }
 
 // requestScreencast uses the xdg-desktop-portal D-Bus API to request screen capture

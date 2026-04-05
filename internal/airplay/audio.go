@@ -82,7 +82,7 @@ func StartAudioCapture(ctx context.Context) (*AudioCapture, error) {
 		"!", "audioconvert",
 		"!", "audioresample",
 		"!", "audio/x-raw,rate=44100,channels=2,format=S16LE",
-		"!", "queue", "max-size-buffers=4", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!",
 	)
 	gstArgs = append(gstArgs, encArgs...)
