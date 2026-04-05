@@ -110,6 +110,16 @@ func New(cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
 	}
+
+	// If the credential store is empty, try importing from the legacy file
+	if cs.Len() == 0 && cfg.CredFile != "" {
+		legacyCreds, lerr := airplay.LoadCredentials(cfg.CredFile)
+		if lerr == nil && legacyCreds != nil {
+			cs.Import("", legacyCreds)
+			log.Printf("[daemon] imported legacy credentials from %s", cfg.CredFile)
+		}
+	}
+
 	return &Daemon{
 		cfg:            cfg,
 		state:          StateIdle,
@@ -404,43 +414,72 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	log.Printf("[daemon] connected to %s (model: %s, deviceID: %s)", info.Name, info.Model, deviceID)
 
-	// Try saved credentials by DeviceID
+	// If a PIN was provided, skip credential lookup and go straight to PIN pairing.
+	// The PIN was displayed during the previous connection attempt; trying pair-verify
+	// or transient pairing first would reset the device's pairing state and invalidate it.
 	paired := false
-	savedCreds := d.credStore.Lookup(deviceID)
-	if savedCreds != nil {
-		pub, priv := savedCreds.Ed25519Keys()
-		client.PairingID = savedCreds.PairingID
-		client.PairKeys = &airplay.PairKeys{
-			Ed25519Public:  pub,
-			Ed25519Private: priv,
+	if pin != "" {
+		if err := client.Pair(ctx, pin); err != nil {
+			setErr(fmt.Sprintf("pairing failed: %v", err))
+			return
 		}
-		if err := client.PairVerify(ctx); err != nil {
-			log.Printf("[daemon] pair-verify with saved creds failed: %v", err)
-			// Reconnect for fresh pairing attempt
-			client.Close()
-			client = airplay.NewAirPlayClient(target, port)
-			if err := client.Connect(ctx); err != nil {
-				setErr(fmt.Sprintf("reconnect failed: %v", err))
-				return
+		paired = true
+		// Save the new credentials
+		if client.PairKeys != nil {
+			if err := d.credStore.Save(deviceID, client.PairingID,
+				client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
+				log.Printf("[daemon] warning: failed to save credentials: %v", err)
+			} else {
+				log.Printf("[daemon] credentials saved for %s (deviceID: %s)", info.Name, deviceID)
 			}
-			if _, err := client.GetInfo(); err != nil {
-				setErr(fmt.Sprintf("get info after reconnect failed: %v", err))
-				return
-			}
-		} else {
-			paired = true
-			log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
 		}
 	}
 
-	// If not paired, we need a PIN
+	// Try saved credentials by DeviceID
 	if !paired {
-		if pin == "" {
-			// Trigger PIN display on the device and ask the user
+		savedCreds := d.credStore.Lookup(deviceID)
+		if savedCreds != nil {
+			pub, priv := savedCreds.Ed25519Keys()
+			client.PairingID = savedCreds.PairingID
+			client.PairKeys = &airplay.PairKeys{
+				Ed25519Public:  pub,
+				Ed25519Private: priv,
+			}
+			if err := client.PairVerify(ctx); err != nil {
+				log.Printf("[daemon] pair-verify with saved creds failed: %v, trying transient pairing", err)
+				// Reconnect for fresh pairing attempt
+				client.Close()
+				client = airplay.NewAirPlayClient(target, port)
+				if err := client.Connect(ctx); err != nil {
+					setErr(fmt.Sprintf("reconnect failed: %v", err))
+					return
+				}
+				if _, err := client.GetInfo(); err != nil {
+					setErr(fmt.Sprintf("get info after reconnect failed: %v", err))
+					return
+				}
+				// Try transient (no-PIN) pairing as fallback
+				if err := client.Pair(ctx, ""); err != nil {
+					log.Printf("[daemon] transient pairing also failed: %v", err)
+				} else {
+					paired = true
+					log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
+				}
+			} else {
+				paired = true
+				log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
+			}
+		}
+	}
+
+	// If still not paired, try transient pairing (no saved creds)
+	if !paired {
+		if err := client.Pair(ctx, ""); err != nil {
+			log.Printf("[daemon] transient pairing failed: %v", err)
+			// Last resort: ask for PIN
 			if err := client.StartPINDisplay(); err != nil {
 				log.Printf("[daemon] start PIN display failed: %v", err)
 			}
-			// Pause connection — wait for PIN via a subsequent connect command
 			client.Close()
 			d.mu.Lock()
 			d.state = StatePINRequired
@@ -451,21 +490,8 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 			log.Printf("[daemon] PIN required for %s — waiting for user input", info.Name)
 			return
 		}
-
-		// PIN was provided — do full pair-setup
-		if err := client.Pair(ctx, pin); err != nil {
-			setErr(fmt.Sprintf("pairing failed: %v", err))
-			return
-		}
-		// Save the new credentials
-		if client.PairKeys != nil {
-			if err := d.credStore.Save(deviceID, client.PairingID,
-				client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
-				log.Printf("[daemon] warning: failed to save credentials: %v", err)
-			} else {
-				log.Printf("[daemon] credentials saved for %s (deviceID: %s)", info.Name, deviceID)
-			}
-		}
+		paired = true
+		log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
 	}
 
 	// FairPlay setup

@@ -114,6 +114,20 @@ func (cs *CredentialStore) Lookup(deviceID string) *SavedCredentials {
 	return cs.devices[""]
 }
 
+// Len returns the number of stored credential entries.
+func (cs *CredentialStore) Len() int {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return len(cs.devices)
+}
+
+// Import adds a credential entry without persisting (used for legacy migration at startup).
+func (cs *CredentialStore) Import(deviceID string, creds *SavedCredentials) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.devices[deviceID] = creds
+}
+
 // Save stores credentials for a device and persists to disk.
 func (cs *CredentialStore) Save(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey) error {
 	cs.mu.Lock()
