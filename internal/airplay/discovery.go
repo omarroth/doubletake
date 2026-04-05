@@ -3,6 +3,7 @@ package airplay
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/grandcat/zeroconf"
@@ -93,17 +94,31 @@ func parseTXT(records []string) map[string]string {
 // unescapeDNSName removes DNS-SD backslash escapes from an mDNS instance name.
 // e.g. "Living\ Room\ \(2\)" -> "Living Room (2)"
 func unescapeDNSName(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
+	buf := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\\' && i+1 < len(s) {
+			if i+3 < len(s) && isASCIIDigit(s[i+1]) && isASCIIDigit(s[i+2]) && isASCIIDigit(s[i+3]) {
+				v, err := strconv.Atoi(s[i+1 : i+4])
+				if err == nil && v >= 0 && v <= 255 {
+					buf = append(buf, byte(v))
+					i += 3
+					continue
+				}
+			}
+
 			i++
-			b.WriteByte(s[i])
 		} else {
-			b.WriteByte(s[i])
+			buf = append(buf, s[i])
+			continue
 		}
+
+		buf = append(buf, s[i])
 	}
-	return b.String()
+	return string(buf)
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
 // parseFeatures parses the AirPlay features string "0xHIGH,0xLOW" into a 64-bit value.
