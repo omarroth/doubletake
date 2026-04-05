@@ -5,7 +5,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 ## Features
 
 - Full AirPlay 2 mirroring protocol (RTSP/HTTP + encrypted video stream)
-- FairPlay SAP authentication (DRM handshake via ARM64 binary emulation)
+- FairPlay SAP authentication (snapshot-backed Go ARM64 execution)
 - SRP-6a pairing with PIN and persistent credential storage
 - Wayland (PipeWire/xdg-desktop-portal) and X11 screen capture
 - Hardware-accelerated H.264 encoding (NVENC, VA-API) with software fallback
@@ -16,7 +16,6 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 
 - Go 1.23+
 - GStreamer 1.0 (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
-- Unicorn Engine (`libunicorn-dev`) — for FairPlay ARM64 emulation
 - PipeWire (Wayland) or X11 for screen capture
 
 ### Ubuntu/Debian
@@ -24,7 +23,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 ```sh
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-ugly gstreamer1.0-libav libunicorn-dev
+  gstreamer1.0-plugins-ugly gstreamer1.0-libav
 ```
 
 ## Build
@@ -75,29 +74,6 @@ go build -o doubletake ./cmd/doubletake
 | `-hwaccel` | auto | Hardware accel: `auto`, `nvenc`, `vaapi`, `none` |
 | `-test` | false | Use synthetic video source |
 | `-debug` | false | Verbose debug logging |
-
-## Project Structure
-
-```
-cmd/
-  airplay/       Main binary
-  pcapdump/      AirPlay packet capture parser
-  checksecs/     Mach-O binary inspector
-  scantable/     Mach-O table scanner
-internal/
-  airplay/       Core protocol implementation
-    client.go      RTSP/HTTP client, connection management
-    pairing.go     SRP-6a pair-setup, pair-verify, TLV8
-    fairplay.go    FairPlay SAP handshake orchestration
-    mirror.go      Mirror session, NTP sync, frame streaming
-    capture.go     Screen capture (Wayland/X11 via GStreamer)
-    playfair.go    FairPlay crypto (pure Go port)
-    credentials.go Credential persistence
-    discovery.go   mDNS device discovery
-  fpemu/         ARM64 emulator for FairPlay binary
-thirdparty/
-  apple/         Required Apple binaries for FairPlay emulation
-```
 
 ## License
 
