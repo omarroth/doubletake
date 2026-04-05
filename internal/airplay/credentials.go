@@ -16,10 +16,8 @@ type SavedCredentials struct {
 	Ed25519Seed   []byte `json:"ed25519_seed"` // 32-byte seed (private key is derived from this)
 }
 
-const DefaultCredentialsFile = "airplay-credentials.json"
-
-// DefaultCredentialStorePath returns ~/.config/doubletake/credentials.json.
-func DefaultCredentialStorePath() string {
+// DefaultCredentialsPath returns ~/.config/doubletake/credentials.json.
+func DefaultCredentialsPath() string {
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		home, _ := os.UserHomeDir()
@@ -45,8 +43,9 @@ func SaveCredentials(path string, pairingID string, pub ed25519.PublicKey, priv 
 	return nil
 }
 
-// LoadCredentials reads pairing credentials from disk (legacy single-device format).
-// Returns nil, nil if the file doesn't exist.
+// LoadCredentials reads pairing credentials from disk.
+// Supports both the legacy single-device format and the multi-device map format
+// written by CredentialStore. Returns nil, nil if the file doesn't exist.
 func LoadCredentials(path string) (*SavedCredentials, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -55,15 +54,33 @@ func LoadCredentials(path string) (*SavedCredentials, error) {
 		}
 		return nil, fmt.Errorf("read credentials: %w", err)
 	}
+
+	// Try multi-device format first (map[string]*SavedCredentials)
+	var multi map[string]*SavedCredentials
+	if err := json.Unmarshal(data, &multi); err == nil && len(multi) > 0 {
+		for _, creds := range multi {
+			if creds != nil && creds.PairingID != "" {
+				return creds, nil
+			}
+		}
+	}
+
+	// Fall back to legacy single-device format
 	var creds SavedCredentials
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return nil, fmt.Errorf("unmarshal credentials: %w", err)
+	}
+	if creds.PairingID == "" {
+		return nil, nil
 	}
 	return &creds, nil
 }
 
 // Ed25519Keys reconstructs the key pair from saved credentials.
 func (c *SavedCredentials) Ed25519Keys() (ed25519.PublicKey, ed25519.PrivateKey) {
+	if len(c.Ed25519Seed) != ed25519.SeedSize {
+		return nil, nil
+	}
 	priv := ed25519.NewKeyFromSeed(c.Ed25519Seed)
 	return ed25519.PublicKey(c.Ed25519Public), priv
 }

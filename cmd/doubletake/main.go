@@ -20,7 +20,7 @@ func main() {
 	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
 	pin := flag.String("pin", "", "4-digit PIN for pairing (shown on Apple TV)")
-	credFile := flag.String("creds", airplay.DefaultCredentialsFile, "Path to saved pairing credentials")
+	credFile := flag.String("creds", airplay.DefaultCredentialsPath(), "Path to saved pairing credentials")
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
 	width := flag.Int("width", 1920, "Stream width")
 	height := flag.Int("height", 1080, "Stream height")

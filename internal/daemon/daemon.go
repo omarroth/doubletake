@@ -103,8 +103,8 @@ type Daemon struct {
 // New creates a new Daemon with the given configuration.
 func New(cfg Config) (*Daemon, error) {
 	credPath := cfg.CredFile
-	if credPath == "" || credPath == airplay.DefaultCredentialsFile {
-		credPath = airplay.DefaultCredentialStorePath()
+	if credPath == "" {
+		credPath = airplay.DefaultCredentialsPath()
 	}
 	cs, err := airplay.NewCredentialStore(credPath)
 	if err != nil {
@@ -452,34 +452,38 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 		savedCreds := d.credStore.Lookup(deviceID)
 		if savedCreds != nil {
 			pub, priv := savedCreds.Ed25519Keys()
-			client.PairingID = savedCreds.PairingID
-			client.PairKeys = &airplay.PairKeys{
-				Ed25519Public:  pub,
-				Ed25519Private: priv,
-			}
-			if err := client.PairVerify(ctx); err != nil {
-				log.Printf("[daemon] pair-verify with saved creds failed: %v, trying transient pairing", err)
-				// Reconnect for fresh pairing attempt
-				client.Close()
-				client = airplay.NewAirPlayClient(target, port)
-				if err := client.Connect(ctx); err != nil {
-					setErr(fmt.Sprintf("reconnect failed: %v", err))
-					return
+			if priv == nil {
+				log.Printf("[daemon] saved credentials have invalid keys, skipping pair-verify")
+			} else {
+				client.PairingID = savedCreds.PairingID
+				client.PairKeys = &airplay.PairKeys{
+					Ed25519Public:  pub,
+					Ed25519Private: priv,
 				}
-				if _, err := client.GetInfo(); err != nil {
-					setErr(fmt.Sprintf("get info after reconnect failed: %v", err))
-					return
-				}
-				// Try transient (no-PIN) pairing as fallback
-				if err := client.Pair(ctx, ""); err != nil {
-					log.Printf("[daemon] transient pairing also failed: %v", err)
+				if err := client.PairVerify(ctx); err != nil {
+					log.Printf("[daemon] pair-verify with saved creds failed: %v, trying transient pairing", err)
+					// Reconnect for fresh pairing attempt
+					client.Close()
+					client = airplay.NewAirPlayClient(target, port)
+					if err := client.Connect(ctx); err != nil {
+						setErr(fmt.Sprintf("reconnect failed: %v", err))
+						return
+					}
+					if _, err := client.GetInfo(); err != nil {
+						setErr(fmt.Sprintf("get info after reconnect failed: %v", err))
+						return
+					}
+					// Try transient (no-PIN) pairing as fallback
+					if err := client.Pair(ctx, ""); err != nil {
+						log.Printf("[daemon] transient pairing also failed: %v", err)
+					} else {
+						paired = true
+						log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
+					}
 				} else {
 					paired = true
-					log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
+					log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
 				}
-			} else {
-				paired = true
-				log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
 			}
 		}
 	}
