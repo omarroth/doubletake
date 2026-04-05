@@ -19,8 +19,6 @@ sudo install -m755 doubletake doubletake-ctl /usr/local/bin/
 
 # Install the plasmoid
 kpackagetool6 -t Plasma/Applet -i plasmoid/
-# Or for development (symlink, auto-reloads):
-kpackagetool6 -t Plasma/Applet -i plasmoid/ -p
 ```
 
 To update after changes:
@@ -80,14 +78,14 @@ systemctl --user enable --now doubletake.service
 
 ```
 ┌─────────────────┐     JSON/Unix socket      ┌──────────────────┐
-│  Plasma Applet  │ ──── doubletake-ctl ─────▶ │ doubletake │
-│  (QML/JS)       │                            │ (Go)             │
-└─────────────────┘                            └──────────────────┘
+│  Plasma Applet  │ ──── doubletake-ctl ────> │ doubletake       │
+│  (QML/JS)       │                           │ (Go)             │
+└─────────────────┘                           └──────────────────┘
                                                   │
-                                                  ▼
+                                                  v
                                               AirPlay protocol
                                               (mDNS, RTSP, FairPlay,
-                                               H.264 streaming)
+                                              H.264 streaming)
 ```
 
 The applet runs `doubletake-ctl` as a subprocess to communicate with the daemon.
