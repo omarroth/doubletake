@@ -26,6 +26,13 @@ sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-ugly gstreamer1.0-libav
 ```
 
+### Arch Linux
+
+```sh
+sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
+  gst-plugins-ugly gst-libav
+```
+
 ## Build
 
 ```sh
