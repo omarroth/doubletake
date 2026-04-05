@@ -85,3 +85,18 @@ func TestCongestionController_ZeroBytes(t *testing.T) {
 		t.Fatal("zero-byte send should be ignored")
 	}
 }
+
+func TestIsFirstSlice(t *testing.T) {
+	// NAL header 0x61 (type 1), slice header starts with bit 1 → first_mb_in_slice=0
+	if !isFirstSlice([]byte{0x61, 0x80}) {
+		t.Fatal("expected first slice (first_mb_in_slice=0)")
+	}
+	// NAL header 0x61, slice header starts with bit 0 → first_mb_in_slice > 0
+	if isFirstSlice([]byte{0x61, 0x40}) {
+		t.Fatal("expected non-first slice (first_mb_in_slice > 0)")
+	}
+	// Too short
+	if isFirstSlice([]byte{0x61}) {
+		t.Fatal("expected false for single-byte NAL")
+	}
+}

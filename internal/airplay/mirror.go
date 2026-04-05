@@ -34,6 +34,7 @@ type MirrorSession struct {
 	DataPort      int
 	videoWidth    int
 	videoHeight   int
+	sessionURI    string // RTSP session URI for TEARDOWN
 
 	streamCipher   func([]byte) []byte // AES-CTR encryption
 	chachaCipher   cipher.AEAD         // ChaCha20-Poly1305 AEAD (nil = use AES-CTR)
@@ -313,6 +314,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		videoHeight:    cfg.Height,
 		firstFrameSent: make(chan struct{}),
 		noAudio:        cfg.NoAudio,
+		sessionURI:     uri,
 	}
 
 	// Set up video cipher.
@@ -572,11 +574,25 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 						return err
 					}
 				}
+				// New AU (first slice) within an IDR sequence → flush previous IDR AU.
+				if len(vclBuf) > 0 && pendingKeyframe && isFirstSlice(raw) {
+					if err := flushVCL(); err != nil {
+						return err
+					}
+				}
 				pendingKeyframe = true
 				vclBuf = append(vclBuf, avccWrap(raw)...)
 			case 1, 2, 3, 4: // non-IDR VCL slice — accumulate
-				// Flush only when transitioning from keyframe AU to non-IDR AU.
+				// Flush when transitioning from keyframe AU to non-IDR AU.
 				if len(vclBuf) > 0 && pendingKeyframe {
+					if err := flushVCL(); err != nil {
+						return err
+					}
+				}
+				// New AU (first slice) — flush the previous P-frame.
+				// Without this, consecutive P-frames accumulate if AUDs
+				// are absent (some encoders/h264parse versions).
+				if len(vclBuf) > 0 && !pendingKeyframe && isFirstSlice(raw) {
 					if err := flushVCL(); err != nil {
 						return err
 					}
@@ -745,6 +761,21 @@ func nalType(nal []byte) byte {
 		}
 	}
 	return 0
+}
+
+// isFirstSlice returns true if the raw NAL (without start code) represents the
+// first slice of a new access unit. It reads first_mb_in_slice (the first
+// Exp-Golomb coded value in the slice header, right after the NAL header byte).
+// A value of 0 means this slice starts at macroblock 0 — i.e. a new frame.
+// This is used to detect AU boundaries when AUD NALUs are absent.
+func isFirstSlice(raw []byte) bool {
+	if len(raw) < 2 {
+		return false
+	}
+	// raw[0] is the NAL header byte; slice header starts at raw[1].
+	// first_mb_in_slice is Exp-Golomb coded: leading zeros + 1 + value bits.
+	// If the first bit is 1, the value is 0 (i.e. first macroblock).
+	return raw[1]&0x80 != 0
 }
 
 // sendCodecFrame sends an unencrypted SPS+PPS codec packet (header type 0x01 0x00).
@@ -1151,6 +1182,16 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
 }
 
 func (s *MirrorSession) Close() error {
+	// Send TEARDOWN to cleanly end the RTSP session on the receiver.
+	if s.sessionURI != "" && s.client != nil {
+		_, _, err := s.client.rtspRequest("TEARDOWN", s.sessionURI, "", nil, nil)
+		if err != nil {
+			dbg("[TEARDOWN] error: %v", err)
+		} else {
+			dbg("[TEARDOWN] sent for %s", s.sessionURI)
+		}
+		s.sessionURI = "" // prevent double teardown
+	}
 	if s.audioStream != nil {
 		s.audioStream.Close()
 	}
