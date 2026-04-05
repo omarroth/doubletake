@@ -50,9 +50,28 @@ jobs:
         with:
           name: binaries
 
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract release notes from tag
+        id: notes
+        run: |
+          # Get the annotated tag message (or commit message for lightweight tags)
+          NOTES=$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}")
+          if [ -z "$NOTES" ]; then
+            NOTES=$(git log -1 --format='%B' "${GITHUB_REF_NAME}")
+          fi
+          {
+            echo 'RELEASE_NOTES<<EOF'
+            echo "$NOTES"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          body: ${{ steps.notes.outputs.RELEASE_NOTES }}
           files: |
             doubletake
             doubletake-ctl
