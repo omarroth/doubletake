@@ -22,20 +22,9 @@ func mustDecodeHexFP(s string) []byte {
 }
 
 // FairPlaySetup performs the complete FairPlay SAP handshake using the
-// snapshot-based ARM64 emulator.
+// standalone ARM64 interpreter.
 func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
-	dbg("[FP] starting FairPlay SAP handshake (snapshot emulator)...")
-
-	emu, err := fpemu.NewFromSnapshot()
-	if err != nil {
-		return fmt.Errorf("load snapshot emulator: %w", err)
-	}
-	defer emu.Close()
-
-	sapCtx, err := fpemu.SnapshotCtx()
-	if err != nil {
-		return fmt.Errorf("read snapshot ctx: %w", err)
-	}
+	dbg("[FP] starting FairPlay SAP handshake...")
 
 	// Phase 1: Send m1, receive m2
 	m1 := make([]byte, len(fairPlayM1))
@@ -53,8 +42,8 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	}
 	dbg("[FP] received m2 (%d bytes)", len(m2))
 
-	// Phase 2: Compute m3 via emulator, send to server
-	m3raw, _, err := emu.FPSAPExchange(3, nil, sapCtx, m2)
+	// Phase 2: Compute m3 via standalone interpreter, send to server
+	m3raw, err := fpemu.FPSAPExchangeM3(m2)
 	if err != nil {
 		return fmt.Errorf("FPSAPExchange: %w", err)
 	}
