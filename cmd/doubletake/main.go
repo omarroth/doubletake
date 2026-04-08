@@ -55,7 +55,13 @@ func main() {
 		<-sigCh
 		log.Println("shutting down...")
 		cancel()
-		// Force exit on second signal
+		// Give goroutines a moment to clean up, then force exit
+		go func() {
+			time.Sleep(3 * time.Second)
+			log.Println("forced exit (timeout)")
+			os.Exit(1)
+		}()
+		// Also force exit on second signal
 		<-sigCh
 		log.Println("forced exit")
 		os.Exit(1)
