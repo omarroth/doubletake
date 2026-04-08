@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -340,13 +342,13 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 		return nil, fmt.Errorf("no Apple TVs found")
 	}
 
+	sort.Slice(devices, func(i, j int) bool {
+		return compareIPs(devices[i].IP, devices[j].IP) < 0
+	})
+
 	fmt.Println("\navailable devices:")
 	for i, d := range devices {
 		fmt.Printf("  [%d] %s (%s) - %s\n", i+1, d.Name, d.Model, d.IP)
-	}
-
-	if len(devices) == 1 {
-		return &devices[0], nil
 	}
 
 	fmt.Print("\nselect device [1]: ")
@@ -362,6 +364,32 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 		return nil, fmt.Errorf("invalid selection")
 	}
 	return &devices[idx-1], nil
+}
+
+// compareIPs compares two IP address strings numerically.
+func compareIPs(a, b string) int {
+	ipA := net.ParseIP(a)
+	ipB := net.ParseIP(b)
+	if ipA == nil && ipB == nil {
+		return strings.Compare(a, b)
+	}
+	if ipA == nil {
+		return 1
+	}
+	if ipB == nil {
+		return -1
+	}
+	aBytes := ipA.To16()
+	bBytes := ipB.To16()
+	for i := range aBytes {
+		if aBytes[i] < bBytes[i] {
+			return -1
+		}
+		if aBytes[i] > bBytes[i] {
+			return 1
+		}
+	}
+	return 0
 }
 
 func runDaemon(socketPath, credFile, credBackend string, width, height, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio bool) {
