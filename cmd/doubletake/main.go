@@ -21,6 +21,7 @@ func main() {
 	port := flag.Int("port", 7000, "AirPlay port")
 	pin := flag.String("pin", "", "4-digit PIN for pairing (shown on Apple TV)")
 	credFile := flag.String("creds", airplay.DefaultCredentialsPath(), "Path to saved pairing credentials")
+	credBackend := flag.String("cred-backend", "file", "Credential storage backend: file or keyring (system keyring via Secret Service)")
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
 	width := flag.Int("width", 1920, "Stream width")
 	height := flag.Int("height", 1080, "Stream height")
@@ -39,7 +40,7 @@ func main() {
 	airplay.DebugMode = *debug
 
 	if *daemonize {
-		runDaemon(*socketPath, *credFile, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, !*audio)
+		runDaemon(*socketPath, *credFile, *credBackend, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, !*audio)
 		return
 	}
 
@@ -89,7 +90,7 @@ func main() {
 	// 3. Otherwise, do transient (ephemeral) pairing
 	needFullPair := *forcePair || *pin != ""
 
-	credStore, err := airplay.NewCredentialStore(*credFile)
+	credStore, err := newCredentialStore(*credBackend, *credFile)
 	if err != nil {
 		log.Fatalf("failed to load credentials: %v", err)
 	}
@@ -117,11 +118,11 @@ func main() {
 		if err := credStore.Save(info.DeviceID, client.PairingID, client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
 			log.Printf("warning: failed to save credentials: %v", err)
 		} else {
-			log.Printf("credentials saved to %s", *credFile)
+			log.Printf("credentials saved (%s)", *credBackend)
 		}
 	} else if savedCreds != nil {
 		// Use saved credentials — pair-verify
-		log.Printf("using saved credentials from %s", *credFile)
+		log.Printf("using saved credentials (%s)", *credBackend)
 		pub, priv := savedCreds.Ed25519Keys()
 		client.PairingID = savedCreds.PairingID
 		client.PairKeys = &airplay.PairKeys{
@@ -315,20 +316,21 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 	return &devices[idx-1], nil
 }
 
-func runDaemon(socketPath, credFile string, width, height, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio bool) {
+func runDaemon(socketPath, credFile, credBackend string, width, height, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio bool) {
 	cfg := daemon.Config{
-		SocketPath: socketPath,
-		CredFile:   credFile,
-		Width:      width,
-		Height:     height,
-		FPS:        fps,
-		Bitrate:    bitrate,
-		HWAccel:    hwaccel,
-		Debug:      debug,
-		TestMode:   testMode,
-		NoEncrypt:  noEncrypt,
-		DirectKey:  directKey,
-		NoAudio:    noAudio,
+		SocketPath:  socketPath,
+		CredFile:    credFile,
+		CredBackend: credBackend,
+		Width:       width,
+		Height:      height,
+		FPS:         fps,
+		Bitrate:     bitrate,
+		HWAccel:     hwaccel,
+		Debug:       debug,
+		TestMode:    testMode,
+		NoEncrypt:   noEncrypt,
+		DirectKey:   directKey,
+		NoAudio:     noAudio,
 	}
 
 	d, err := daemon.New(cfg)
@@ -353,5 +355,20 @@ func runDaemon(socketPath, credFile string, width, height, fps, bitrate int, hwa
 
 	if err := d.Run(ctx); err != nil {
 		log.Fatalf("[daemon] %v", err)
+	}
+}
+
+func newCredentialStore(backend, filePath string) (*airplay.CredentialStore, error) {
+	switch backend {
+	case "keyring":
+		kb, err := airplay.NewKeyringBackend()
+		if err != nil {
+			return nil, err
+		}
+		return airplay.NewCredentialStoreWithBackend(kb), nil
+	case "file":
+		return airplay.NewCredentialStore(filePath)
+	default:
+		return nil, fmt.Errorf("unknown credential backend %q (use \"file\" or \"keyring\")", backend)
 	}
 }
