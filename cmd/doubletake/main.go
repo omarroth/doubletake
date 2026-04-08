@@ -140,13 +140,51 @@ func main() {
 				log.Fatalf("get info after reconnect failed: %v", err)
 			}
 			if err := client.Pair(ctx, ""); err != nil {
-				log.Fatalf("transient pairing fallback failed: %v", err)
+				log.Printf("transient pairing fallback failed: %v, prompting for PIN", err)
+				pinVal := promptForPIN(client)
+				// Reconnect for fresh PIN pairing attempt
+				client.Close()
+				client = airplay.NewAirPlayClient(addr, *port)
+				if err := client.Connect(ctx); err != nil {
+					log.Fatalf("reconnect failed: %v", err)
+				}
+				if _, err := client.GetInfo(); err != nil {
+					log.Fatalf("get info after reconnect failed: %v", err)
+				}
+				if err := client.Pair(ctx, pinVal); err != nil {
+					log.Fatalf("PIN pairing failed: %v", err)
+				}
+				// Save credentials for next time
+				if err := credStore.Save(info.DeviceID, client.PairingID, client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
+					log.Printf("warning: failed to save credentials: %v", err)
+				} else {
+					log.Printf("credentials saved (%s)", *credBackend)
+				}
 			}
 		}
 	} else {
 		// Transient pairing (no saved creds, no PIN)
 		if err := client.Pair(ctx, ""); err != nil {
-			log.Fatalf("pairing failed: %v", err)
+			log.Printf("transient pairing failed: %v, prompting for PIN", err)
+			pinVal := promptForPIN(client)
+			// Reconnect for fresh PIN pairing attempt
+			client.Close()
+			client = airplay.NewAirPlayClient(addr, *port)
+			if err := client.Connect(ctx); err != nil {
+				log.Fatalf("reconnect failed: %v", err)
+			}
+			if _, err := client.GetInfo(); err != nil {
+				log.Fatalf("get info after reconnect failed: %v", err)
+			}
+			if err := client.Pair(ctx, pinVal); err != nil {
+				log.Fatalf("PIN pairing failed: %v", err)
+			}
+			// Save credentials for next time
+			if err := credStore.Save(info.DeviceID, client.PairingID, client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private); err != nil {
+				log.Printf("warning: failed to save credentials: %v", err)
+			} else {
+				log.Printf("credentials saved (%s)", *credBackend)
+			}
 		}
 	}
 	log.Println("pairing complete")
@@ -277,6 +315,16 @@ func main() {
 		log.Fatalf("streaming error: %v", err)
 	}
 	log.Println("stream ended")
+}
+
+func promptForPIN(client *airplay.AirPlayClient) string {
+	if err := client.StartPINDisplay(); err != nil {
+		log.Printf("warning: failed to trigger PIN display: %v", err)
+	}
+	fmt.Print("Enter the PIN shown on Apple TV: ")
+	var pinVal string
+	fmt.Scanln(&pinVal)
+	return pinVal
 }
 
 func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
