@@ -76,6 +76,7 @@ go build -o doubletake ./cmd/doubletake
 | `-target` | | Apple TV IP (skip mDNS discovery) |
 | `-port` | 7000 | AirPlay port |
 | `-pin` | | 4-digit PIN for pairing |
+| `-cred-backend` | `file` | Credential backend (`file` or `keyring`) |
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
 | `-pair` | false | Force new pairing |
 | `-width` | 1920 | Stream width |
