@@ -56,18 +56,19 @@ type DeviceInfo struct {
 
 // Config holds daemon configuration.
 type Config struct {
-	SocketPath string
-	CredFile   string
-	Width      int
-	Height     int
-	FPS        int
-	Bitrate    int
-	HWAccel    string
-	Debug      bool
-	TestMode   bool
-	NoEncrypt  bool
-	DirectKey  bool
-	NoAudio    bool
+	SocketPath  string
+	CredFile    string
+	CredBackend string
+	Width       int
+	Height      int
+	FPS         int
+	Bitrate     int
+	HWAccel     string
+	Debug       bool
+	TestMode    bool
+	NoEncrypt   bool
+	DirectKey   bool
+	NoAudio     bool
 }
 
 // DefaultSocketPath returns the default socket path using XDG_RUNTIME_DIR.
@@ -102,13 +103,24 @@ type Daemon struct {
 
 // New creates a new Daemon with the given configuration.
 func New(cfg Config) (*Daemon, error) {
-	credPath := cfg.CredFile
-	if credPath == "" {
-		credPath = airplay.DefaultCredentialsPath()
-	}
-	cs, err := airplay.NewCredentialStore(credPath)
-	if err != nil {
-		return nil, fmt.Errorf("load credentials: %w", err)
+	var cs *airplay.CredentialStore
+	switch cfg.CredBackend {
+	case "keyring":
+		kb, err := airplay.NewKeyringBackend()
+		if err != nil {
+			return nil, fmt.Errorf("keyring backend: %w", err)
+		}
+		cs = airplay.NewCredentialStoreWithBackend(kb)
+	default:
+		credPath := cfg.CredFile
+		if credPath == "" {
+			credPath = airplay.DefaultCredentialsPath()
+		}
+		var err error
+		cs, err = airplay.NewCredentialStore(credPath)
+		if err != nil {
+			return nil, fmt.Errorf("load credentials: %w", err)
+		}
 	}
 
 	return &Daemon{
