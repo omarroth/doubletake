@@ -9,11 +9,13 @@ import (
 	"sync"
 )
 
-// SavedCredentials holds the persistent pairing credentials for a single device.
+// SavedCredentials holds the persistent pairing credentials and optional
+// screencast restore state for a single device.
 type SavedCredentials struct {
 	PairingID     string `json:"pairing_id"`
 	Ed25519Public []byte `json:"ed25519_public"`
 	Ed25519Seed   []byte `json:"ed25519_seed"` // 32-byte seed (private key is derived from this)
+	RestoreToken  string `json:"restore_token,omitempty"`
 }
 
 // DefaultCredentialsPath returns ~/.config/doubletake/credentials.json.
@@ -33,6 +35,14 @@ func (c *SavedCredentials) Ed25519Keys() (ed25519.PublicKey, ed25519.PrivateKey)
 	}
 	priv := ed25519.NewKeyFromSeed(c.Ed25519Seed)
 	return ed25519.PublicKey(c.Ed25519Public), priv
+}
+
+// HasPairingCredentials reports whether the saved entry contains a usable
+// AirPlay pairing identity.
+func (c *SavedCredentials) HasPairingCredentials() bool {
+	return c != nil && c.PairingID != "" &&
+		len(c.Ed25519Public) == ed25519.PublicKeySize &&
+		len(c.Ed25519Seed) == ed25519.SeedSize
 }
 
 // CredentialBackend is the storage interface for pairing credentials.
@@ -88,11 +98,36 @@ func (cs *CredentialStore) Save(deviceID string, pairingID string, pub ed25519.P
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	creds := &SavedCredentials{
-		PairingID:     pairingID,
-		Ed25519Public: []byte(pub),
-		Ed25519Seed:   priv.Seed(),
+	creds, err := cs.backend.Lookup(deviceID)
+	if err != nil {
+		return err
 	}
+	if creds == nil {
+		creds = &SavedCredentials{}
+	}
+	creds.PairingID = pairingID
+	creds.Ed25519Public = append([]byte(nil), pub...)
+	creds.Ed25519Seed = append([]byte(nil), priv.Seed()...)
+	return cs.backend.Save(deviceID, creds)
+}
+
+// SaveRestoreToken stores a Wayland screencast restore token for a device.
+func (cs *CredentialStore) SaveRestoreToken(deviceID, restoreToken string) error {
+	if restoreToken == "" {
+		return nil
+	}
+
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	creds, err := cs.backend.Lookup(deviceID)
+	if err != nil {
+		return err
+	}
+	if creds == nil {
+		creds = &SavedCredentials{}
+	}
+	creds.RestoreToken = restoreToken
 	return cs.backend.Save(deviceID, creds)
 }
 

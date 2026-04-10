@@ -22,6 +22,9 @@ type CaptureConfig struct {
 	FPS     int
 	Bitrate int    // Video bitrate in kbps (0 = auto)
 	HWAccel string // "auto", "vaapi", "none"
+
+	RestoreToken     string
+	SaveRestoreToken func(string) error
 }
 
 const (
@@ -61,9 +64,14 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
 	}
 
-	nodeID, pwFd, dbusConn, err := requestScreencast(ctx)
+	nodeID, pwFd, dbusConn, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
+	}
+	if restoreToken != "" && cfg.SaveRestoreToken != nil {
+		if err := cfg.SaveRestoreToken(restoreToken); err != nil {
+			log.Printf("[CAPTURE] warning: failed to save screencast restore token: %v", err)
+		}
 	}
 	dbg("pipewire node ID: %d", nodeID)
 
@@ -601,87 +609,118 @@ func vbvBufferKbit(bitrateKbps, fps int) int {
 
 // requestScreencast uses the xdg-desktop-portal D-Bus API to request screen capture
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
-// and the D-Bus connection (which must stay open to keep the screencast session alive).
-func requestScreencast(ctx context.Context) (uint32, *os.File, *dbus.Conn, error) {
+// the D-Bus connection (which must stay open to keep the screencast session alive),
+// and a fresh restore token when the portal grants persistence.
+func requestScreencast(ctx context.Context, restoreToken string) (uint32, *os.File, *dbus.Conn, string, error) {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("connect session bus: %w", err)
+		return 0, nil, nil, "", fmt.Errorf("connect session bus: %w", err)
 	}
 
 	portal := conn.Object("org.freedesktop.portal.Desktop",
 		"/org/freedesktop/portal/desktop")
-
-	senderName := conn.Names()[0]
-	token := "airplay_cast"
+	portalVersion := screenCastPortalVersion(portal)
+	baseToken := newPortalHandleToken()
 
 	// Create session
 	sessionOpts := map[string]dbus.Variant{
-		"handle_token":         dbus.MakeVariant(token),
-		"session_handle_token": dbus.MakeVariant(token),
+		"handle_token":         dbus.MakeVariant(baseToken),
+		"session_handle_token": dbus.MakeVariant(baseToken + "_session"),
 	}
 
-	var sessionHandle dbus.ObjectPath
+	var requestHandle dbus.ObjectPath
 	call := portal.Call("org.freedesktop.portal.ScreenCast.CreateSession", 0, sessionOpts)
 	if call.Err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("CreateSession: %w", call.Err)
+		return 0, nil, nil, "", fmt.Errorf("CreateSession: %w", call.Err)
 	}
-	if err := call.Store(&sessionHandle); err != nil {
+	if err := call.Store(&requestHandle); err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("store session handle: %w", err)
+		return 0, nil, nil, "", fmt.Errorf("store create-session request handle: %w", err)
 	}
 
-	// Wait for session response via signal
-	sessionPath, err := waitForResponse(conn, senderName, token)
+	createResult, err := waitForResponseWithResult(ctx, conn, requestHandle)
 	if err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("session response: %w", err)
+		return 0, nil, nil, "", fmt.Errorf("session response: %w", err)
+	}
+
+	sessionPath, err := sessionHandleFromResult(createResult)
+	if err != nil {
+		conn.Close()
+		return 0, nil, nil, "", fmt.Errorf("session handle: %w", err)
 	}
 
 	// Select sources (screen)
 	selectOpts := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(token + "_select"),
+		"handle_token": dbus.MakeVariant(baseToken + "_select"),
 		"types":        dbus.MakeVariant(uint32(1)), // MONITOR=1, WINDOW=2
 		"multiple":     dbus.MakeVariant(false),
 		"cursor_mode":  dbus.MakeVariant(uint32(2)), // EMBEDDED=2 (cursor in stream)
 	}
-
-	call = portal.Call("org.freedesktop.portal.ScreenCast.SelectSources", 0,
-		dbus.ObjectPath(sessionPath), selectOpts)
-	if call.Err != nil {
-		conn.Close()
-		return 0, nil, nil, fmt.Errorf("SelectSources: %w", call.Err)
+	if portalVersion >= 4 {
+		selectOpts["persist_mode"] = dbus.MakeVariant(uint32(2))
+		if restoreToken != "" {
+			selectOpts["restore_token"] = dbus.MakeVariant(restoreToken)
+			dbg("[CAPTURE] requesting screencast restore with saved token")
+		}
 	}
 
-	_, err = waitForResponse(conn, senderName, token+"_select")
-	if err != nil {
+	requestHandle = ""
+	call = portal.Call("org.freedesktop.portal.ScreenCast.SelectSources", 0,
+		sessionPath, selectOpts)
+	if call.Err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("select response: %w", err)
+		return 0, nil, nil, "", fmt.Errorf("SelectSources: %w", call.Err)
+	}
+	if err := call.Store(&requestHandle); err != nil {
+		conn.Close()
+		return 0, nil, nil, "", fmt.Errorf("store select-sources request handle: %w", err)
+	}
+
+	if _, err = waitForResponseWithResult(ctx, conn, requestHandle); err != nil {
+		conn.Close()
+		return 0, nil, nil, "", fmt.Errorf("select response: %w", err)
 	}
 
 	// Start the screencast
 	startOpts := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(token + "_start"),
+		"handle_token": dbus.MakeVariant(baseToken + "_start"),
 	}
 
+	requestHandle = ""
 	call = portal.Call("org.freedesktop.portal.ScreenCast.Start", 0,
-		dbus.ObjectPath(sessionPath), "", startOpts)
+		sessionPath, "", startOpts)
 	if call.Err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("Start: %w", call.Err)
+		return 0, nil, nil, "", fmt.Errorf("Start: %w", call.Err)
+	}
+	if err := call.Store(&requestHandle); err != nil {
+		conn.Close()
+		return 0, nil, nil, "", fmt.Errorf("store start request handle: %w", err)
 	}
 
-	startResult, err := waitForResponseWithResult(conn, senderName, token+"_start")
+	startResult, err := waitForResponseWithResult(ctx, conn, requestHandle)
 	if err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("start response: %w", err)
+		return 0, nil, nil, "", fmt.Errorf("start response: %w", err)
+	}
+
+	newRestoreToken := ""
+	if variant, ok := startResult["restore_token"]; ok {
+		value, ok := variant.Value().(string)
+		if !ok {
+			conn.Close()
+			return 0, nil, nil, "", fmt.Errorf("unexpected restore token type: %T", variant.Value())
+		}
+		newRestoreToken = value
 	}
 
 	// Extract PipeWire node ID from the result
 	streams, ok := startResult["streams"]
 	if !ok {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("no streams in start response")
+		return 0, nil, nil, "", fmt.Errorf("no streams in start response")
 	}
 
 	var nodeID uint32
@@ -694,25 +733,25 @@ func requestScreencast(ctx context.Context) (uint32, *os.File, *dbus.Conn, error
 					nodeID = nid
 				} else {
 					conn.Close()
-					return 0, nil, nil, fmt.Errorf("unexpected node ID type: %T", tuple[0])
+					return 0, nil, nil, "", fmt.Errorf("unexpected node ID type: %T", tuple[0])
 				}
 			} else {
 				conn.Close()
-				return 0, nil, nil, fmt.Errorf("unexpected streams format: %T", streams.Value())
+				return 0, nil, nil, "", fmt.Errorf("unexpected streams format: %T", streams.Value())
 			}
 		} else {
 			conn.Close()
-			return 0, nil, nil, fmt.Errorf("unexpected streams format: %T", streams.Value())
+			return 0, nil, nil, "", fmt.Errorf("unexpected streams format: %T", streams.Value())
 		}
 	} else {
 		if len(streamList) == 0 || len(streamList[0]) == 0 {
 			conn.Close()
-			return 0, nil, nil, fmt.Errorf("empty streams list")
+			return 0, nil, nil, "", fmt.Errorf("empty streams list")
 		}
 		nid, ok2 := streamList[0][0].(uint32)
 		if !ok2 {
 			conn.Close()
-			return 0, nil, nil, fmt.Errorf("unexpected node ID type: %T", streamList[0][0])
+			return 0, nil, nil, "", fmt.Errorf("unexpected node ID type: %T", streamList[0][0])
 		}
 		nodeID = nid
 	}
@@ -721,71 +760,87 @@ func requestScreencast(ctx context.Context) (uint32, *os.File, *dbus.Conn, error
 	// pipewiresrc MUST use this fd to connect; without it, it connects to the
 	// global PipeWire instance which does not have the portal node and returns EINVAL.
 	call = portal.Call("org.freedesktop.portal.ScreenCast.OpenPipeWireRemote", 0,
-		dbus.ObjectPath(sessionPath), map[string]dbus.Variant{})
+		sessionPath, map[string]dbus.Variant{})
 	if call.Err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("OpenPipeWireRemote: %w", call.Err)
+		return 0, nil, nil, "", fmt.Errorf("OpenPipeWireRemote: %w", call.Err)
 	}
 	var pwFD dbus.UnixFD
 	if err := call.Store(&pwFD); err != nil {
 		conn.Close()
-		return 0, nil, nil, fmt.Errorf("store pipewire fd: %w", err)
+		return 0, nil, nil, "", fmt.Errorf("store pipewire fd: %w", err)
 	}
 
-	return nodeID, os.NewFile(uintptr(pwFD), "pipewire-remote"), conn, nil
+	return nodeID, os.NewFile(uintptr(pwFD), "pipewire-remote"), conn, newRestoreToken, nil
 }
 
-func waitForResponse(conn *dbus.Conn, sender, token string) (string, error) {
-	result, err := waitForResponseWithResult(conn, sender, token)
-	if err != nil {
-		return "", err
-	}
-	_ = result
-	return buildSessionHandle(sender, token), nil
-}
-
-func waitForResponseWithResult(conn *dbus.Conn, sender, token string) (map[string]dbus.Variant, error) {
+func waitForResponseWithResult(ctx context.Context, conn *dbus.Conn, requestHandle dbus.ObjectPath) (map[string]dbus.Variant, error) {
 	ch := make(chan *dbus.Signal, 1)
 	conn.Signal(ch)
 	defer conn.RemoveSignal(ch)
 
 	matchRule := "type='signal',interface='org.freedesktop.portal.Request',member='Response'"
-	conn.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, matchRule)
+	if call := conn.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, matchRule); call.Err != nil {
+		return nil, fmt.Errorf("add portal response match: %w", call.Err)
+	}
+	defer conn.BusObject().Call("org.freedesktop.DBus.RemoveMatch", 0, matchRule)
 
-	select {
-	case sig := <-ch:
-		if len(sig.Body) < 2 {
-			return nil, fmt.Errorf("signal body too short")
-		}
-		status, ok := sig.Body[0].(uint32)
-		if !ok {
-			return nil, fmt.Errorf("unexpected status type")
-		}
-		if status != 0 {
-			return nil, fmt.Errorf("portal request failed with status %d", status)
-		}
-		result, ok := sig.Body[1].(map[string]dbus.Variant)
-		if !ok {
-			return nil, fmt.Errorf("unexpected result type: %T", sig.Body[1])
-		}
-		return result, nil
+	for {
+		select {
+		case sig := <-ch:
+			if sig == nil || sig.Path != requestHandle {
+				continue
+			}
+			if len(sig.Body) < 2 {
+				return nil, fmt.Errorf("signal body too short")
+			}
+			status, ok := sig.Body[0].(uint32)
+			if !ok {
+				return nil, fmt.Errorf("unexpected status type")
+			}
+			if status != 0 {
+				return nil, fmt.Errorf("portal request failed with status %d", status)
+			}
+			result, ok := sig.Body[1].(map[string]dbus.Variant)
+			if !ok {
+				return nil, fmt.Errorf("unexpected result type: %T", sig.Body[1])
+			}
+			return result, nil
 
-	case <-make(chan struct{}): // Would use ctx.Done() with actual context
-		return nil, fmt.Errorf("timeout waiting for portal response")
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timeout waiting for portal response: %w", ctx.Err())
+		}
 	}
 }
 
-func buildSessionHandle(sender, token string) string {
-	// Convert sender name like ":1.234" to "1_234"
-	clean := ""
-	for _, c := range sender {
-		if c == '.' || c == ':' {
-			if c == '.' {
-				clean += "_"
-			}
-		} else {
-			clean += string(c)
-		}
+func newPortalHandleToken() string {
+	return fmt.Sprintf("airplay_cast_%d", time.Now().UnixNano())
+}
+
+func screenCastPortalVersion(portal dbus.BusObject) uint32 {
+	variant, err := portal.GetProperty("org.freedesktop.portal.ScreenCast.version")
+	if err != nil {
+		dbg("[CAPTURE] unable to read ScreenCast portal version: %v", err)
+		return 0
 	}
-	return fmt.Sprintf("/org/freedesktop/portal/desktop/session/%s/%s", clean, token)
+	version, ok := variant.Value().(uint32)
+	if !ok {
+		dbg("[CAPTURE] unexpected ScreenCast portal version type: %T", variant.Value())
+		return 0
+	}
+	return version
+}
+
+func sessionHandleFromResult(result map[string]dbus.Variant) (dbus.ObjectPath, error) {
+	variant, ok := result["session_handle"]
+	if !ok {
+		return "", fmt.Errorf("missing session_handle in portal response")
+	}
+	if sessionHandle, ok := variant.Value().(string); ok {
+		return dbus.ObjectPath(sessionHandle), nil
+	}
+	if sessionHandle, ok := variant.Value().(dbus.ObjectPath); ok {
+		return sessionHandle, nil
+	}
+	return "", fmt.Errorf("unexpected session_handle type: %T", variant.Value())
 }
