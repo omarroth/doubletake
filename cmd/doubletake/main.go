@@ -33,7 +33,7 @@ func main() {
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
-	audio := flag.Bool("audio", false, "Enable audio streaming (currently non-functional)")
+	audio := flag.Bool("audio", false, "Enable audio streaming")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	daemonize := flag.Bool("daemonize", false, "Run as background daemon with Unix socket control interface")
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
@@ -90,7 +90,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("get info failed: %v", err)
 	}
-	log.Printf("connected to: %s (model: %s)", info.Name, info.Model)
+	log.Printf("connected to: %s (model: %s, initialVolume: %.1f)", info.Name, info.Model, info.InitialVolume)
 
 	// Pairing flow:
 	// 1. If --pin provided or --pair forced, do full pair-setup + save credentials
@@ -214,14 +214,18 @@ func main() {
 		}
 	}
 
+	// Select the most reliable available audio codec by default.
+	audioCodec := airplay.DefaultAudioCodec()
+
 	streamCfg := airplay.StreamConfig{
-		Width:     *width,
-		Height:    *height,
-		FPS:       *fps,
-		Bitrate:   *bitrate,
-		NoEncrypt: *noEncrypt,
-		DirectKey: *directKey,
-		NoAudio:   !*audio,
+		Width:      *width,
+		Height:     *height,
+		FPS:        *fps,
+		Bitrate:    *bitrate,
+		NoEncrypt:  *noEncrypt,
+		DirectKey:  *directKey,
+		NoAudio:    !*audio,
+		AudioCodec: audioCodec,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {

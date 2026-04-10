@@ -578,6 +578,22 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	log.Printf("[daemon] streaming to %s", d.device)
 
+	// Start audio capture and streaming if enabled
+	if !d.cfg.NoAudio && session.HasAudio() {
+		audioCapture, audioErr := airplay.StartAudioCapture(ctx)
+		if audioErr != nil {
+			log.Printf("[daemon] audio capture failed: %v (continuing without audio)", audioErr)
+		} else {
+			defer audioCapture.Stop()
+			go func() {
+				if aerr := session.StreamAudio(ctx, audioCapture, session.AudioStream()); aerr != nil && ctx.Err() == nil {
+					log.Printf("[daemon] audio streaming error: %v", aerr)
+				}
+			}()
+			log.Printf("[daemon] audio capture started")
+		}
+	}
+
 	err = session.StreamFrames(ctx, capture, 0)
 	if err != nil && ctx.Err() == nil {
 		log.Printf("[daemon] stream error: %v", err)
