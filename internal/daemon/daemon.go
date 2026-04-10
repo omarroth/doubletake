@@ -421,6 +421,11 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	}
 
 	deviceID := info.DeviceID
+	savedCreds := d.credStore.Lookup(deviceID)
+	screenCastRestoreToken := ""
+	if savedCreds != nil {
+		screenCastRestoreToken = savedCreds.RestoreToken
+	}
 	d.mu.Lock()
 	d.device = info.Name
 	d.deviceIP = target
@@ -452,42 +457,39 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	// Try saved credentials by DeviceID
 	if !paired {
-		savedCreds := d.credStore.Lookup(deviceID)
-		if savedCreds != nil {
+		if savedCreds != nil && savedCreds.HasPairingCredentials() {
 			pub, priv := savedCreds.Ed25519Keys()
-			if priv == nil {
-				log.Printf("[daemon] saved credentials have invalid keys, skipping pair-verify")
-			} else {
-				client.PairingID = savedCreds.PairingID
-				client.PairKeys = &airplay.PairKeys{
-					Ed25519Public:  pub,
-					Ed25519Private: priv,
+			client.PairingID = savedCreds.PairingID
+			client.PairKeys = &airplay.PairKeys{
+				Ed25519Public:  pub,
+				Ed25519Private: priv,
+			}
+			if err := client.PairVerify(ctx); err != nil {
+				log.Printf("[daemon] pair-verify with saved creds failed: %v, trying transient pairing", err)
+				// Reconnect for fresh pairing attempt
+				client.Close()
+				client = airplay.NewAirPlayClient(target, port)
+				if err := client.Connect(ctx); err != nil {
+					setErr(fmt.Sprintf("reconnect failed: %v", err))
+					return
 				}
-				if err := client.PairVerify(ctx); err != nil {
-					log.Printf("[daemon] pair-verify with saved creds failed: %v, trying transient pairing", err)
-					// Reconnect for fresh pairing attempt
-					client.Close()
-					client = airplay.NewAirPlayClient(target, port)
-					if err := client.Connect(ctx); err != nil {
-						setErr(fmt.Sprintf("reconnect failed: %v", err))
-						return
-					}
-					if _, err := client.GetInfo(); err != nil {
-						setErr(fmt.Sprintf("get info after reconnect failed: %v", err))
-						return
-					}
-					// Try transient (no-PIN) pairing as fallback
-					if err := client.Pair(ctx, ""); err != nil {
-						log.Printf("[daemon] transient pairing also failed: %v", err)
-					} else {
-						paired = true
-						log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
-					}
+				if _, err := client.GetInfo(); err != nil {
+					setErr(fmt.Sprintf("get info after reconnect failed: %v", err))
+					return
+				}
+				// Try transient (no-PIN) pairing as fallback
+				if err := client.Pair(ctx, ""); err != nil {
+					log.Printf("[daemon] transient pairing also failed: %v", err)
 				} else {
 					paired = true
-					log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
+					log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
 				}
+			} else {
+				paired = true
+				log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
 			}
+		} else if savedCreds != nil {
+			log.Printf("[daemon] saved credentials have no usable pair-verify keys, skipping")
 		}
 	}
 
@@ -542,11 +544,17 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	}
 
 	capCfg := airplay.CaptureConfig{
-		Width:   d.cfg.Width,
-		Height:  d.cfg.Height,
-		FPS:     d.cfg.FPS,
-		Bitrate: d.cfg.Bitrate,
-		HWAccel: d.cfg.HWAccel,
+		Width:        d.cfg.Width,
+		Height:       d.cfg.Height,
+		FPS:          d.cfg.FPS,
+		Bitrate:      d.cfg.Bitrate,
+		HWAccel:      d.cfg.HWAccel,
+		RestoreToken: screenCastRestoreToken,
+	}
+	if deviceID != "" {
+		capCfg.SaveRestoreToken = func(token string) error {
+			return d.credStore.SaveRestoreToken(deviceID, token)
+		}
 	}
 	var capture *airplay.ScreenCapture
 	if d.cfg.TestMode {
