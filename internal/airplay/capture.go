@@ -478,10 +478,11 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 	keyframeInterval := keyframeIntervalFrames(fps)
 
 	// GStreamer pipeline: videotestsrc → timeoverlay → x264enc High profile → Annex-B byte stream → stdout
-	// pattern=18 = ball (bouncing ball with motion); timeoverlay adds a frame counter
+	// pattern=18 = ball (bouncing ball with motion); timeoverlay adds a frame counter.
+	// Keep test source live/infinite so long-running audio tests do not stop with EOF.
 	gstArgs := []string{
 		"--quiet",
-		"videotestsrc", "pattern=18", fmt.Sprintf("num-buffers=%d", 10*fps),
+		"videotestsrc", "pattern=18", "is-live=true", "do-timestamp=true",
 		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
 		"!", "timeoverlay",
 		"!", "videoconvert",

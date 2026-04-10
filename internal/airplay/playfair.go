@@ -933,6 +933,10 @@ func PlayfairDecryptExported(m3 []byte, ekey []byte) [16]byte {
 }
 
 func playfairDecrypt(m3 []byte, ekey []byte) [16]byte {
+	return playfairDecryptWithSap(m3, ekey, defaultSap[:])
+}
+
+func playfairDecryptWithSap(m3 []byte, ekey []byte, sap []byte) [16]byte {
 	chunk1 := ekey[16:32]
 	chunk2 := ekey[56:72]
 
@@ -941,7 +945,7 @@ func playfairDecrypt(m3 []byte, ekey []byte) [16]byte {
 	var keySchedule [11][4]uint32
 	var keyOut [16]byte
 
-	generateSessionKey(defaultSap[:], m3, sapKey[:])
+	generateSessionKey(sap, m3, sapKey[:])
 	generateKeySchedule(sapKey[:], &keySchedule)
 
 	zXor(chunk2, blockIn[:], 1)

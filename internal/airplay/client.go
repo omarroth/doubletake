@@ -111,6 +111,23 @@ func (c *AirPlayClient) GetInfo() (*ReceiverInfo, error) {
 		return nil, err
 	}
 
+	// Log the full /info response for debugging audio format support
+	var fullInfo map[string]interface{}
+	if _, err2 := plist.Unmarshal(resp, &fullInfo); err2 == nil {
+		dbg("[INFO] full /info response keys: %v", func() []string {
+			keys := make([]string, 0, len(fullInfo))
+			for k := range fullInfo {
+				keys = append(keys, k)
+			}
+			return keys
+		}())
+		for _, key := range []string{"audioFormats", "audioLatencies", "displays", "features", "statusFlags", "initialVolume", "volumeControlType", "keepAliveSendStatsAsBody", "supportedAudioFormatsExtended", "supportedFormats"} {
+			if v, ok := fullInfo[key]; ok {
+				dbg("[INFO] %s: %+v", key, v)
+			}
+		}
+	}
+
 	var info ReceiverInfo
 	if _, err := plist.Unmarshal(resp, &info); err != nil {
 		return nil, fmt.Errorf("decode info plist: %w", err)
@@ -501,13 +518,14 @@ func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
 
 // StreamConfig holds the configuration for a mirroring session.
 type StreamConfig struct {
-	Width     int
-	Height    int
-	FPS       int
-	Bitrate   int  // Video bitrate in kbps
-	NoEncrypt bool // Disable encryption for debugging
-	DirectKey bool // Use shk/shiv directly without SHA-512 derivation
-	NoAudio   bool // Disable audio streaming
+	Width      int
+	Height     int
+	FPS        int
+	Bitrate    int        // Video bitrate in kbps
+	NoEncrypt  bool       // Disable encryption for debugging
+	DirectKey  bool       // Use shk/shiv directly without SHA-512 derivation
+	NoAudio    bool       // Disable audio streaming
+	AudioCodec AudioCodec // Audio codec selected for the session
 }
 
 // generateStreamKey creates a random AES-128 key for stream encryption.
