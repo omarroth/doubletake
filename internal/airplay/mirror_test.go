@@ -136,24 +136,6 @@ func TestPlistStreamPortsStreamConnections(t *testing.T) {
 	}
 }
 
-func TestSelectSessionAudioCodecEncryptedDefaultsToALAC(t *testing.T) {
-	t.Setenv("AUDIO_CODEC", "")
-
-	codec := selectSessionAudioCodec(AudioCodecAACELD, true)
-	if codec != AudioCodecALAC {
-		t.Fatalf("expected encrypted session to select ALAC, got %d", codec)
-	}
-}
-
-func TestSelectSessionAudioCodecEnvOverride(t *testing.T) {
-	t.Setenv("AUDIO_CODEC", "aaceld")
-
-	codec := selectSessionAudioCodec(AudioCodecALAC, true)
-	if codec != AudioCodecAACELD {
-		t.Fatalf("expected AUDIO_CODEC override to force AAC-ELD, got %d", codec)
-	}
-}
-
 func TestGenerateAudioChaChaKey(t *testing.T) {
 	want := bytes.Repeat([]byte{0x5a}, chacha20poly1305.KeySize)
 

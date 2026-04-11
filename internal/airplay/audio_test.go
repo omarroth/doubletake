@@ -8,9 +8,6 @@ import (
 )
 
 func TestUseAudioFECDefaults(t *testing.T) {
-	t.Setenv("AUDIO_NO_FEC", "")
-	t.Setenv("AUDIO_FORCE_FEC", "")
-
 	if !useAudioFEC(false) {
 		t.Fatal("expected legacy/plaintext sessions to keep FEC by default")
 	}
@@ -19,26 +16,9 @@ func TestUseAudioFECDefaults(t *testing.T) {
 	}
 }
 
-func TestUseAudioFECOverrides(t *testing.T) {
-	t.Setenv("AUDIO_NO_FEC", "")
-	t.Setenv("AUDIO_FORCE_FEC", "1")
-	if !useAudioFEC(true) {
-		t.Fatal("expected AUDIO_FORCE_FEC=1 to enable FEC for encrypted sessions")
-	}
-
-	t.Setenv("AUDIO_FORCE_FEC", "")
-	t.Setenv("AUDIO_NO_FEC", "1")
-	if useAudioFEC(false) {
-		t.Fatal("expected AUDIO_NO_FEC=1 to disable FEC for legacy sessions")
-	}
-}
-
 func TestAudioCodecFormatIndex(t *testing.T) {
 	if got := AudioCodecALAC.AudioFormatIndex(); got != 0x12 {
 		t.Fatalf("ALAC audioFormatIndex = %#x, want 0x12", got)
-	}
-	if got := AudioCodecAACELD.AudioFormatIndex(); got != 0x18 {
-		t.Fatalf("AAC-ELD audioFormatIndex = %#x, want 0x18", got)
 	}
 }
 
@@ -50,9 +30,8 @@ func TestAudioLatencySamplesForCodec(t *testing.T) {
 		want     uint32
 	}{
 		{name: "default ALAC", ct: byte(AudioCodecALAC), want: 3750},
-		{name: "default AAC-ELD", ct: byte(AudioCodecAACELD), want: 7497},
 		{name: "override wins", ct: byte(AudioCodecALAC), override: 11025, want: 11025},
-		{name: "unknown codec falls back", ct: 99, want: 7497},
+		{name: "unknown codec falls back", ct: 99, want: 3750},
 	}
 
 	for _, tt := range tests {

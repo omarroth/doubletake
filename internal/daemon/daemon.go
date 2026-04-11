@@ -517,14 +517,10 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	// FairPlay setup
 	if err := client.FairPlaySetup(ctx); err != nil {
-		if os.Getenv("ALLOW_FAIRPLAY_FALLBACK") != "" {
-			log.Printf("[daemon] FairPlay setup failed (fallback enabled): %v", err)
-		} else {
-			log.Printf("[daemon] FairPlay setup failed: %v", err)
-			client.Close()
-			setErr(fmt.Sprintf("FairPlay setup failed: %v", err))
-			return
-		}
+		log.Printf("[daemon] FairPlay setup failed: %v", err)
+		client.Close()
+		setErr(fmt.Sprintf("FairPlay setup failed: %v", err))
+		return
 	}
 
 	streamCfg := airplay.StreamConfig{
@@ -580,7 +576,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	// Start audio capture and streaming if enabled
 	if !d.cfg.NoAudio && session.HasAudio() {
-		audioCapture, audioErr := airplay.StartAudioCapture(ctx, session.SelectedAudioCodec())
+		audioCapture, audioErr := airplay.StartAudioCapture(ctx, d.cfg.TestMode)
 		if audioErr != nil {
 			log.Printf("[daemon] audio capture failed: %v (continuing without audio)", audioErr)
 		} else {
