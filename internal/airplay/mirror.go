@@ -43,7 +43,21 @@ type MirrorSession struct {
 
 	// Audio
 	audioStream *AudioStream
+	audioCodec  AudioCodec
 	noAudio     bool
+}
+
+func selectAudioSecurityMode(encrypted bool) audioSecurityMode {
+	switch strings.ToLower(os.Getenv("AUDIO_SECURITY")) {
+	case "legacy", "aes", "aes-cbc":
+		return audioSecurityLegacyAES
+	case "chacha", "chacha20", "chacha20-poly1305":
+		return audioSecurityChaCha
+	}
+	if encrypted {
+		return audioSecurityChaCha
+	}
+	return audioSecurityLegacyAES
 }
 
 // setupMirrorSession negotiates the mirroring stream with the Apple TV.
@@ -134,10 +148,38 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// via a second SETUP with the same sessionUUID but different streamConnectionID.
 
 	audioStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
+	selectedAudioCodec := selectSessionAudioCodec(cfg.AudioCodec, c.encrypted)
+	if !cfg.NoAudio && selectedAudioCodec != cfg.AudioCodec {
+		dbg("[SETUP] audio codec override: requested=%d selected=%d (encrypted=%v)", cfg.AudioCodec, selectedAudioCodec, c.encrypted)
+	}
 	// Real Apple senders use streamConnectionID as the RTSP URI path.
 	// Audio SETUP, RECORD, and SET_PARAMETER all use the audio URI.
 	// Video SETUP uses a separate URI with its own streamConnectionID.
 	audioURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, audioStreamConnectionID)
+	audioMode := selectAudioSecurityMode(c.encrypted)
+	var audioKey, audioIV, audioChaChaKey []byte
+	if !cfg.NoAudio {
+		if os.Getenv("AUDIO_NO_ENCRYPT") != "" {
+			dbg("[SETUP] audio encryption: disabled (AUDIO_NO_ENCRYPT=1)")
+			audioMode = audioSecurityLegacyAES
+		} else if audioMode == audioSecurityChaCha {
+			var err error
+			audioChaChaKey, err = generateAudioChaChaKey(rand.Reader)
+			if err != nil {
+				dbg("[SETUP] audio encryption: chacha key generation failed: %v; falling back to AES-CBC", err)
+				audioMode = audioSecurityLegacyAES
+			} else {
+				dbg("[SETUP] audio encryption: ChaCha20-Poly1305 direct stream key (streamConnectionID=%d, shk=%d bytes)", audioStreamConnectionID, len(audioChaChaKey))
+			}
+		}
+		if audioMode == audioSecurityLegacyAES && c.fpKey != nil && c.fpIV != nil {
+			audioKey = c.fpKey
+			audioIV = c.fpIV
+			dbg("[SETUP] audio encryption: AES-128-CBC (fpKey/hashed %d bytes)", len(audioKey))
+		} else if audioMode == audioSecurityLegacyAES && os.Getenv("AUDIO_NO_ENCRYPT") == "" {
+			dbg("[SETUP] audio encryption: disabled (no FairPlay key available)")
+		}
+	}
 
 	// ---- Phase 1: SETUP audio stream (creates session) ----
 	audioDataPort := 0
@@ -148,19 +190,31 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if !cfg.NoAudio {
 		audioControlLPort := audioCtrlConn.LocalAddr().(*net.UDPAddr).Port
 
-		audioCT, audioSPF, audioFmt, latMin, latMax, _ := cfg.AudioCodec.Info()
+		audioCT, audioSPF, audioFmt, latMin, latMax, _ := selectedAudioCodec.Info()
+		audioFormatIndex := selectedAudioCodec.AudioFormatIndex()
+		audioRedundant := int64(0)
+		if useAudioFEC(audioMode == audioSecurityChaCha) {
+			audioRedundant = 2
+		}
+		disableRetransmits := audioRedundant == 0
 
 		audioStreamDesc := map[string]interface{}{
 			"type":               int64(96),
 			"streamConnectionID": audioStreamConnectionID,
 			"ct":                 audioCT,
 			"spf":                audioSPF,
+			"sr":                 int64(44100),
 			"audioFormat":        audioFmt,
+			"audioFormatIndex":   audioFormatIndex,
 			"controlPort":        int64(audioControlLPort),
+			"audioMode":          "default",
 			"usingScreen":        true,
 			"latencyMin":         latMin,
 			"latencyMax":         latMax,
-			"redundantAudio":     int64(2),
+			"redundantAudio":     audioRedundant,
+		}
+		if disableRetransmits {
+			audioStreamDesc["disableRetransmits"] = true
 		}
 
 		audioSetupPlist := map[string]interface{}{
@@ -176,8 +230,21 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			"streams":        []interface{}{audioStreamDesc},
 		}
 
-		// ekey/eiv for audio encryption
-		if os.Getenv("AUDIO_NO_ENCRYPT") != "" {
+		// Modern HAP receivers look for shk on the audio stream descriptor.
+		if audioMode == audioSecurityChaCha && len(audioChaChaKey) == 32 {
+			audioStreamDesc["shk"] = audioChaChaKey
+			audioStreamDesc["isMedia"] = true
+			audioStreamDesc["supportsDynamicStreamID"] = true
+			audioStreamDesc["streamConnections"] = map[string]interface{}{
+				"streamConnectionTypeRTP": map[string]interface{}{
+					"streamConnectionKeyUseStreamEncryptionKey": true,
+				},
+				"streamConnectionTypeRTCP": map[string]interface{}{
+					"streamConnectionKeyPort": int64(audioControlLPort),
+				},
+			}
+			dbg("[SETUP] audio stream descriptor includes shk (%d bytes)", len(audioChaChaKey))
+		} else if os.Getenv("AUDIO_NO_ENCRYPT") != "" {
 			dbg("[SETUP] AUDIO_NO_ENCRYPT=1: ekey/eiv omitted, audio sent unencrypted")
 		} else if c.FpEkey != nil && c.fpIV != nil {
 			audioSetupPlist["et"] = int64(32)
@@ -244,8 +311,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 				}
 				streamType := plistInt(stream["type"])
 				if streamType == 96 {
-					audioDataPort = plistInt(stream["dataPort"])
-					audioControlPort = plistInt(stream["controlPort"])
+					audioDataPort, audioControlPort = plistStreamPorts(stream)
 					dbg("[SETUP] audio stream: dataPort=%d controlPort=%d", audioDataPort, audioControlPort)
 				}
 			}
@@ -399,6 +465,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		videoWidth:     cfg.Width,
 		videoHeight:    cfg.Height,
 		firstFrameSent: make(chan struct{}),
+		audioCodec:     selectedAudioCodec,
 		noAudio:        cfg.NoAudio,
 		sessionURI:     audioURI,
 	}
@@ -460,22 +527,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	// Set up audio stream if the receiver provided audio ports
 	if !cfg.NoAudio && audioDataPort > 0 {
-		audioCT := byte(cfg.AudioCodec) // ALAC=2, AAC-ELD=8 (matches SETUP descriptor)
-		// Audio encryption: AES-128-CBC with the HASHED FairPlay key.
-		// The receiver derives: SHA-512(fairplay_decrypt(ekey) || ecdh_secret)[0:16]
-		// Our fpKey is the same hash. Previous attempts failed because they used
-		// fpAesKey (raw/unhashed), causing a key mismatch.
-		var audioKey, audioIV []byte
-		if os.Getenv("AUDIO_NO_ENCRYPT") != "" {
-			dbg("[SETUP] audio encryption: disabled (AUDIO_NO_ENCRYPT=1)")
-		} else if c.fpKey != nil && c.fpIV != nil {
-			audioKey = c.fpKey
-			audioIV = c.fpIV
-			dbg("[SETUP] audio encryption: AES-128-CBC (fpKey/hashed %d bytes)", len(audioKey))
-		} else {
-			dbg("[SETUP] audio encryption: disabled (no FairPlay key available)")
-		}
-		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioCT, audioCtrlConn, audioDataConn)
+		audioCT := byte(selectedAudioCodec) // ALAC=2, AAC-ELD=8 (matches SETUP descriptor)
+		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioCtrlConn, audioDataConn)
 		if err != nil {
 			audioCtrlConn.Close()
 			audioDataConn.Close()
@@ -1157,8 +1210,21 @@ func deriveVideoKeys(shk []byte, streamConnectionID int64) (key, iv []byte) {
 	return
 }
 
+// generateAudioChaChaKey creates the direct 32-byte RTP audio key Apple publishes in shk.
+// Modern buffered audio does not HKDF-derive this key from the HAP session; the sender
+// generates a fresh random key, creates the audio cryptor from it, and publishes that same
+// value via shk + streamConnectionKeyUseStreamEncryptionKey.
+func generateAudioChaChaKey(randReader io.Reader) ([]byte, error) {
+	key := make([]byte, chacha20poly1305.KeySize)
+	if _, err := io.ReadFull(randReader, key); err != nil {
+		return nil, fmt.Errorf("generate audio chacha key: %w", err)
+	}
+	return key, nil
+}
+
 // deriveChaChaKey derives a 32-byte ChaCha20-Poly1305 key using HKDF-SHA512.
-// This matches Apple's _GetDataStreamSecurityKeys / PairingSessionDeriveKey:
+// This matches Apple's _GetDataStreamSecurityKeys / PairingSessionDeriveKey for
+// mirroring data streams such as encrypted video/control channels, not RTP audio:
 //   - IKM: pair-verify X25519 ECDH shared secret (or raw FP aesKey as fallback)
 //   - Salt: "DataStream-Salt" + decimal(streamConnectionID)
 //   - Info: "DataStream-Output-Encryption-Key" (sender→receiver screen data direction)
@@ -1331,6 +1397,29 @@ func plistInt(v interface{}) int {
 	return 0
 }
 
+// plistStreamPorts extracts RTP/RTCP ports from either legacy stream fields or
+// modern streamConnections dictionaries.
+func plistStreamPorts(stream map[string]interface{}) (dataPort, controlPort int) {
+	dataPort = plistInt(stream["dataPort"])
+	controlPort = plistInt(stream["controlPort"])
+
+	streamConnections, ok := stream["streamConnections"].(map[string]interface{})
+	if !ok {
+		return dataPort, controlPort
+	}
+	if rtp, ok := streamConnections["streamConnectionTypeRTP"].(map[string]interface{}); ok {
+		if port := plistInt(rtp["streamConnectionKeyPort"]); port > 0 {
+			dataPort = port
+		}
+	}
+	if rtcp, ok := streamConnections["streamConnectionTypeRTCP"].(map[string]interface{}); ok {
+		if port := plistInt(rtcp["streamConnectionKeyPort"]); port > 0 {
+			controlPort = port
+		}
+	}
+	return dataPort, controlPort
+}
+
 // HasAudio returns true if the session has an active audio stream.
 func (s *MirrorSession) HasAudio() bool {
 	return s.audioStream != nil
@@ -1339,6 +1428,11 @@ func (s *MirrorSession) HasAudio() bool {
 // AudioStream returns the audio stream for this session (may be nil).
 func (s *MirrorSession) AudioStream() *AudioStream {
 	return s.audioStream
+}
+
+// SelectedAudioCodec returns the codec chosen for this session's audio stream.
+func (s *MirrorSession) SelectedAudioCodec() AudioCodec {
+	return s.audioCodec
 }
 
 // ntpTimingResponder replies to NTP timing requests from the Apple TV.
