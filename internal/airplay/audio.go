@@ -14,29 +14,158 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	aeadchacha20poly1305 "github.com/aead/chacha20poly1305"
 )
 
 // AudioCodec identifies the codec used for audio streaming.
 type AudioCodec int
 
+type audioSecurityMode int
+type audioChaChaNonceMode int
+type audioChaChaAADMode int
+type alacCaptureMode int
+
 const (
 	AudioCodecALAC   AudioCodec = 2 // ct=2, spf=352, audioFormat=0x40000
 	AudioCodecAACELD AudioCodec = 8 // ct=8, spf=480, audioFormat=0x1000000
+
+	audioSecurityLegacyAES audioSecurityMode = iota
+	audioSecurityChaCha
+
+	audioChaChaNonceCounter audioChaChaNonceMode = iota
+	audioChaChaNonceSeq
+	audioChaChaNonceSeqZeroBased
+	audioChaChaNonceRTP
+
+	audioChaChaAADNone audioChaChaAADMode = iota
+	audioChaChaAADRTPHeader
+	audioChaChaAADTimestampSSRC
+
+	alacCaptureHelper alacCaptureMode = iota
+	alacCaptureAVEnc
+	alacCaptureVerbatim
+
+	audioChaChaNonceSize = 8
 )
+
+func newAudioChaCha64AEAD(key []byte) (cipher.AEAD, error) {
+	return aeadchacha20poly1305.NewCipher(key)
+}
 
 // DefaultAudioCodec chooses the most reliable locally available codec.
 // AUDIO_CODEC=alac or AUDIO_CODEC=aaceld overrides auto-selection.
 func DefaultAudioCodec() AudioCodec {
-	switch os.Getenv("AUDIO_CODEC") {
-	case "alac":
-		return AudioCodecALAC
-	case "aaceld":
-		return AudioCodecAACELD
+	if codec, ok := envAudioCodec(); ok {
+		return codec
 	}
 	if findAaceldEnc() != "" {
 		return AudioCodecAACELD
 	}
 	return AudioCodecALAC
+}
+
+func envAudioCodec() (AudioCodec, bool) {
+	switch strings.ToLower(os.Getenv("AUDIO_CODEC")) {
+	case "alac":
+		return AudioCodecALAC, true
+	case "aaceld":
+		return AudioCodecAACELD, true
+	default:
+		return 0, false
+	}
+}
+
+func selectSessionAudioCodec(requested AudioCodec, encrypted bool) AudioCodec {
+	if codec, ok := envAudioCodec(); ok {
+		return codec
+	}
+	if encrypted {
+		return AudioCodecALAC
+	}
+	switch requested {
+	case AudioCodecALAC, AudioCodecAACELD:
+		return requested
+	default:
+		return DefaultAudioCodec()
+	}
+}
+
+func useAVEncALAC() bool {
+	switch strings.ToLower(os.Getenv("ALAC_ENCODER")) {
+	case "avenc", "ffmpeg":
+		return true
+	case "verbatim", "go":
+		return false
+	}
+	return false
+}
+
+func resolveALACCaptureMode() (alacCaptureMode, string, error) {
+	switch strings.ToLower(os.Getenv("ALAC_ENCODER")) {
+	case "", "auto":
+		if helper := findALACEnc(); helper != "" {
+			return alacCaptureHelper, helper, nil
+		}
+		return alacCaptureVerbatim, "", nil
+	case "helper", "alac-enc", "apple":
+		helper := findALACEnc()
+		if helper == "" {
+			return 0, "", fmt.Errorf("ALAC_ENCODER=%q requested but alac-enc binary not found", os.Getenv("ALAC_ENCODER"))
+		}
+		return alacCaptureHelper, helper, nil
+	case "avenc", "ffmpeg":
+		return alacCaptureAVEnc, "", nil
+	case "verbatim", "go":
+		return alacCaptureVerbatim, "", nil
+	default:
+		return 0, "", fmt.Errorf("unsupported ALAC_ENCODER=%q", os.Getenv("ALAC_ENCODER"))
+	}
+}
+
+func useAudioFEC(modernEncrypted bool) bool {
+	if os.Getenv("AUDIO_NO_FEC") != "" {
+		return false
+	}
+	if os.Getenv("AUDIO_FORCE_FEC") != "" {
+		return true
+	}
+	return !modernEncrypted
+}
+
+func defaultAudioChaChaNonceMode() audioChaChaNonceMode {
+	switch strings.ToLower(os.Getenv("AUDIO_CHACHA_NONCE")) {
+	case "seq":
+		return audioChaChaNonceSeq
+	case "seq0", "seq-zero", "seq-1":
+		return audioChaChaNonceSeqZeroBased
+	case "rtp", "timestamp":
+		return audioChaChaNonceRTP
+	default:
+		return audioChaChaNonceCounter
+	}
+}
+
+func defaultAudioChaChaAADMode() audioChaChaAADMode {
+	switch strings.ToLower(os.Getenv("AUDIO_CHACHA_AAD")) {
+	case "none":
+		return audioChaChaAADNone
+	case "rtp", "header":
+		return audioChaChaAADRTPHeader
+	case "ts-ssrc", "timestamp-ssrc", "timestamp+ssrc", "receiver":
+		return audioChaChaAADTimestampSSRC
+	default:
+		return audioChaChaAADTimestampSSRC
+	}
+}
+
+func (c AudioCodec) AudioFormatIndex() int64 {
+	switch c {
+	case AudioCodecALAC:
+		return 0x12
+	default:
+		return 0x18
+	}
 }
 
 // AudioCodecInfo returns SETUP parameters for the selected codec.
@@ -54,9 +183,9 @@ func (c AudioCodec) Info() (ct int64, spf int64, audioFormat int64, latencyMin i
 // UDP datagrams preserve frame boundaries.
 type AudioCapture struct {
 	gstCmd  *exec.Cmd
-	encCmd  *exec.Cmd      // nil for ALAC (verbatim encoding done in Go)
-	udpConn net.PacketConn // receives raw encoded frames (AAC-ELD mode)
-	pcmPipe io.ReadCloser  // raw PCM from GStreamer (ALAC verbatim mode)
+	encCmd  *exec.Cmd      // nil only for the ALAC verbatim fallback
+	udpConn net.PacketConn // receives raw encoded frames via UDP loopback
+	pcmPipe io.ReadCloser  // raw PCM from GStreamer (ALAC verbatim fallback only)
 	cancel  context.CancelFunc
 	waitCh  chan struct{}
 	waitErr error
@@ -65,14 +194,16 @@ type AudioCapture struct {
 }
 
 // StartAudioCapture launches a pipeline that captures system audio (monitor source)
-// and encodes it. For ALAC (default): prefers GStreamer's avenc_alac and sends
-// one encoded frame per UDP datagram over loopback. If avenc_alac is unavailable,
-// it falls back to local verbatim ALAC encoding in Go. For AAC-ELD: uses
-// aaceld-enc helper via UDP.
-func StartAudioCapture(ctx context.Context) (*AudioCapture, error) {
+// and encodes it using the negotiated session codec. For ALAC: prefers an
+// external alac-enc helper when available, can be forced to avenc_alac via
+// ALAC_ENCODER=avenc, and falls back to local verbatim ALAC encoding in Go.
+// For AAC-ELD: uses aaceld-enc helper via UDP.
+func StartAudioCapture(ctx context.Context, codec AudioCodec) (*AudioCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
-	codec := DefaultAudioCodec()
+	if codec != AudioCodecALAC && codec != AudioCodecAACELD {
+		codec = DefaultAudioCodec()
+	}
 
 	// Detect audio source
 	var srcArgs []string
@@ -116,7 +247,68 @@ func StartAudioCapture(ctx context.Context) (*AudioCapture, error) {
 	}
 
 	if codec == AudioCodecALAC {
-		if os.Getenv("ALAC_VERBATIM") == "" && exec.Command("gst-inspect-1.0", "avenc_alac").Run() == nil {
+		mode, alacEnc, err := resolveALACCaptureMode()
+		if err != nil {
+			udpConn.Close()
+			cancel()
+			return nil, err
+		}
+
+		switch mode {
+		case alacCaptureHelper:
+			gstArgs := []string{"--quiet"}
+			gstArgs = append(gstArgs, srcArgs...)
+			gstArgs = append(gstArgs,
+				"!", "audioconvert",
+				"!", "audioresample",
+				"!", "audio/x-raw,rate=44100,channels=2,format=S16LE",
+				"!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+				"!", "fdsink", "fd=1", "sync=false", "async=false",
+			)
+			dbg("[AUDIO] using ALAC encoder helper: %s", alacEnc)
+			dbg("[AUDIO] ALAC helper pipeline: gst-launch-1.0 %s", strings.Join(gstArgs, " "))
+
+			gstCmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
+			gstStdout, err := gstCmd.StdoutPipe()
+			if err != nil {
+				udpConn.Close()
+				cancel()
+				return nil, fmt.Errorf("gst stdout pipe: %w", err)
+			}
+			gstStderr, _ := gstCmd.StderrPipe()
+
+			encCmd := exec.CommandContext(captureCtx, alacEnc, fmt.Sprintf("%d", udpPort))
+			encCmd.Stdin = gstStdout
+			encStderr, _ := encCmd.StderrPipe()
+
+			if err := gstCmd.Start(); err != nil {
+				udpConn.Close()
+				cancel()
+				return nil, fmt.Errorf("start ALAC gst pipeline: %w", err)
+			}
+			go logStderr("AUDIO-GST", gstStderr)
+
+			if err := encCmd.Start(); err != nil {
+				gstCmd.Process.Kill()
+				udpConn.Close()
+				cancel()
+				return nil, fmt.Errorf("start alac-enc: %w", err)
+			}
+			go logStderr("AUDIO-ENC", encStderr)
+
+			ac.gstCmd = gstCmd
+			ac.encCmd = encCmd
+			go func() {
+				gstCmd.Wait()
+				ac.waitErr = encCmd.Wait()
+				close(ac.waitCh)
+			}()
+		case alacCaptureAVEnc:
+			if exec.Command("gst-inspect-1.0", "avenc_alac").Run() != nil {
+				udpConn.Close()
+				cancel()
+				return nil, fmt.Errorf("ALAC_ENCODER=avenc requested but avenc_alac is unavailable")
+			}
 			gstArgs := []string{"--quiet"}
 			gstArgs = append(gstArgs, srcArgs...)
 			gstArgs = append(gstArgs,
@@ -127,7 +319,7 @@ func StartAudioCapture(ctx context.Context) (*AudioCapture, error) {
 				"!", "avenc_alac", "frame-size=352", "max-samples=352",
 				"!", "udpsink", "host=127.0.0.1", fmt.Sprintf("port=%d", udpPort), "sync=false", "async=false",
 			)
-			dbg("[AUDIO] ALAC encoder pipeline: gst-launch-1.0 %s", strings.Join(gstArgs, " "))
+			dbg("[AUDIO] ALAC avenc override pipeline: gst-launch-1.0 %s", strings.Join(gstArgs, " "))
 
 			gstCmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 			gstStderr, _ := gstCmd.StderrPipe()
@@ -144,8 +336,8 @@ func StartAudioCapture(ctx context.Context) (*AudioCapture, error) {
 				ac.waitErr = gstCmd.Wait()
 				close(ac.waitCh)
 			}()
-		} else {
-			// Fallback: ALAC verbatim (uncompressed) encoding done in Go.
+		default:
+			// Fallback: local verbatim ALAC encoding in Go.
 			gstArgs := []string{"--quiet"}
 			gstArgs = append(gstArgs, srcArgs...)
 			gstArgs = append(gstArgs,
@@ -155,7 +347,7 @@ func StartAudioCapture(ctx context.Context) (*AudioCapture, error) {
 				"!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 				"!", "fdsink", "fd=1", "sync=false", "async=false",
 			)
-			dbg("[AUDIO] ALAC verbatim fallback pipeline: gst-launch-1.0 %s", strings.Join(gstArgs, " "))
+			dbg("[AUDIO] ALAC verbatim pipeline: gst-launch-1.0 %s", strings.Join(gstArgs, " "))
 
 			gstCmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
 			gstStdout, err := gstCmd.StdoutPipe()
@@ -242,7 +434,7 @@ func StartAudioCapture(ctx context.Context) (*AudioCapture, error) {
 }
 
 // ReadFrame reads a single encoded audio frame.
-// For UDP-backed encoders (AAC-ELD and ALAC via avenc_alac), it reads one
+// For UDP-backed encoders (AAC-ELD and ALAC via helper/avenc), it reads one
 // loopback UDP datagram. For ALAC verbatim fallback, it reads raw PCM and
 // encodes locally in Go.
 func (ac *AudioCapture) ReadFrame(buf []byte) (int, error) {
@@ -408,26 +600,37 @@ func (w *bitWriter) flush() int {
 	return w.pos
 }
 
-// findAaceldEnc looks for the aaceld-enc binary next to the running
-// executable, then in the current directory, then in PATH.
-func findAaceldEnc() string {
+// findHelperBinary looks for a helper binary next to the running executable,
+// then in the current directory, then in PATH.
+func findHelperBinary(name string) string {
 	// Next to the running binary
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
-		p := filepath.Join(dir, "aaceld-enc")
+		p := filepath.Join(dir, name)
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
 	// Current directory
-	if _, err := os.Stat("aaceld-enc"); err == nil {
-		return "./aaceld-enc"
+	local := filepath.Join(".", name)
+	if _, err := os.Stat(local); err == nil {
+		return local
 	}
 	// PATH
-	if p, err := exec.LookPath("aaceld-enc"); err == nil {
+	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}
 	return ""
+}
+
+// findAaceldEnc locates the AAC-ELD helper binary.
+func findAaceldEnc() string {
+	return findHelperBinary("aaceld-enc")
+}
+
+// findALACEnc locates the ALAC helper binary.
+func findALACEnc() string {
+	return findHelperBinary("alac-enc")
 }
 
 // detectPulseMonitor finds the default PulseAudio sink's monitor source name.
@@ -446,18 +649,23 @@ func detectPulseMonitor() string {
 
 // AudioStream manages the RTP audio channel to the AirPlay receiver.
 type AudioStream struct {
-	conn           net.PacketConn // local UDP socket for sending audio
-	ctrlConn       net.PacketConn // control port for sync/resend
-	remoteAddr     *net.UDPAddr   // receiver's audio data address
-	ctrlAddr       *net.UDPAddr   // receiver's audio control address
-	rtpTime        uint32
-	ssrc           uint32
-	cipher         cipher.Block // AES-128 for audio encryption (nil = no encryption)
-	aesIV          []byte       // 16-byte IV for AES-CBC
-	ct             byte         // compression type: 2=ALAC, 8=AAC-ELD, 4=AAC-LC
-	spf            uint16       // samples per frame
-	latencySamples uint32       // audio latency in samples (for sync packets)
-	mu             sync.Mutex
+	conn            net.PacketConn // local UDP socket for sending audio
+	ctrlConn        net.PacketConn // control port for sync/resend
+	remoteAddr      *net.UDPAddr   // receiver's audio data address
+	ctrlAddr        *net.UDPAddr   // receiver's audio control address
+	rtpTime         uint32
+	ssrc            uint32
+	cipher          cipher.Block // AES-128 for audio encryption (nil = no encryption)
+	aesIV           []byte       // 16-byte IV for AES-CBC
+	chachaCipher    cipher.AEAD  // ChaCha20-Poly1305 for modern Apple receivers
+	securityMode    audioSecurityMode
+	chachaNonce     uint64
+	chachaNonceMode audioChaChaNonceMode
+	chachaAADMode   audioChaChaAADMode
+	ct              byte   // compression type: 2=ALAC, 8=AAC-ELD, 4=AAC-LC
+	spf             uint16 // samples per frame
+	latencySamples  uint32 // audio latency in samples (for sync packets)
+	mu              sync.Mutex
 }
 
 // setupAudioStream creates the audio RTP stream state.
@@ -467,7 +675,7 @@ type AudioStream struct {
 //
 // Both pcaps show senders allocate 3 consecutive ports: timing(N), control(N+1), data(N+2).
 // The Apple TV classifies incoming traffic by source port.
-func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV []byte, ct byte, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
+func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
 	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.host, fmt.Sprintf("%d", dataPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve audio remote: %w", err)
@@ -490,6 +698,15 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 		}
 	}
 
+	var aead cipher.AEAD
+	if securityMode == audioSecurityChaCha {
+		aead, err = newAudioChaCha64AEAD(chachaKey)
+		if err != nil {
+			dataConn.Close()
+			return nil, fmt.Errorf("audio chacha cipher: %w", err)
+		}
+	}
+
 	// Samples per frame depends on codec
 	spf := uint16(1024) // AAC-LC default
 	var latencySamples uint32
@@ -506,31 +723,115 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 	// Apple senders use SSRC=0 for mirroring audio RTP.
 
 	as := &AudioStream{
-		conn:           dataConn, // separate socket for audio data
-		ctrlConn:       ctrlConn, // declared control port for sync
-		remoteAddr:     remoteAddr,
-		ctrlAddr:       ctrlAddr,
-		rtpTime:        0,
-		ssrc:           0,
-		cipher:         block,
-		aesIV:          aesIV,
-		ct:             ct,
-		spf:            spf,
-		latencySamples: latencySamples,
+		conn:            dataConn, // separate socket for audio data
+		ctrlConn:        ctrlConn, // declared control port for sync
+		remoteAddr:      remoteAddr,
+		ctrlAddr:        ctrlAddr,
+		rtpTime:         0,
+		ssrc:            0,
+		cipher:          block,
+		aesIV:           aesIV,
+		chachaCipher:    aead,
+		securityMode:    securityMode,
+		chachaNonceMode: defaultAudioChaChaNonceMode(),
+		chachaAADMode:   defaultAudioChaChaAADMode(),
+		ct:              ct,
+		spf:             spf,
+		latencySamples:  latencySamples,
 	}
 
-	dbg("[AUDIO] stream setup: dataPort=%d controlPort=%d ct=%d spf=%d ssrc=0x%08x encrypted=%v",
-		dataPort, controlPort, ct, spf, as.ssrc, block != nil)
+	securityName := "none"
+	switch {
+	case aead != nil:
+		securityName = "chacha20-poly1305-64x64"
+	case block != nil:
+		securityName = "aes-128-cbc"
+	}
+
+	dbg("[AUDIO] stream setup: dataPort=%d controlPort=%d ct=%d spf=%d ssrc=0x%08x security=%s",
+		dataPort, controlPort, ct, spf, as.ssrc, securityName)
+	if aead != nil {
+		dbg("[AUDIO] chacha config: nonce=%s aad=%s",
+			as.chachaNonceMode.String(), as.chachaAADMode.String())
+	}
 	dbg("[AUDIO] local ports: data=%d (→remote %d) ctrl=%d (→remote %d)",
 		dataLocalPort, dataPort, ctrlLocalPort, controlPort)
 
 	return as, nil
 }
 
+func (m audioChaChaNonceMode) String() string {
+	switch m {
+	case audioChaChaNonceSeq:
+		return "seq"
+	case audioChaChaNonceSeqZeroBased:
+		return "seq0"
+	case audioChaChaNonceRTP:
+		return "rtp"
+	default:
+		return "counter"
+	}
+}
+
+func (m audioChaChaAADMode) String() string {
+	switch m {
+	case audioChaChaAADRTPHeader:
+		return "rtp-header"
+	case audioChaChaAADTimestampSSRC:
+		return "timestamp-ssrc"
+	default:
+		return "none"
+	}
+}
+
+func (as *AudioStream) nextAudioChaChaNonce(seq uint16, rtpTime uint32, reuse *uint64) (uint64, [audioChaChaNonceSize]byte) {
+	var value uint64
+	if reuse != nil {
+		value = *reuse
+	} else {
+		switch as.chachaNonceMode {
+		case audioChaChaNonceSeq:
+			value = uint64(seq)
+		case audioChaChaNonceSeqZeroBased:
+			if seq > 0 {
+				value = uint64(seq - 1)
+			}
+		case audioChaChaNonceRTP:
+			value = uint64(rtpTime)
+		default:
+			value = as.chachaNonce
+			as.chachaNonce++
+		}
+	}
+	var nonce [audioChaChaNonceSize]byte
+	binary.LittleEndian.PutUint64(nonce[:], value)
+	return value, nonce
+}
+
+func (as *AudioStream) audioChaChaAAD(header []byte, rtpTime uint32) []byte {
+	switch as.chachaAADMode {
+	case audioChaChaAADRTPHeader:
+		return header
+	case audioChaChaAADTimestampSSRC:
+		// The receiver reconstructs the AAD from the RTP timestamp and SSRC bytes
+		// in network order, so use the on-wire header bytes directly.
+		aad := make([]byte, 8)
+		copy(aad, header[4:12])
+		return aad
+	default:
+		return nil
+	}
+}
+
 // sendAudioPacketWithSeq sends a single RTP audio packet with explicit seq and RTP timestamp.
 // The caller manages sequence numbers (frame-based, not packet-based).
 // payload is the raw encoded frame data.
 func (as *AudioStream) sendAudioPacketWithSeq(payload []byte, rtpTime uint32, seq uint16) error {
+	_, err := as.sendAudioPacketWithSeqAndNonce(payload, rtpTime, seq, nil)
+	return err
+}
+
+func (as *AudioStream) sendAudioPacketWithSeqAndNonce(payload []byte, rtpTime uint32, seq uint16, reuseNonce *uint64) (uint64, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 
@@ -542,18 +843,35 @@ func (as *AudioStream) sendAudioPacketWithSeq(payload []byte, rtpTime uint32, se
 	binary.BigEndian.PutUint32(header[4:8], rtpTime)
 	binary.BigEndian.PutUint32(header[8:12], as.ssrc)
 
-	// Encrypt payload with AES-128-CBC if cipher is set
-	encrypted := payload
-	if as.cipher != nil && as.aesIV != nil {
-		encrypted = aesEncryptAudioPayload(as.cipher, as.aesIV, payload)
+	// Encrypt payload according to the negotiated audio security mode.
+	packetPayload := payload
+	usedNonce := uint64(0)
+	if as.chachaCipher != nil {
+		var nonce [audioChaChaNonceSize]byte
+		usedNonce, nonce = as.nextAudioChaChaNonce(seq, rtpTime, reuseNonce)
+		aad := as.audioChaChaAAD(header, rtpTime)
+		sealed := as.chachaCipher.Seal(nil, nonce[:], payload, aad)
+		packetPayload = make([]byte, len(sealed)+8)
+		copy(packetPayload, sealed)
+		binary.LittleEndian.PutUint64(packetPayload[len(sealed):], usedNonce)
+		if seq <= 3 {
+			tagStart := len(sealed) - as.chachaCipher.Overhead()
+			if tagStart < 0 {
+				tagStart = 0
+			}
+			dbg("[AUDIO-CHACHA] seq=%d nonce=%d aad=%s plain=%d sealed=%d tag=%02x tail=%02x",
+				seq, usedNonce, as.chachaAADMode.String(), len(payload), len(sealed), sealed[tagStart:], packetPayload[len(sealed):])
+		}
+	} else if as.cipher != nil && as.aesIV != nil {
+		packetPayload = aesEncryptAudioPayload(as.cipher, as.aesIV, payload)
 
 		// Self-decrypt check on first packet to verify key/IV correctness
 		if seq == 1 {
 			blockSize := as.cipher.BlockSize()
-			encLen := (len(encrypted) / blockSize) * blockSize
+			encLen := (len(packetPayload) / blockSize) * blockSize
 			if encLen > 0 {
-				decrypted := make([]byte, len(encrypted))
-				copy(decrypted, encrypted)
+				decrypted := make([]byte, len(packetPayload))
+				copy(decrypted, packetPayload)
 				dec := cipher.NewCBCDecrypter(as.cipher, as.aesIV)
 				dec.CryptBlocks(decrypted[:encLen], decrypted[:encLen])
 				match := true
@@ -565,27 +883,27 @@ func (as *AudioStream) sendAudioPacketWithSeq(payload []byte, rtpTime uint32, se
 				}
 				dbg("[AUDIO] *** SELF-DECRYPT CHECK: match=%v", match)
 				dbg("[AUDIO] *** plaintext first 16: %02x", payload[:min(16, len(payload))])
-				dbg("[AUDIO] *** encrypted first 16: %02x", encrypted[:min(16, len(encrypted))])
+				dbg("[AUDIO] *** encrypted first 16: %02x", packetPayload[:min(16, len(packetPayload))])
 				dbg("[AUDIO] *** decrypted first 16: %02x", decrypted[:min(16, len(decrypted))])
 				dbg("[AUDIO] *** IV: %02x", as.aesIV)
 			}
 		}
 	}
 
-	packet := make([]byte, 12+len(encrypted))
+	packet := make([]byte, 12+len(packetPayload))
 	copy(packet[:12], header)
-	copy(packet[12:], encrypted)
+	copy(packet[12:], packetPayload)
 
 	_, err := as.conn.WriteTo(packet, as.remoteAddr)
 	if err != nil {
-		return err
+		return usedNonce, err
 	}
 
 	// Track the latest RTP time for sync packets (only update forward)
 	if rtpTime >= as.rtpTime {
 		as.rtpTime = rtpTime
 	}
-	return nil
+	return usedNonce, nil
 }
 
 // aesEncryptAudioPayload encrypts audio data using AES-128-CBC.
@@ -749,15 +1067,18 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 		}
 	}()
 
-	// FEC pattern matching real Apple senders (from pcap analysis):
-	// 1. Initial burst of 8 frames sent immediately
-	// 2. Then for each new frame: send retransmit of frame (N-8), then send new frame
-	// Retransmits reuse the ORIGINAL seq number (frame-based, not packet-based).
-	// Seq numbers are 1-based (first frame = seq 1).
-	noFEC := os.Getenv("AUDIO_NO_FEC") != ""
-	if noFEC {
+	// Redundant audio is kept for legacy/plaintext sessions, but modern
+	// ChaCha-encrypted receivers decode more reliably when each frame is sent once.
+	// AUDIO_FORCE_FEC=1 restores the older burst/retransmit pattern for comparison.
+	useFEC := useAudioFEC(audioStream.chachaCipher != nil)
+	switch {
+	case os.Getenv("AUDIO_NO_FEC") != "":
 		dbg("[AUDIO] FEC disabled (AUDIO_NO_FEC=1): each frame sent once")
-	} else {
+	case os.Getenv("AUDIO_FORCE_FEC") != "":
+		dbg("[AUDIO] FEC enabled (AUDIO_FORCE_FEC=1): burst-8 + interleaved retransmit")
+	case !useFEC:
+		dbg("[AUDIO] FEC disabled for ChaCha-encrypted sessions: each frame sent once")
+	default:
 		dbg("[AUDIO] FEC enabled: burst-8 + interleaved retransmit")
 	}
 
@@ -766,6 +1087,7 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 		payload []byte
 		rtpTime uint32
 		seq     uint16
+		nonce   uint64
 	}
 	var retransmitBuf [retransmitDepth]audioFrame
 	var frameSeq uint16 = 1 // first frame = seq 1
@@ -792,29 +1114,23 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 			continue
 		}
 
-		// Pad payload to 16-byte alignment (matches working pcap where all
-		// encrypted ALAC payloads are multiples of 16 bytes).
-		padded := n
-		if rem := n % 16; rem != 0 {
-			padded = n + (16 - rem)
-		}
-		payload := make([]byte, padded)
+		payload := make([]byte, n)
 		copy(payload, frameBuf[:n])
-		// Trailing pad bytes are zero (silence in ALAC context)
 
 		frameCount++
 
-		if noFEC {
+		if !useFEC {
 			// Single-send: send each frame once
-			if err := audioStream.sendAudioPacketWithSeq(payload, nextRtp, frameSeq); err != nil {
+			if _, err := audioStream.sendAudioPacketWithSeqAndNonce(payload, nextRtp, frameSeq, nil); err != nil {
 				return fmt.Errorf("audio send: %w", err)
 			}
 		} else if !burstDone {
 			// Initial burst phase: send frames immediately, fill retransmit buffer
-			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: nextRtp, seq: frameSeq}
-			if err := audioStream.sendAudioPacketWithSeq(payload, nextRtp, frameSeq); err != nil {
+			nonce, err := audioStream.sendAudioPacketWithSeqAndNonce(payload, nextRtp, frameSeq, nil)
+			if err != nil {
 				return fmt.Errorf("audio send: %w", err)
 			}
+			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: nextRtp, seq: frameSeq, nonce: nonce}
 			retransmitIdx++
 			if retransmitIdx >= retransmitDepth {
 				burstDone = true
@@ -824,15 +1140,16 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 		} else {
 			// Steady state: send retransmit of old frame, then new frame
 			old := retransmitBuf[retransmitIdx]
-			if err := audioStream.sendAudioPacketWithSeq(old.payload, old.rtpTime, old.seq); err != nil {
+			if _, err := audioStream.sendAudioPacketWithSeqAndNonce(old.payload, old.rtpTime, old.seq, &old.nonce); err != nil {
 				return fmt.Errorf("audio retransmit: %w", err)
 			}
 
 			// Store and send new frame
-			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: nextRtp, seq: frameSeq}
-			if err := audioStream.sendAudioPacketWithSeq(payload, nextRtp, frameSeq); err != nil {
+			nonce, err := audioStream.sendAudioPacketWithSeqAndNonce(payload, nextRtp, frameSeq, nil)
+			if err != nil {
 				return fmt.Errorf("audio send: %w", err)
 			}
+			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: nextRtp, seq: frameSeq, nonce: nonce}
 			retransmitIdx = (retransmitIdx + 1) % retransmitDepth
 		}
 
@@ -844,8 +1161,8 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 			if hexStart > 16 {
 				hexStart = 16
 			}
-			dbg("[AUDIO] sent frame %d: seq=%d payload=%d padded=%d rtp=%d hex=%02x",
-				frameCount, frameSeq-1, n, padded, nextRtp-spf, payload[:hexStart])
+			dbg("[AUDIO] sent frame %d: seq=%d payload=%d rtp=%d hex=%02x",
+				frameCount, frameSeq-1, n, nextRtp-spf, payload[:hexStart])
 		}
 	}
 }

@@ -97,26 +97,6 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] playfairDecrypt fpAesKey: %02x", fpAesKey[:])
 	dbg("[FP] m3 first 32 bytes: %02x", c.fpM3[:min(32, len(c.fpM3))])
 
-	// Also try the emulator's FPDecryptKey (version=4) which uses the actual
-	// Apple FP binary with session state from the m2 exchange. If the emulator
-	// produces a different key, the session-specific state matters.
-	emuDecrypted, emuOut, emuRet, emuRc, emuErr := emu.FPDecryptKey(sapCtx, ekey[:])
-	if emuErr != nil {
-		dbg("[FP] FPDecryptKey error: %v", emuErr)
-	} else {
-		dbg("[FP] FPDecryptKey ret=%d rc=%d outLen=%d", emuRet, emuRc, len(emuOut))
-		if len(emuDecrypted) >= 72 {
-			dbg("[FP] FPDecryptKey decrypted ekey first 16: %02x", emuDecrypted[:16])
-			dbg("[FP] FPDecryptKey decrypted ekey [16:32]: %02x", emuDecrypted[16:32])
-			dbg("[FP] FPDecryptKey decrypted ekey [56:72]: %02x", emuDecrypted[56:72])
-			// The AES key might be at a specific offset in the decrypted ekey
-			dbg("[FP] FPDecryptKey full decrypted: %02x", emuDecrypted)
-		}
-		if len(emuOut) > 0 {
-			dbg("[FP] FPDecryptKey output buffer: %02x", emuOut)
-		}
-	}
-
 	// Hash with pair-verify shared secret (ECDH X25519) if available.
 	// The receiver does: SHA-512(fairplay_decrypt(ekey) || ecdh_secret)[:16]
 	finalKey := c.fpAesKey

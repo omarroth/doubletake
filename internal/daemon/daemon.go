@@ -580,7 +580,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	// Start audio capture and streaming if enabled
 	if !d.cfg.NoAudio && session.HasAudio() {
-		audioCapture, audioErr := airplay.StartAudioCapture(ctx)
+		audioCapture, audioErr := airplay.StartAudioCapture(ctx, session.SelectedAudioCodec())
 		if audioErr != nil {
 			log.Printf("[daemon] audio capture failed: %v (continuing without audio)", audioErr)
 		} else {

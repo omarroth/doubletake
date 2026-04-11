@@ -307,7 +307,7 @@ func main() {
 
 	// Start audio capture and streaming if audio is enabled
 	if *audio && session.HasAudio() {
-		audioCapture, err := airplay.StartAudioCapture(ctx)
+		audioCapture, err := airplay.StartAudioCapture(ctx, session.SelectedAudioCodec())
 		if err != nil {
 			log.Printf("warning: audio capture failed: %v (continuing without audio)", err)
 		} else {

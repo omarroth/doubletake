@@ -83,3 +83,17 @@ func TestALACVerbatimEncoding(t *testing.T) {
 	sn := encodeALACVerbatim(silentOut, silentPCM, spf, channels, 16)
 	t.Logf("Silent frame: %d bytes, first 16: %s", sn, hex.EncodeToString(silentOut[:min(16, sn)]))
 }
+
+func TestUseAVEncALACDefaultsToFalse(t *testing.T) {
+	t.Setenv("ALAC_ENCODER", "")
+	if useAVEncALAC() {
+		t.Fatal("expected ALAC verbatim to be the default encoder path")
+	}
+}
+
+func TestUseAVEncALACOverride(t *testing.T) {
+	t.Setenv("ALAC_ENCODER", "avenc")
+	if !useAVEncALAC() {
+		t.Fatal("expected ALAC_ENCODER=avenc to enable the avenc_alac path")
+	}
+}
