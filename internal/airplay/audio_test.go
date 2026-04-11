@@ -42,6 +42,28 @@ func TestAudioCodecFormatIndex(t *testing.T) {
 	}
 }
 
+func TestAudioLatencySamplesForCodec(t *testing.T) {
+	tests := []struct {
+		name     string
+		ct       byte
+		override uint32
+		want     uint32
+	}{
+		{name: "default ALAC", ct: byte(AudioCodecALAC), want: 3750},
+		{name: "default AAC-ELD", ct: byte(AudioCodecAACELD), want: 7497},
+		{name: "override wins", ct: byte(AudioCodecALAC), override: 11025, want: 11025},
+		{name: "unknown codec falls back", ct: 99, want: 7497},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := audioLatencySamplesForCodec(tt.ct, tt.override); got != tt.want {
+				t.Fatalf("audioLatencySamplesForCodec(%d, %d) = %d, want %d", tt.ct, tt.override, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAudioChaCha64AEADRoundTrip(t *testing.T) {
 	key := bytes.Repeat([]byte{0x42}, chacha20poly1305.KeySize)
 	nonce := bytes.Repeat([]byte{0x11}, audioChaChaNonceSize)
