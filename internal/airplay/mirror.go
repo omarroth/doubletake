@@ -349,6 +349,16 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if len(recordBody) > 0 {
 		dbg("[SETUP] RECORD response body: %02x", recordBody)
 	}
+	audioLatencySamples := uint32(0)
+	if value, ok := recordRespHeaders["audio-latency"]; ok {
+		parsed, parseErr := strconv.ParseUint(value, 10, 32)
+		if parseErr != nil {
+			dbg("[SETUP] invalid Audio-Latency header %q: %v", value, parseErr)
+		} else if parsed > 0 {
+			audioLatencySamples = uint32(parsed)
+			dbg("[SETUP] receiver audio latency: %d samples", audioLatencySamples)
+		}
+	}
 
 	// Set volume to maximum (0 dB)
 	volumeBody := []byte("volume: 0.000000\r\n")
@@ -528,7 +538,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Set up audio stream if the receiver provided audio ports
 	if !cfg.NoAudio && audioDataPort > 0 {
 		audioCT := byte(selectedAudioCodec) // ALAC=2, AAC-ELD=8 (matches SETUP descriptor)
-		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioCtrlConn, audioDataConn)
+		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, audioCtrlConn, audioDataConn)
 		if err != nil {
 			audioCtrlConn.Close()
 			audioDataConn.Close()

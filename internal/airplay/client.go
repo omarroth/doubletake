@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -187,7 +188,11 @@ func (c *AirPlayClient) httpRequest(method, path, contentType string, body []byt
 	}
 	dbg("[HTTP] wrote %d bytes to socket, waiting for response...", len(data))
 
-	return c.readHTTPResponse()
+	resp, _, err := c.readHTTPResponse()
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // rawRequest sends a bare RTSP/1.0 request without X-Apple-Session-ID or HAP
@@ -220,7 +225,11 @@ func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte
 		return nil, fmt.Errorf("write request: %w", err)
 	}
 
-	return c.readHTTPResponse()
+	resp, _, err := c.readHTTPResponse()
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // rtspRequest sends an RTSP/1.0 request (used after pairing for mirror setup).
@@ -260,16 +269,16 @@ func (c *AirPlayClient) rtspRequest(method, uri, contentType string, body []byte
 	}
 	dbg("[RTSP] wrote %d bytes to socket, waiting for response...", len(data))
 
-	respBody, err := c.readHTTPResponse()
+	respBody, respHeaders, err := c.readHTTPResponse()
 	if err != nil {
 		return nil, nil, err
 	}
 
 	dbg("[RTSP] <- response body %d bytes", len(respBody))
-	return respBody, nil, nil
+	return respBody, respHeaders, nil
 }
 
-func (c *AirPlayClient) readHTTPResponse() ([]byte, error) {
+func (c *AirPlayClient) readHTTPResponse() ([]byte, map[string]string, error) {
 	c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	defer c.conn.SetReadDeadline(time.Time{})
 
@@ -281,13 +290,13 @@ func (c *AirPlayClient) readHTTPResponse() ([]byte, error) {
 	return c.readPlaintextHTTPResponse()
 }
 
-func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, error) {
+func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, map[string]string, error) {
 	// Read headers byte-by-byte until \r\n\r\n
 	var headerBuf bytes.Buffer
 	oneByte := make([]byte, 1)
 	for {
 		if _, err := io.ReadFull(c.conn, oneByte); err != nil {
-			return nil, fmt.Errorf("read response header (got %d bytes so far: %q): %w", headerBuf.Len(), headerBuf.String(), err)
+			return nil, nil, fmt.Errorf("read response header (got %d bytes so far: %q): %w", headerBuf.Len(), headerBuf.String(), err)
 		}
 		headerBuf.Write(oneByte)
 
@@ -296,13 +305,13 @@ func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, error) {
 			break
 		}
 		if headerBuf.Len() > 16384 {
-			return nil, fmt.Errorf("response header too large")
+			return nil, nil, fmt.Errorf("response header too large")
 		}
 	}
 
 	header := headerBuf.String()
 	dbg("[READ] plaintext response header:\n%s", header)
-	statusCode, contentLength := parseHTTPHeader(header)
+	statusCode, contentLength, headers := parseHTTPHeader(header)
 	dbg("[READ] status=%d content-length=%d", statusCode, contentLength)
 
 	if statusCode < 200 || statusCode >= 300 {
@@ -313,23 +322,23 @@ func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, error) {
 			io.ReadFull(c.conn, errBody)
 		}
 		dbg("[READ] error response body (%d bytes): %s", len(errBody), hex.EncodeToString(errBody))
-		return nil, fmt.Errorf("HTTP %d (body: %s)", statusCode, string(errBody))
+		return nil, headers, fmt.Errorf("HTTP %d (body: %s)", statusCode, string(errBody))
 	}
 
 	if contentLength == 0 {
-		return nil, nil
+		return nil, headers, nil
 	}
 
 	body := make([]byte, contentLength)
 	if _, err := io.ReadFull(c.conn, body); err != nil {
-		return nil, fmt.Errorf("read body (%d/%d bytes): %w", 0, contentLength, err)
+		return nil, headers, fmt.Errorf("read body (%d/%d bytes): %w", 0, contentLength, err)
 	}
 
 	dbg("[READ] plaintext body: %d bytes", len(body))
-	return body, nil
+	return body, headers, nil
 }
 
-func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, error) {
+func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, map[string]string, error) {
 	// Read and decrypt frames, then parse the HTTP response from decrypted data.
 	// We accumulate decrypted data until we have the full response.
 	var decrypted []byte
@@ -344,7 +353,7 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, error) {
 			if len(decrypted) > 0 {
 				dbg("[ENC-READ] partial decrypted data hex: %s", hex.EncodeToString(decrypted))
 			}
-			return nil, fmt.Errorf("read encrypted response frame %d: %w", frameCount, err)
+			return nil, nil, fmt.Errorf("read encrypted response frame %d: %w", frameCount, err)
 		}
 		frameCount++
 		dbg("[ENC-READ] frame %d: %d bytes decrypted", frameCount, len(frame))
@@ -356,7 +365,7 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, error) {
 			break
 		}
 		if len(decrypted) > 16384 {
-			return nil, fmt.Errorf("encrypted response header too large")
+			return nil, nil, fmt.Errorf("encrypted response header too large")
 		}
 	}
 
@@ -365,7 +374,7 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, error) {
 	remaining := decrypted[headerEnd+4:]
 
 	dbg("[ENC-READ] decrypted response header:\n%s", header)
-	statusCode, contentLength := parseHTTPHeader(header)
+	statusCode, contentLength, headers := parseHTTPHeader(header)
 	dbg("[ENC-READ] status=%d content-length=%d remaining=%d", statusCode, contentLength, len(remaining))
 
 	if statusCode < 200 || statusCode >= 300 {
@@ -381,11 +390,11 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, error) {
 			remaining = remaining[:contentLength]
 		}
 		dbg("[ENC-READ] error response body (%d bytes): %s", len(remaining), hex.EncodeToString(remaining))
-		return nil, fmt.Errorf("HTTP %d (body: %s)", statusCode, string(remaining))
+		return nil, headers, fmt.Errorf("HTTP %d (body: %s)", statusCode, string(remaining))
 	}
 
 	if contentLength == 0 {
-		return nil, nil
+		return nil, headers, nil
 	}
 
 	// Read more frames if we don't have the full body yet
@@ -393,25 +402,35 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, error) {
 		frame, err := c.readEncryptedFrame()
 		if err != nil {
 			dbg("[ENC-READ] body frame error (have %d/%d bytes): %v", len(remaining), contentLength, err)
-			return nil, fmt.Errorf("read encrypted body (%d/%d bytes): %w", len(remaining), contentLength, err)
+			return nil, headers, fmt.Errorf("read encrypted body (%d/%d bytes): %w", len(remaining), contentLength, err)
 		}
 		remaining = append(remaining, frame...)
 	}
 
 	dbg("[ENC-READ] complete: %d body bytes in %d+ frames", contentLength, frameCount)
-	return remaining[:contentLength], nil
+	return remaining[:contentLength], headers, nil
 }
 
-func parseHTTPHeader(header string) (statusCode, contentLength int) {
+func parseHTTPHeader(header string) (statusCode, contentLength int, headers map[string]string) {
+	headers = make(map[string]string)
 	fmt.Sscanf(header, "HTTP/1.1 %d", &statusCode)
 	if statusCode == 0 {
 		fmt.Sscanf(header, "RTSP/1.0 %d", &statusCode)
 	}
 
-	for _, line := range bytes.Split([]byte(header), []byte("\r\n")) {
-		l := string(line)
-		if len(l) > 16 && (l[:16] == "Content-Length: " || l[:16] == "content-length: ") {
-			fmt.Sscanf(l[16:], "%d", &contentLength)
+	for _, line := range strings.Split(header, "\r\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		value = strings.TrimSpace(value)
+		if key == "" {
+			continue
+		}
+		headers[key] = value
+		if key == "content-length" {
+			fmt.Sscanf(value, "%d", &contentLength)
 		}
 	}
 	return

@@ -178,6 +178,20 @@ func (c AudioCodec) Info() (ct int64, spf int64, audioFormat int64, latencyMin i
 	}
 }
 
+func audioLatencySamplesForCodec(ct byte, override uint32) uint32 {
+	if override > 0 {
+		return override
+	}
+	switch ct {
+	case byte(AudioCodecALAC):
+		return 3750
+	case byte(AudioCodecAACELD):
+		return 7497
+	default:
+		return 7497
+	}
+}
+
 // AudioCapture manages audio capture via GStreamer's PulseAudio/PipeWire source,
 // encoding to ALAC or AAC-ELD, and receiving raw encoded frames via UDP loopback.
 // UDP datagrams preserve frame boundaries.
@@ -675,7 +689,7 @@ type AudioStream struct {
 //
 // Both pcaps show senders allocate 3 consecutive ports: timing(N), control(N+1), data(N+2).
 // The Apple TV classifies incoming traffic by source port.
-func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
+func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, latencyOverride uint32, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
 	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.host, fmt.Sprintf("%d", dataPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve audio remote: %w", err)
@@ -709,16 +723,12 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 
 	// Samples per frame depends on codec
 	spf := uint16(1024) // AAC-LC default
-	var latencySamples uint32
 	if ct == 2 {
 		spf = 352 // ALAC
-		latencySamples = 3750
 	} else if ct == 8 {
 		spf = 480 // AAC-ELD (aaceld-enc with libfdk-aac)
-		latencySamples = 7497
-	} else {
-		latencySamples = 7497
 	}
+	latencySamples := audioLatencySamplesForCodec(ct, latencyOverride)
 
 	// Apple senders use SSRC=0 for mirroring audio RTP.
 
@@ -753,6 +763,9 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 	if aead != nil {
 		dbg("[AUDIO] chacha config: nonce=%s aad=%s",
 			as.chachaNonceMode.String(), as.chachaAADMode.String())
+	}
+	if latencyOverride > 0 {
+		dbg("[AUDIO] receiver audio latency override: %d samples", latencySamples)
 	}
 	dbg("[AUDIO] local ports: data=%d (→remote %d) ctrl=%d (→remote %d)",
 		dataLocalPort, dataPort, ctrlLocalPort, controlPort)
