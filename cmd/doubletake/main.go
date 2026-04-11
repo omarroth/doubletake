@@ -33,7 +33,7 @@ func main() {
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
-	audio := flag.Bool("audio", false, "Enable audio streaming")
+	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	daemonize := flag.Bool("daemonize", false, "Run as background daemon with Unix socket control interface")
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
@@ -42,7 +42,7 @@ func main() {
 	airplay.DebugMode = *debug
 
 	if *daemonize {
-		runDaemon(*socketPath, *credFile, *credBackend, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, !*audio)
+		runDaemon(*socketPath, *credFile, *credBackend, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio)
 		return
 	}
 
@@ -215,7 +215,7 @@ func main() {
 		Bitrate:   *bitrate,
 		NoEncrypt: *noEncrypt,
 		DirectKey: *directKey,
-		NoAudio:   !*audio,
+		NoAudio:   *noAudio,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {
@@ -226,7 +226,11 @@ func main() {
 
 	var capture *airplay.ScreenCapture
 	if *testMode {
-		log.Println("using synthetic video (videotestsrc) and audio test tone for debugging")
+		if *noAudio {
+			log.Println("using synthetic video (videotestsrc) for debugging")
+		} else {
+			log.Println("using synthetic video (videotestsrc) and audio test tone for debugging")
+		}
 		var err error
 		capture, err = airplay.StartTestCapture(ctx, airplay.CaptureConfig{
 			Width:   *width,
@@ -260,8 +264,8 @@ func main() {
 	}()
 	log.Println("screen capture started")
 
-	// Start audio capture and streaming if audio is enabled
-	if *audio && session.HasAudio() {
+	// Start audio capture and streaming unless disabled.
+	if !*noAudio && session.HasAudio() {
 		audioCapture, err := airplay.StartAudioCapture(ctx, *testMode)
 		if err != nil {
 			log.Printf("warning: audio capture failed: %v (continuing without audio)", err)
@@ -274,7 +278,7 @@ func main() {
 			}()
 			log.Println("audio capture started")
 		}
-	} else if *audio {
+	} else if !*noAudio {
 		log.Println("audio disabled (receiver did not provide audio ports)")
 	}
 

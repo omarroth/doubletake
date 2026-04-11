@@ -128,16 +128,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		}()
 	}()
 
-	// ---- PCAP-matched SETUP sequence ----
-	// Real Apple senders (AirMyPC) use this ordering:
-	//   1. SETUP audio (type=96) with full session context + ekey/eiv/et=32 + timingPort
-	//   2. RECORD
-	//   3. SET_PARAMETER volume (twice)
-	//   4. SETUP video (type=110) — separate streamConnectionID
-	//
-	// The first SETUP creates the session and initializes audio. The Apple TV
-	// returns eventPort + audio ports from this request. Video is attached later
-	// via a second SETUP with the same sessionUUID but different streamConnectionID.
+	// ---- Working SETUP sequence ----
+	// The receiver expects the audio session to be created first, then the video
+	// stream to be attached to that session, and only then does it accept RECORD.
+	// The practical ordering for current Apple receivers is:
+	//   1. SETUP audio (type=96) with full session context + timingPort
+	//   2. SETUP video (type=110) with a different streamConnectionID
+	//   3. RECORD on the audio URI
+	//   4. SET_PARAMETER volume (twice)
 
 	audioStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	selectedAudioCodec := AudioCodecALAC
@@ -145,26 +143,25 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Audio SETUP, RECORD, and SET_PARAMETER all use the audio URI.
 	// Video SETUP uses a separate URI with its own streamConnectionID.
 	audioURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, audioStreamConnectionID)
+	controlURI := audioURI
 	audioMode := selectAudioSecurityMode(c.encrypted)
 	var audioKey, audioIV, audioChaChaKey []byte
-	if !cfg.NoAudio {
-		if audioMode == audioSecurityChaCha {
-			var err error
-			audioChaChaKey, err = generateAudioChaChaKey(rand.Reader)
-			if err != nil {
-				dbg("[SETUP] audio encryption: chacha key generation failed: %v; falling back to AES-CBC", err)
-				audioMode = audioSecurityLegacyAES
-			} else {
-				dbg("[SETUP] audio encryption: ChaCha20-Poly1305 direct stream key (streamConnectionID=%d, shk=%d bytes)", audioStreamConnectionID, len(audioChaChaKey))
-			}
+	if audioMode == audioSecurityChaCha {
+		var err error
+		audioChaChaKey, err = generateAudioChaChaKey(rand.Reader)
+		if err != nil {
+			dbg("[SETUP] audio encryption: chacha key generation failed: %v; falling back to AES-CBC", err)
+			audioMode = audioSecurityLegacyAES
+		} else {
+			dbg("[SETUP] audio encryption: ChaCha20-Poly1305 direct stream key (streamConnectionID=%d, shk=%d bytes)", audioStreamConnectionID, len(audioChaChaKey))
 		}
-		if audioMode == audioSecurityLegacyAES && c.fpKey != nil && c.fpIV != nil {
-			audioKey = c.fpKey
-			audioIV = c.fpIV
-			dbg("[SETUP] audio encryption: AES-128-CBC (fpKey/hashed %d bytes)", len(audioKey))
-		} else if audioMode == audioSecurityLegacyAES {
-			dbg("[SETUP] audio encryption: disabled (no FairPlay key available)")
-		}
+	}
+	if audioMode == audioSecurityLegacyAES && c.fpKey != nil && c.fpIV != nil {
+		audioKey = c.fpKey
+		audioIV = c.fpIV
+		dbg("[SETUP] audio encryption: AES-128-CBC (fpKey/hashed %d bytes)", len(audioKey))
+	} else if audioMode == audioSecurityLegacyAES {
+		dbg("[SETUP] audio encryption: disabled (no FairPlay key available)")
 	}
 
 	// ---- Phase 1: SETUP audio stream (creates session) ----
@@ -173,187 +170,134 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	var receiverEventPort int
 	var receiverEventConn net.Conn
 
-	if !cfg.NoAudio {
-		audioControlLPort := audioCtrlConn.LocalAddr().(*net.UDPAddr).Port
+	audioControlLPort := audioCtrlConn.LocalAddr().(*net.UDPAddr).Port
 
-		audioCT, audioSPF, audioFmt, latMin, latMax, _ := selectedAudioCodec.Info()
-		audioFormatIndex := selectedAudioCodec.AudioFormatIndex()
-		audioRedundant := int64(0)
-		if useAudioFEC(audioMode == audioSecurityChaCha) {
-			audioRedundant = 2
-		}
-		disableRetransmits := audioRedundant == 0
+	audioCT, audioSPF, audioFmt, latMin, latMax, _ := selectedAudioCodec.Info()
+	audioFormatIndex := selectedAudioCodec.AudioFormatIndex()
+	audioRedundant := int64(0)
+	if useAudioFEC(audioMode == audioSecurityChaCha) {
+		audioRedundant = 2
+	}
+	disableRetransmits := audioRedundant == 0
 
-		audioStreamDesc := map[string]interface{}{
-			"type":               int64(96),
-			"streamConnectionID": audioStreamConnectionID,
-			"ct":                 audioCT,
-			"spf":                audioSPF,
-			"sr":                 int64(44100),
-			"audioFormat":        audioFmt,
-			"audioFormatIndex":   audioFormatIndex,
-			"controlPort":        int64(audioControlLPort),
-			"audioMode":          "default",
-			"usingScreen":        true,
-			"latencyMin":         latMin,
-			"latencyMax":         latMax,
-			"redundantAudio":     audioRedundant,
-		}
-		if disableRetransmits {
-			audioStreamDesc["disableRetransmits"] = true
-		}
+	audioStreamDesc := map[string]interface{}{
+		"type":               int64(96),
+		"streamConnectionID": audioStreamConnectionID,
+		"ct":                 audioCT,
+		"spf":                audioSPF,
+		"sr":                 int64(44100),
+		"audioFormat":        audioFmt,
+		"audioFormatIndex":   audioFormatIndex,
+		"controlPort":        int64(audioControlLPort),
+		"audioMode":          "default",
+		"usingScreen":        true,
+		"latencyMin":         latMin,
+		"latencyMax":         latMax,
+		"redundantAudio":     audioRedundant,
+	}
+	if disableRetransmits {
+		audioStreamDesc["disableRetransmits"] = true
+	}
 
-		audioSetupPlist := map[string]interface{}{
-			"deviceID":       clientDeviceID,
-			"macAddress":     clientDeviceID,
-			"sessionUUID":    sessionUUID,
-			"sourceVersion":  "280.33",
-			"timingProtocol": "NTP",
-			"timingPort":     int64(timingPort),
-			"osBuildVersion": "13F69",
-			"model":          "Linux",
-			"name":           "Linux",
-			"streams":        []interface{}{audioStreamDesc},
-		}
+	audioSetupPlist := map[string]interface{}{
+		"deviceID":       clientDeviceID,
+		"macAddress":     clientDeviceID,
+		"sessionUUID":    sessionUUID,
+		"sourceVersion":  "280.33",
+		"timingProtocol": "NTP",
+		"timingPort":     int64(timingPort),
+		"osBuildVersion": "13F69",
+		"model":          "Linux",
+		"name":           "Linux",
+		"streams":        []interface{}{audioStreamDesc},
+	}
 
-		// Modern HAP receivers look for shk on the audio stream descriptor.
-		if audioMode == audioSecurityChaCha && len(audioChaChaKey) == 32 {
-			audioStreamDesc["shk"] = audioChaChaKey
-			audioStreamDesc["isMedia"] = true
-			audioStreamDesc["supportsDynamicStreamID"] = true
-			audioStreamDesc["streamConnections"] = map[string]interface{}{
-				"streamConnectionTypeRTP": map[string]interface{}{
-					"streamConnectionKeyUseStreamEncryptionKey": true,
-				},
-				"streamConnectionTypeRTCP": map[string]interface{}{
-					"streamConnectionKeyPort": int64(audioControlLPort),
-				},
-			}
-			dbg("[SETUP] audio stream descriptor includes shk (%d bytes)", len(audioChaChaKey))
-		} else if c.FpEkey != nil && c.fpIV != nil {
-			audioSetupPlist["et"] = int64(32)
-			audioSetupPlist["ekey"] = c.FpEkey
-			audioSetupPlist["eiv"] = c.fpIV
-			dbg("[SETUP] FairPlay ekey=%d bytes, eiv=%d bytes, et=32", len(c.FpEkey), len(c.fpIV))
-		} else {
-			dbg("[SETUP] WARNING: no FairPlay ekey/eiv — audio will likely not work")
+	// Modern HAP receivers look for shk on the audio stream descriptor.
+	if audioMode == audioSecurityChaCha && len(audioChaChaKey) == 32 {
+		audioStreamDesc["shk"] = audioChaChaKey
+		audioStreamDesc["isMedia"] = true
+		audioStreamDesc["supportsDynamicStreamID"] = true
+		audioStreamDesc["streamConnections"] = map[string]interface{}{
+			"streamConnectionTypeRTP": map[string]interface{}{
+				"streamConnectionKeyUseStreamEncryptionKey": true,
+			},
+			"streamConnectionTypeRTCP": map[string]interface{}{
+				"streamConnectionKeyPort": int64(audioControlLPort),
+			},
 		}
-
-		dbg("[SETUP] phase 1 (audio+session): ct=%d spf=%d audioFormat=0x%x controlPort=%d", audioCT, audioSPF, audioFmt, audioControlLPort)
-
-		audioSetupBody, err2 := plist.Marshal(audioSetupPlist, plist.BinaryFormat)
-		if err2 != nil {
-			audioCtrlConn.Close()
-			audioDataConn.Close()
-			return nil, fmt.Errorf("marshal audio setup: %w", err2)
-		}
-
-		audioRespBody, _, err2 := c.rtspRequest("SETUP", audioURI, "application/x-apple-binary-plist", audioSetupBody, nil)
-		if err2 != nil {
-			audioCtrlConn.Close()
-			audioDataConn.Close()
-			return nil, fmt.Errorf("SETUP phase 1 (audio): %w", err2)
-		}
-
-		var audioResp map[string]interface{}
-		if _, err2 := plist.Unmarshal(audioRespBody, &audioResp); err2 != nil {
-			audioCtrlConn.Close()
-			audioDataConn.Close()
-			return nil, fmt.Errorf("unmarshal audio setup response: %w", err2)
-		}
-		dbg("[SETUP] phase 1 response: %+v", audioResp)
-
-		// Log timing port from receiver if present
-		if tp, ok := audioResp["timingPort"]; ok {
-			dbg("[SETUP] Apple TV timingPort: %v", tp)
-		}
-		// Check for any audio-specific parameters
-		for k, v := range audioResp {
-			if k != "streams" && k != "eventPort" {
-				dbg("[SETUP] response field: %s=%v", k, v)
-			}
-		}
-
-		// Extract event port from audio SETUP response
-		if ep, ok := audioResp["eventPort"]; ok {
-			switch v := ep.(type) {
-			case uint64:
-				receiverEventPort = int(v)
-			case int64:
-				receiverEventPort = int(v)
-			case float64:
-				receiverEventPort = int(v)
-			}
-		}
-
-		// Extract audio ports
-		if streams, ok := audioResp["streams"].([]interface{}); ok {
-			for _, s := range streams {
-				stream, ok := s.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				streamType := plistInt(stream["type"])
-				if streamType == 96 {
-					audioDataPort, audioControlPort = plistStreamPorts(stream)
-					dbg("[SETUP] audio stream: dataPort=%d controlPort=%d", audioDataPort, audioControlPort)
-				}
-			}
-		}
+		dbg("[SETUP] audio stream descriptor includes shk (%d bytes)", len(audioChaChaKey))
+	} else if c.FpEkey != nil && c.fpIV != nil {
+		audioSetupPlist["et"] = int64(32)
+		audioSetupPlist["ekey"] = c.FpEkey
+		audioSetupPlist["eiv"] = c.fpIV
+		dbg("[SETUP] FairPlay ekey=%d bytes, eiv=%d bytes, et=32", len(c.FpEkey), len(c.fpIV))
 	} else {
-		// Audio disabled — still need a session SETUP (video-only)
+		dbg("[SETUP] WARNING: no FairPlay ekey/eiv — audio will likely not work")
+	}
+
+	dbg("[SETUP] phase 1 (audio+session): ct=%d spf=%d audioFormat=0x%x controlPort=%d", audioCT, audioSPF, audioFmt, audioControlLPort)
+
+	audioSetupBody, err2 := plist.Marshal(audioSetupPlist, plist.BinaryFormat)
+	if err2 != nil {
 		audioCtrlConn.Close()
 		audioDataConn.Close()
+		return nil, fmt.Errorf("marshal audio setup: %w", err2)
 	}
 
-	// Connect to receiver event port if available
-	if receiverEventPort > 0 {
-		eventAddr := net.JoinHostPort(c.host, strconv.Itoa(receiverEventPort))
-		receiverEventConn, err = net.DialTimeout("tcp", eventAddr, 3*time.Second)
-		if err != nil {
-			dbg("[EVENT] connect to receiver event port %s failed: %v", eventAddr, err)
-		} else {
-			dbg("[EVENT] connected to receiver event port %s", eventAddr)
+	audioRespBody, _, err2 := c.rtspRequest("SETUP", audioURI, "application/x-apple-binary-plist", audioSetupBody, nil)
+	if err2 != nil {
+		audioCtrlConn.Close()
+		audioDataConn.Close()
+		return nil, fmt.Errorf("SETUP phase 1 (audio): %w", err2)
+	}
+
+	var audioResp map[string]interface{}
+	if _, err2 := plist.Unmarshal(audioRespBody, &audioResp); err2 != nil {
+		audioCtrlConn.Close()
+		audioDataConn.Close()
+		return nil, fmt.Errorf("unmarshal audio setup response: %w", err2)
+	}
+	dbg("[SETUP] phase 1 response: %+v", audioResp)
+
+	// Log timing port from receiver if present
+	if tp, ok := audioResp["timingPort"]; ok {
+		dbg("[SETUP] Apple TV timingPort: %v", tp)
+	}
+	// Check for any audio-specific parameters
+	for k, v := range audioResp {
+		if k != "streams" && k != "eventPort" {
+			dbg("[SETUP] response field: %s=%v", k, v)
 		}
 	}
 
-	// ---- RECORD to start the session ----
-	recordHeaders := map[string]string{
-		"Session":  sessionUUID,
-		"Range":    "npt=0-",
-		"RTP-Info": "seq=0;rtptime=0",
+	// Extract event port from audio SETUP response
+	if ep, ok := audioResp["eventPort"]; ok {
+		switch v := ep.(type) {
+		case uint64:
+			receiverEventPort = int(v)
+		case int64:
+			receiverEventPort = int(v)
+		case float64:
+			receiverEventPort = int(v)
+		}
 	}
-	recordBody, recordRespHeaders, err := c.rtspRequest("RECORD", audioURI, "", nil, recordHeaders)
-	if err != nil {
-		return nil, fmt.Errorf("RECORD: %w", err)
+
+	// Extract audio ports
+	if streams, ok := audioResp["streams"].([]interface{}); ok {
+		for _, s := range streams {
+			stream, ok := s.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			streamType := plistInt(stream["type"])
+			if streamType == 96 {
+				audioDataPort, audioControlPort = plistStreamPorts(stream)
+				dbg("[SETUP] audio stream: dataPort=%d controlPort=%d", audioDataPort, audioControlPort)
+			}
+		}
 	}
-	if recordRespHeaders != nil {
-		dbg("[SETUP] RECORD response headers: %+v", recordRespHeaders)
-	}
-	if len(recordBody) > 0 {
-		dbg("[SETUP] RECORD response body: %02x", recordBody)
-	}
+
 	audioLatencySamples := uint32(0)
-	if value, ok := recordRespHeaders["audio-latency"]; ok {
-		parsed, parseErr := strconv.ParseUint(value, 10, 32)
-		if parseErr != nil {
-			dbg("[SETUP] invalid Audio-Latency header %q: %v", value, parseErr)
-		} else if parsed > 0 {
-			audioLatencySamples = uint32(parsed)
-			dbg("[SETUP] receiver audio latency: %d samples", audioLatencySamples)
-		}
-	}
-
-	// Set volume to maximum (0 dB)
-	volumeBody := []byte("volume: 0.000000\r\n")
-	_, _, err = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
-	if err != nil {
-		dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)
-	} else {
-		dbg("[SETUP] SET_PARAMETER volume=0 (max) sent")
-	}
-	// Send volume twice (pcap shows real senders do this)
-	_, _, _ = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
 
 	// ---- Phase 2: SETUP video stream ----
 	// Video SETUP uses the same sessionUUID but a different streamConnectionID.
@@ -408,6 +352,29 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		return nil, fmt.Errorf("unmarshal video setup response: %w", err)
 	}
 	dbg("[SETUP] phase 2 response: %+v", videoResp)
+	if receiverEventPort == 0 {
+		if ep, ok := videoResp["eventPort"]; ok {
+			switch v := ep.(type) {
+			case uint64:
+				receiverEventPort = int(v)
+			case int64:
+				receiverEventPort = int(v)
+			case float64:
+				receiverEventPort = int(v)
+			}
+		}
+	}
+
+	// Connect to receiver event port if available.
+	if receiverEventPort > 0 {
+		eventAddr := net.JoinHostPort(c.host, strconv.Itoa(receiverEventPort))
+		receiverEventConn, err = net.DialTimeout("tcp", eventAddr, 3*time.Second)
+		if err != nil {
+			dbg("[EVENT] connect to receiver event port %s failed: %v", eventAddr, err)
+		} else {
+			dbg("[EVENT] connected to receiver event port %s", eventAddr)
+		}
+	}
 
 	// Extract video data port
 	if streams, ok := videoResp["streams"].([]interface{}); ok {
@@ -439,6 +406,43 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
 
+	// ---- RECORD to start the session ----
+	recordHeaders := map[string]string{
+		"Session":  sessionUUID,
+		"Range":    "npt=0-",
+		"RTP-Info": "seq=0;rtptime=0",
+	}
+	recordBody, recordRespHeaders, err := c.rtspRequest("RECORD", audioURI, "", nil, recordHeaders)
+	if err != nil {
+		return nil, fmt.Errorf("RECORD: %w", err)
+	}
+	if recordRespHeaders != nil {
+		dbg("[SETUP] RECORD response headers: %+v", recordRespHeaders)
+	}
+	if len(recordBody) > 0 {
+		dbg("[SETUP] RECORD response body: %02x", recordBody)
+	}
+	if value, ok := recordRespHeaders["audio-latency"]; ok {
+		parsed, parseErr := strconv.ParseUint(value, 10, 32)
+		if parseErr != nil {
+			dbg("[SETUP] invalid Audio-Latency header %q: %v", value, parseErr)
+		} else if parsed > 0 {
+			audioLatencySamples = uint32(parsed)
+			dbg("[SETUP] receiver audio latency: %d samples", audioLatencySamples)
+		}
+	}
+
+	// Set volume to maximum (0 dB)
+	volumeBody := []byte("volume: 0.000000\r\n")
+	_, _, err = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
+	if err != nil {
+		dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)
+	} else {
+		dbg("[SETUP] SET_PARAMETER volume=0 (max) sent")
+	}
+	// Send volume twice (pcap shows real senders do this)
+	_, _, _ = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
+
 	session := &MirrorSession{
 		client:         c,
 		dataConn:       dataConn,
@@ -449,7 +453,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		videoHeight:    cfg.Height,
 		firstFrameSent: make(chan struct{}),
 		noAudio:        cfg.NoAudio,
-		sessionURI:     audioURI,
+		sessionURI:     controlURI,
+		timingConn:     timingConn,
 	}
 
 	// Set up video cipher.
@@ -508,7 +513,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	// Set up audio stream if the receiver provided audio ports
-	if !cfg.NoAudio && audioDataPort > 0 {
+	if audioDataPort > 0 {
 		audioCT := byte(selectedAudioCodec) // ALAC=2 (matches SETUP descriptor)
 		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, audioCtrlConn, audioDataConn)
 		if err != nil {
@@ -519,7 +524,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			session.audioStream = as
 			dbg("[SETUP] audio stream ready")
 		}
-	} else if !cfg.NoAudio {
+	} else {
 		audioCtrlConn.Close()
 		audioDataConn.Close()
 		dbg("[SETUP] receiver did not provide audio ports, skipping audio")
@@ -541,9 +546,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	// Start heartbeat in background
-	go session.heartbeatLoop(ctx, audioURI, sessionUUID)
+	go session.heartbeatLoop(ctx, controlURI, sessionUUID)
 	go session.dataHeartbeatLoop(ctx)
-	go session.feedbackLoop(ctx, audioURI)
+	go session.feedbackLoop(ctx, controlURI)
 
 	return session, nil
 }

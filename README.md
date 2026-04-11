@@ -46,6 +46,9 @@ go build -o doubletake ./cmd/doubletake
 # Discover Apple TVs on the network and stream
 ./doubletake
 
+# Disable audio for video-only mirroring
+./doubletake -no-audio
+
 # Connect to a specific Apple TV
 ./doubletake -target 192.168.1.77
 
@@ -84,7 +87,7 @@ go build -o doubletake ./cmd/doubletake
 | `-fps` | 30 | Frames per second |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
 | `-hwaccel` | auto | Hardware accel: `auto`, `nvenc`, `vaapi`, `none` |
-| `-audio` | false | Enable audio streaming (experimental) |
+| `-no-audio` | false | Disable audio streaming |
 | `-test` | false | Use synthetic video source |
 | `-debug` | false | Verbose debug logging |
 
