@@ -537,14 +537,13 @@ func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
 
 // StreamConfig holds the configuration for a mirroring session.
 type StreamConfig struct {
-	Width      int
-	Height     int
-	FPS        int
-	Bitrate    int        // Video bitrate in kbps
-	NoEncrypt  bool       // Disable encryption for debugging
-	DirectKey  bool       // Use shk/shiv directly without SHA-512 derivation
-	NoAudio    bool       // Disable audio streaming
-	AudioCodec AudioCodec // Audio codec selected for the session
+	Width     int
+	Height    int
+	FPS       int
+	Bitrate   int  // Video bitrate in kbps
+	NoEncrypt bool // Disable encryption for debugging
+	DirectKey bool // Use shk/shiv directly without SHA-512 derivation
+	NoAudio   bool // Disable audio streaming
 }
 
 // generateStreamKey creates a random AES-128 key for stream encryption.

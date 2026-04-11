@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 
@@ -10,18 +11,23 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	socketPath := fs.String("socket", daemon.DefaultSocketPath(), "daemon socket path")
+	fs.Usage = usage
+
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		os.Exit(2)
+	}
+
+	args := fs.Args()
+	if len(args) < 1 {
 		usage()
 		os.Exit(1)
 	}
 
-	socketPath := os.Getenv("DOUBLETAKE_SOCKET")
-	if socketPath == "" {
-		socketPath = daemon.DefaultSocketPath()
-	}
-
-	client := daemonclient.New(socketPath)
-	cmd := os.Args[1]
+	client := daemonclient.New(*socketPath)
+	cmd := args[0]
 
 	var resp *daemon.Response
 	var err error
@@ -36,19 +42,19 @@ func main() {
 	case "connect":
 		target := ""
 		pin := ""
-		if len(os.Args) >= 3 {
-			target = os.Args[2]
+		if len(args) >= 2 {
+			target = args[1]
 		}
-		if len(os.Args) >= 4 {
-			pin = os.Args[3]
+		if len(args) >= 3 {
+			pin = args[2]
 		}
 		resp, err = client.Connect(target, 0, pin)
 	case "pin":
-		if len(os.Args) < 3 {
+		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl pin <4-digit-PIN>\n")
 			os.Exit(1)
 		}
-		resp, err = client.Connect("", 0, os.Args[2])
+		resp, err = client.Connect("", 0, args[1])
 	case "disconnect":
 		resp, err = client.Disconnect()
 	default:
@@ -72,5 +78,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl <command> [args]\n\nCommands:\n  status              Show daemon state\n  discover            Discover AirPlay devices on the network\n  devices             List cached discovered devices\n  connect [target] [pin]  Start mirroring (to target IP, or first discovered device)\n  pin <4-digit-PIN>   Submit PIN for a device waiting for pairing\n  disconnect          Stop mirroring\n\nEnvironment:\n  DOUBLETAKE_SOCKET   Override daemon socket path (default: $XDG_RUNTIME_DIR/doubletake.sock)\n")
+	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl [-socket path] <command> [args]\n\nCommands:\n  status              Show daemon state\n  discover            Discover AirPlay devices on the network\n  devices             List cached discovered devices\n  connect [target] [pin]  Start mirroring (to target IP, or first discovered device)\n  pin <4-digit-PIN>   Submit PIN for a device waiting for pairing\n  disconnect          Stop mirroring\n\nFlags:\n  -socket path        Override daemon socket path (default: %s)\n", daemon.DefaultSocketPath())
 }

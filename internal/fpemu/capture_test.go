@@ -18,14 +18,11 @@ import (
 //
 // Usage:
 //
-//	APPLE_TV=192.168.1.77 go test -run TestCaptureM2 ./internal/fpemu/ -v -count=1
+//	go test -run TestCaptureM2 ./internal/fpemu/ -v -count=1 -args -apple-tv=192.168.1.77
 //
 // The captured m2 is saved as a hex-encoded constant in captured_m2_test.go.
 func TestCaptureM2(t *testing.T) {
-	host := os.Getenv("APPLE_TV")
-	if host == "" {
-		t.Skip("Set APPLE_TV=<ip> to capture m2 from an Apple TV")
-	}
+	host := requireAppleTV(t)
 	port := "7000"
 
 	// m1 from fairplay.go

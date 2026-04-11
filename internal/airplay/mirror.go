@@ -11,7 +11,6 @@ import (
 	"log"
 	"math"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,17 +42,10 @@ type MirrorSession struct {
 
 	// Audio
 	audioStream *AudioStream
-	audioCodec  AudioCodec
 	noAudio     bool
 }
 
 func selectAudioSecurityMode(encrypted bool) audioSecurityMode {
-	switch strings.ToLower(os.Getenv("AUDIO_SECURITY")) {
-	case "legacy", "aes", "aes-cbc":
-		return audioSecurityLegacyAES
-	case "chacha", "chacha20", "chacha20-poly1305":
-		return audioSecurityChaCha
-	}
 	if encrypted {
 		return audioSecurityChaCha
 	}
@@ -148,10 +140,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// via a second SETUP with the same sessionUUID but different streamConnectionID.
 
 	audioStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
-	selectedAudioCodec := selectSessionAudioCodec(cfg.AudioCodec, c.encrypted)
-	if !cfg.NoAudio && selectedAudioCodec != cfg.AudioCodec {
-		dbg("[SETUP] audio codec override: requested=%d selected=%d (encrypted=%v)", cfg.AudioCodec, selectedAudioCodec, c.encrypted)
-	}
+	selectedAudioCodec := AudioCodecALAC
 	// Real Apple senders use streamConnectionID as the RTSP URI path.
 	// Audio SETUP, RECORD, and SET_PARAMETER all use the audio URI.
 	// Video SETUP uses a separate URI with its own streamConnectionID.
@@ -159,10 +148,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	audioMode := selectAudioSecurityMode(c.encrypted)
 	var audioKey, audioIV, audioChaChaKey []byte
 	if !cfg.NoAudio {
-		if os.Getenv("AUDIO_NO_ENCRYPT") != "" {
-			dbg("[SETUP] audio encryption: disabled (AUDIO_NO_ENCRYPT=1)")
-			audioMode = audioSecurityLegacyAES
-		} else if audioMode == audioSecurityChaCha {
+		if audioMode == audioSecurityChaCha {
 			var err error
 			audioChaChaKey, err = generateAudioChaChaKey(rand.Reader)
 			if err != nil {
@@ -176,7 +162,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			audioKey = c.fpKey
 			audioIV = c.fpIV
 			dbg("[SETUP] audio encryption: AES-128-CBC (fpKey/hashed %d bytes)", len(audioKey))
-		} else if audioMode == audioSecurityLegacyAES && os.Getenv("AUDIO_NO_ENCRYPT") == "" {
+		} else if audioMode == audioSecurityLegacyAES {
 			dbg("[SETUP] audio encryption: disabled (no FairPlay key available)")
 		}
 	}
@@ -244,8 +230,6 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 				},
 			}
 			dbg("[SETUP] audio stream descriptor includes shk (%d bytes)", len(audioChaChaKey))
-		} else if os.Getenv("AUDIO_NO_ENCRYPT") != "" {
-			dbg("[SETUP] AUDIO_NO_ENCRYPT=1: ekey/eiv omitted, audio sent unencrypted")
 		} else if c.FpEkey != nil && c.fpIV != nil {
 			audioSetupPlist["et"] = int64(32)
 			audioSetupPlist["ekey"] = c.FpEkey
@@ -374,13 +358,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// ---- Phase 2: SETUP video stream ----
 	// Video SETUP uses the same sessionUUID but a different streamConnectionID.
 	// The Apple TV attaches this video stream to the existing session.
-	// AUDIO_ONLY=1 skips the video SETUP for debugging pure audio mode.
 	videoStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	videoURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, videoStreamConnectionID)
-	skipVideoSetup := os.Getenv("AUDIO_ONLY") != ""
-	if skipVideoSetup {
-		dbg("[SETUP] AUDIO_ONLY mode: skipping video SETUP")
-	}
 
 	videoStreamDesc := map[string]interface{}{
 		"type":               int64(110),
@@ -414,57 +393,51 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	var dataConn net.Conn
 	var dataPort int
+	videoSetupBody, err := plist.Marshal(videoSetupPlist, plist.BinaryFormat)
+	if err != nil {
+		return nil, fmt.Errorf("marshal video setup: %w", err)
+	}
 
-	if skipVideoSetup {
-		// Audio-only mode: no video SETUP, create a dummy connection to satisfy session init
-		dbg("[SETUP] skipping video SETUP (AUDIO_ONLY=1)")
-	} else {
-		videoSetupBody, err := plist.Marshal(videoSetupPlist, plist.BinaryFormat)
-		if err != nil {
-			return nil, fmt.Errorf("marshal video setup: %w", err)
-		}
+	videoRespBody, _, err := c.rtspRequest("SETUP", videoURI, "application/x-apple-binary-plist", videoSetupBody, nil)
+	if err != nil {
+		return nil, fmt.Errorf("SETUP phase 2 (video): %w", err)
+	}
 
-		videoRespBody, _, err := c.rtspRequest("SETUP", videoURI, "application/x-apple-binary-plist", videoSetupBody, nil)
-		if err != nil {
-			return nil, fmt.Errorf("SETUP phase 2 (video): %w", err)
-		}
+	var videoResp map[string]interface{}
+	if _, err := plist.Unmarshal(videoRespBody, &videoResp); err != nil {
+		return nil, fmt.Errorf("unmarshal video setup response: %w", err)
+	}
+	dbg("[SETUP] phase 2 response: %+v", videoResp)
 
-		var videoResp map[string]interface{}
-		if _, err := plist.Unmarshal(videoRespBody, &videoResp); err != nil {
-			return nil, fmt.Errorf("unmarshal video setup response: %w", err)
-		}
-		dbg("[SETUP] phase 2 response: %+v", videoResp)
-
-		// Extract video data port
-		if streams, ok := videoResp["streams"].([]interface{}); ok {
-			for _, s := range streams {
-				stream, ok := s.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				streamType := plistInt(stream["type"])
-				if streamType == 110 {
-					dataPort = plistInt(stream["dataPort"])
-				}
+	// Extract video data port
+	if streams, ok := videoResp["streams"].([]interface{}); ok {
+		for _, s := range streams {
+			stream, ok := s.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			streamType := plistInt(stream["type"])
+			if streamType == 110 {
+				dataPort = plistInt(stream["dataPort"])
 			}
 		}
-
-		if dataPort == 0 {
-			return nil, fmt.Errorf("no video data port in SETUP response")
-		}
-
-		// Connect to the video data port
-		dataAddr := net.JoinHostPort(c.host, strconv.Itoa(dataPort))
-		dataConn, err = net.DialTimeout("tcp", dataAddr, 5*time.Second)
-		if err != nil {
-			return nil, fmt.Errorf("connect data port %s: %w", dataAddr, err)
-		}
-		if tc, ok := dataConn.(*net.TCPConn); ok {
-			tc.SetNoDelay(true)
-			tc.SetWriteBuffer(64 * 1024)
-		}
-		dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
 	}
+
+	if dataPort == 0 {
+		return nil, fmt.Errorf("no video data port in SETUP response")
+	}
+
+	// Connect to the video data port
+	dataAddr := net.JoinHostPort(c.host, strconv.Itoa(dataPort))
+	dataConn, err = net.DialTimeout("tcp", dataAddr, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connect data port %s: %w", dataAddr, err)
+	}
+	if tc, ok := dataConn.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+		tc.SetWriteBuffer(64 * 1024)
+	}
+	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
 
 	session := &MirrorSession{
 		client:         c,
@@ -475,7 +448,6 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		videoWidth:     cfg.Width,
 		videoHeight:    cfg.Height,
 		firstFrameSent: make(chan struct{}),
-		audioCodec:     selectedAudioCodec,
 		noAudio:        cfg.NoAudio,
 		sessionURI:     audioURI,
 	}
@@ -537,7 +509,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	// Set up audio stream if the receiver provided audio ports
 	if !cfg.NoAudio && audioDataPort > 0 {
-		audioCT := byte(selectedAudioCodec) // ALAC=2, AAC-ELD=8 (matches SETUP descriptor)
+		audioCT := byte(selectedAudioCodec) // ALAC=2 (matches SETUP descriptor)
 		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, audioCtrlConn, audioDataConn)
 		if err != nil {
 			audioCtrlConn.Close()
@@ -570,11 +542,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	// Start heartbeat in background
 	go session.heartbeatLoop(ctx, audioURI, sessionUUID)
-	if os.Getenv("DISABLE_DATA_HEARTBEAT") == "" {
-		go session.dataHeartbeatLoop(ctx)
-	} else {
-		dbg("[HEARTBEAT] data heartbeat disabled by DISABLE_DATA_HEARTBEAT")
-	}
+	go session.dataHeartbeatLoop(ctx)
 	go session.feedbackLoop(ctx, audioURI)
 
 	return session, nil
@@ -973,33 +941,6 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	return err
-}
-
-// SendTestCodec sends a codec frame for testing purposes.
-func (s *MirrorSession) SendTestCodec(avcC []byte) {
-	if err := s.sendCodecFrame(avcC, ntpTimeNow()); err != nil {
-		dbg("[TEST] sendCodecFrame error: %v", err)
-	} else {
-		dbg("[TEST] codec frame sent successfully")
-	}
-}
-
-// SendTestEmptyVCL sends a VCL header with zero-length payload for testing.
-func (s *MirrorSession) SendTestEmptyVCL() {
-	header := make([]byte, 128)
-	// payload size = 0
-	header[4] = 0x00 // VCL video data type
-	header[5] = 0x00
-	header[6] = 0x00
-	header[7] = 0x00
-	binary.LittleEndian.PutUint64(header[8:16], ntpTimeNow())
-	dbg("[TEST] sending type 0x00 (VCL) header: %02x", header[:16])
-	s.dataConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := writeFull(s.dataConn, header); err != nil {
-		dbg("[TEST] type 0x00 write error: %v", err)
-	} else {
-		dbg("[TEST] type 0x00 header sent successfully")
-	}
 }
 
 // sendFrame writes a single encrypted VCL frame with the mirroring protocol header.
@@ -1438,11 +1379,6 @@ func (s *MirrorSession) HasAudio() bool {
 // AudioStream returns the audio stream for this session (may be nil).
 func (s *MirrorSession) AudioStream() *AudioStream {
 	return s.audioStream
-}
-
-// SelectedAudioCodec returns the codec chosen for this session's audio stream.
-func (s *MirrorSession) SelectedAudioCodec() AudioCodec {
-	return s.audioCodec
 }
 
 // ntpTimingResponder replies to NTP timing requests from the Apple TV.

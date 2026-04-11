@@ -6,7 +6,6 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"fmt"
-	"os"
 
 	"doubletake/internal/fpemu"
 )
@@ -100,14 +99,14 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	// Hash with pair-verify shared secret (ECDH X25519) if available.
 	// The receiver does: SHA-512(fairplay_decrypt(ekey) || ecdh_secret)[:16]
 	finalKey := c.fpAesKey
-	if os.Getenv("FP_NO_HASH") != "" {
-		dbg("[FP] FP_NO_HASH=1: using raw fpAesKey (no SharedSecret hash)")
-	} else if c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0 {
+	if c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0 {
 		h := sha512.New()
 		h.Write(c.fpAesKey)
 		h.Write(c.PairKeys.SharedSecret)
 		finalKey = h.Sum(nil)[:16]
 		dbg("[FP] hashed with SharedSecret (%d bytes)", len(c.PairKeys.SharedSecret))
+	} else {
+		dbg("[FP] using raw fpAesKey (no SharedSecret available)")
 	}
 
 	c.fpKey = finalKey

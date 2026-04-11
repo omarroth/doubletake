@@ -16,12 +16,9 @@ import (
 //
 // Usage:
 //
-//	APPLE_TV=192.168.1.77 go test -run TestCaptureM2 ./internal/airplay/ -v -count=1
+//	go test -run TestCaptureM2 ./internal/airplay/ -v -count=1 -args -apple-tv=192.168.1.77
 func TestCaptureM2(t *testing.T) {
-	host := os.Getenv("APPLE_TV")
-	if host == "" {
-		t.Skip("Set APPLE_TV=<ip> to capture m2 from an Apple TV")
-	}
+	host := requireAppleTV(t)
 
 	DebugMode = true
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

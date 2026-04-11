@@ -200,32 +200,22 @@ func main() {
 	// FairPlay setup — establishes fp-setup state and ekey/eiv used for the
 	// final encrypted mirror stream. Pair-verify and FairPlay are both needed
 	// for Apple TV compatibility in the normal modern flow.
-	if os.Getenv("SKIP_FAIRPLAY") != "" {
-		log.Println("SKIP_FAIRPLAY: skipping FairPlay setup entirely")
-	} else if client.FpEkey == nil {
+	if client.FpEkey == nil {
 		if err := client.FairPlaySetup(ctx); err != nil {
-			if os.Getenv("ALLOW_FAIRPLAY_FALLBACK") != "" {
-				log.Printf("FairPlay setup failed (fallback enabled): %v", err)
-			} else {
-				log.Fatalf("FairPlay setup failed: %v", err)
-			}
+			log.Fatalf("FairPlay setup failed: %v", err)
 		} else {
 			log.Println("FairPlay setup complete")
 		}
 	}
 
-	// Select the most reliable available audio codec by default.
-	audioCodec := airplay.DefaultAudioCodec()
-
 	streamCfg := airplay.StreamConfig{
-		Width:      *width,
-		Height:     *height,
-		FPS:        *fps,
-		Bitrate:    *bitrate,
-		NoEncrypt:  *noEncrypt,
-		DirectKey:  *directKey,
-		NoAudio:    !*audio,
-		AudioCodec: audioCodec,
+		Width:     *width,
+		Height:    *height,
+		FPS:       *fps,
+		Bitrate:   *bitrate,
+		NoEncrypt: *noEncrypt,
+		DirectKey: *directKey,
+		NoAudio:   !*audio,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {
@@ -234,44 +224,9 @@ func main() {
 	defer session.Close()
 	log.Printf("mirror session ready (data port: %d)", session.DataPort)
 
-	// Quick heartbeat-only test: don't send any video, just keep session alive
-	if os.Getenv("HEARTBEAT_ONLY") != "" {
-		log.Println("HEARTBEAT_ONLY mode: no video will be sent, waiting 10s...")
-		if os.Getenv("SEND_CODEC") != "" {
-			// Send an SPS/PPS codec frame, then wait
-			log.Println("sending test codec frame...")
-			sps := []byte{0x67, 0x64, 0x00, 0x28, 0xAC, 0x56, 0x20, 0x0D, 0x81, 0x4F, 0xE5, 0x9B, 0x81, 0x01, 0x01, 0x01}
-			pps := []byte{0x68, 0xEE, 0x3C, 0xB0}
-			// Build avcC
-			avcC := make([]byte, 6+2+len(sps)+1+2+len(pps))
-			avcC[0] = 0x01
-			avcC[1] = sps[1]
-			avcC[2] = sps[2]
-			avcC[3] = sps[3]
-			avcC[4] = 0xff
-			avcC[5] = 0xe1
-			avcC[6] = byte(len(sps) >> 8)
-			avcC[7] = byte(len(sps))
-			copy(avcC[8:], sps)
-			avcC[8+len(sps)] = 0x01
-			avcC[9+len(sps)] = byte(len(pps) >> 8)
-			avcC[10+len(sps)] = byte(len(pps))
-			copy(avcC[11+len(sps):], pps)
-			// Send as codec packet
-			session.SendTestCodec(avcC)
-		}
-		if os.Getenv("SEND_EMPTY_VCL") != "" {
-			log.Println("sending empty VCL header (zero payload)...")
-			session.SendTestEmptyVCL()
-		}
-		time.Sleep(10 * time.Second)
-		log.Println("heartbeat test complete")
-		return
-	}
-
 	var capture *airplay.ScreenCapture
 	if *testMode {
-		log.Println("using synthetic video (videotestsrc) for debugging")
+		log.Println("using synthetic video (videotestsrc) and audio test tone for debugging")
 		var err error
 		capture, err = airplay.StartTestCapture(ctx, airplay.CaptureConfig{
 			Width:   *width,
@@ -307,7 +262,7 @@ func main() {
 
 	// Start audio capture and streaming if audio is enabled
 	if *audio && session.HasAudio() {
-		audioCapture, err := airplay.StartAudioCapture(ctx, session.SelectedAudioCodec())
+		audioCapture, err := airplay.StartAudioCapture(ctx, *testMode)
 		if err != nil {
 			log.Printf("warning: audio capture failed: %v (continuing without audio)", err)
 		} else {
