@@ -324,14 +324,24 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	videoSetupPlist := map[string]interface{}{
-		"deviceID":       clientDeviceID,
-		"macAddress":     clientDeviceID,
-		"sessionUUID":    sessionUUID,
-		"sourceVersion":  "280.33",
-		"osBuildVersion": "13F69",
-		"model":          "Linux",
-		"name":           "Linux",
-		"streams":        []interface{}{videoStreamDesc},
+		"deviceID":                 clientDeviceID,
+		"macAddress":               clientDeviceID,
+		"sessionUUID":              sessionUUID,
+		"sourceVersion":            "280.33",
+		"isScreenMirroringSession": true,
+		"timingProtocol":           "NTP",
+		"timingPort":               int64(timingPort),
+		"osBuildVersion":           "13F69",
+		"model":                    "Linux",
+		"name":                     "Linux",
+		"streams":                  []interface{}{videoStreamDesc},
+	}
+	// UxPlay reads ekey/eiv from the root level of the SETUP request to derive
+	// the video decryption key. Without these, video decryption won't work on UxPlay.
+	if c.FpEkey != nil && encKey != nil {
+		videoSetupPlist["ekey"] = c.FpEkey
+		videoSetupPlist["eiv"] = encIV
+		dbg("[SETUP] video SETUP includes FairPlay ekey=%d bytes, eiv=%d bytes", len(c.FpEkey), len(encIV))
 	}
 	dbg("[SETUP] phase 2 (video): streamConnectionID=%d", videoStreamConnectionID)
 
@@ -402,9 +412,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 	if tc, ok := dataConn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
-		tc.SetWriteBuffer(32 * 1024)
+		tc.SetWriteBuffer(64 * 1024)
 	}
-	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=32K)", dataAddr)
+	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
 
 	// ---- RECORD to start the session ----
 	recordHeaders := map[string]string{
@@ -942,7 +952,7 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 
 	bufs := net.Buffers{header[:], payload}
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	s.dataConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	return err
@@ -1016,7 +1026,7 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 	// avoiding a copy into a combined buffer.
 	bufs := net.Buffers{header[:], framePayload}
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	s.dataConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	if err != nil {
@@ -1485,8 +1495,6 @@ func ntpTimeNow() uint64 {
 	return (sec << 32) | frac
 }
 
-// ntpBootTimestamp returns a 64-bit NTP fixed-point timestamp using boot-relative
-// time with the NTP epoch (1900-01-01) added. Real Apple senders use this format
 // allocateConsecutiveUDPPorts allocates `count` consecutive UDP port numbers.
 // Real Apple AirPlay senders use consecutive ports: timing(N), control(N+1), data(N+2).
 func allocateConsecutiveUDPPorts(count int) ([]net.PacketConn, error) {
@@ -1519,15 +1527,15 @@ func allocateConsecutiveUDPPorts(count int) ([]net.PacketConn, error) {
 	return nil, fmt.Errorf("could not allocate %d consecutive UDP ports after 20 attempts", count)
 }
 
-// ntpBootTimestamp returns a 64-bit NTP fixed-point timestamp using raw
-// boot-relative time (seconds since app start). PCAP analysis of working
-// AirMyPC sender confirms real senders use boot-relative time without any
-// NTP epoch offset. The Apple TV's NTP timing exchange adapts to whatever
-// time base the sender uses.
+// ntpBootTimestamp returns a 64-bit NTP fixed-point timestamp using boot-relative
+// time with the NTP epoch (1900-01-01) added. UxPlay subtracts the NTP epoch from
+// timing responses (account_for_epoch=true), yielding the same boot-relative seconds
+// that video frame headers carry via ntpTimeNow(). Apple TV adapts to any time base.
+const secondsFrom1900To1970 = 2208988800
 
 func ntpBootTimestamp() uint64 {
 	d := time.Since(appStartTime)
-	sec := uint64(d / time.Second)
+	sec := uint64(d/time.Second) + secondsFrom1900To1970
 	nsecFrac := uint64(d % time.Second)
 	frac := (nsecFrac << 32) / uint64(time.Second)
 	return (sec << 32) | frac
