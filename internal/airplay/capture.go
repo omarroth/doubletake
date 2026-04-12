@@ -590,7 +590,7 @@ func keyframeIntervalFrames(fps int) int {
 	if fps <= 0 {
 		fps = 30
 	}
-	return fps * 4
+	return fps * 2
 }
 
 // vbvBufferKbit returns the x264 VBV buffer size in kbit for the given bitrate

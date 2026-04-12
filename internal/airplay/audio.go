@@ -63,7 +63,11 @@ func (c AudioCodec) AudioFormatIndex() int64 {
 
 // AudioCodecInfo returns SETUP parameters for the supported mirrored-audio codec.
 func (c AudioCodec) Info() (ct int64, spf int64, audioFormat int64, latencyMin int64, latencyMax int64, latencySamples uint32) {
-	return 2, 352, 0x40000, 3750, 3750, 3750
+	// latencyMin/Max tells the Apple TV how far ahead to buffer audio.
+	// Lower values = tighter AV sync but more susceptible to jitter.
+	// 11025 samples = 250ms at 44100 Hz — enough to absorb network jitter
+	// while keeping delay perceptible only to trained ears.
+	return 2, 352, 0x40000, 882, 882, 882
 }
 
 func audioLatencySamplesForCodec(ct byte, override uint32) uint32 {
@@ -71,7 +75,7 @@ func audioLatencySamplesForCodec(ct byte, override uint32) uint32 {
 		return override
 	}
 	_ = ct
-	return 3750
+	return 882
 }
 
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.
@@ -101,8 +105,11 @@ func StartAudioCapture(ctx context.Context, testTone bool) (*AudioCapture, error
 			cancel()
 			return nil, fmt.Errorf("no PulseAudio monitor source found")
 		}
-		srcArgs = []string{"pulsesrc", fmt.Sprintf("device=%s", monitor)}
-		dbg("[AUDIO] using pulsesrc device=%s", monitor)
+		// buffer-time/latency-time in microseconds; defaults are 200ms/10ms.
+		// Reduce to minimize capture latency.
+		srcArgs = []string{"pulsesrc", fmt.Sprintf("device=%s", monitor),
+			"buffer-time=20000", "latency-time=10000"}
+		dbg("[AUDIO] using pulsesrc device=%s buffer-time=20ms latency-time=10ms", monitor)
 	} else if exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil {
 		srcArgs = []string{"pipewiresrc"}
 		dbg("[AUDIO] using pipewiresrc")
@@ -122,7 +129,7 @@ func StartAudioCapture(ctx context.Context, testTone bool) (*AudioCapture, error
 		"!", "audioconvert",
 		"!", "audioresample",
 		"!", "audio/x-raw,rate=44100,channels=2,format=S16LE",
-		"!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
 	dbg("[AUDIO] ALAC verbatim pipeline: gst-launch-1.0 %s", strings.Join(gstArgs, " "))
@@ -650,7 +657,7 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 	// Send initial sync burst — real Apple senders send multiple identical sync
 	// packets (observed 7 in pcap) before any audio data, all with X=1 (0x90).
 	ntpNow := ntpBootTimestamp()
-	for i := 0; i < 7; i++ {
+	for i := 0; i < 3; i++ {
 		if err := audioStream.sendSyncPacket(ntpNow, true); err != nil {
 			dbg("[AUDIO] initial sync error: %v", err)
 		}
@@ -665,15 +672,13 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 	audioStream.mu.Lock()
 	audioStream.rtpTime = nextRtp
 	audioStream.mu.Unlock()
-	dbg("[AUDIO] sent initial sync burst (7 packets), starting audio at rtp=%d", nextRtp)
+	dbg("[AUDIO] sent initial sync burst (3 packets), starting audio at rtp=%d", nextRtp)
 
-	// Periodic sync sender — more frequent during initial ramp-up (every 200ms
-	// for the first 5 seconds), then every 1 second. Real Apple senders appear
-	// to sync roughly every 170ms initially.
+	// Periodic sync sender — fast for 2 seconds, then every 1 second.
 	go func() {
 		fastTicker := time.NewTicker(200 * time.Millisecond)
 		defer fastTicker.Stop()
-		slowTimer := time.After(5 * time.Second)
+		slowTimer := time.After(2 * time.Second)
 		for {
 			select {
 			case <-ctx.Done():
