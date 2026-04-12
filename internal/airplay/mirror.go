@@ -402,9 +402,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 	if tc, ok := dataConn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
-		tc.SetWriteBuffer(64 * 1024)
+		tc.SetWriteBuffer(32 * 1024)
 	}
-	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
+	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=32K)", dataAddr)
 
 	// ---- RECORD to start the session ----
 	recordHeaders := map[string]string{
@@ -942,7 +942,7 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 
 	bufs := net.Buffers{header[:], payload}
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	s.dataConn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	return err
@@ -1016,7 +1016,7 @@ func (s *MirrorSession) sendFrame(auData []byte, isKeyframe bool, ntpTimestamp u
 	// avoiding a copy into a combined buffer.
 	bufs := net.Buffers{header[:], framePayload}
 	s.dataMu.Lock()
-	s.dataConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	s.dataConn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
 	_, err := bufs.WriteTo(s.dataConn)
 	s.dataMu.Unlock()
 	if err != nil {
