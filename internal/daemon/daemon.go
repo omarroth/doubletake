@@ -28,21 +28,23 @@ const (
 
 // Request is a command sent to the daemon over the control socket.
 type Request struct {
-	Cmd    string `json:"cmd"`
-	Target string `json:"target,omitempty"`
-	Port   int    `json:"port,omitempty"`
-	Pin    string `json:"pin,omitempty"`
+	Cmd     string `json:"cmd"`
+	Target  string `json:"target,omitempty"`
+	Port    int    `json:"port,omitempty"`
+	Pin     string `json:"pin,omitempty"`
 }
 
 // Response is returned to the caller for every request.
 type Response struct {
-	OK       bool         `json:"ok"`
-	State    State        `json:"state"`
-	Device   string       `json:"device,omitempty"`
-	DeviceIP string       `json:"device_ip,omitempty"`
-	NeedsPIN bool         `json:"needs_pin,omitempty"`
-	Error    string       `json:"error,omitempty"`
-	Devices  []DeviceInfo `json:"devices,omitempty"`
+	OK         bool         `json:"ok"`
+	State      State        `json:"state"`
+	Device     string       `json:"device,omitempty"`
+	DeviceIP   string       `json:"device_ip,omitempty"`
+	HasAudio   bool         `json:"has_audio"`
+	AudioMuted bool         `json:"audio_muted"`
+	NeedsPIN   bool         `json:"needs_pin,omitempty"`
+	Error      string       `json:"error,omitempty"`
+	Devices    []DeviceInfo `json:"devices,omitempty"`
 }
 
 // DeviceInfo is a simplified view of a discovered AirPlay device.
@@ -94,6 +96,7 @@ type Daemon struct {
 	device         string // name of connected device
 	deviceIP       string // IP of connected device
 	deviceIDStr    string // DeviceID of connected/pending device
+	audioMuted     bool   // true when audio is muted on the receiver
 	pendingTarget  string // target IP waiting for PIN
 	pendingPort    int    // port waiting for PIN
 	cancelFn       context.CancelFunc
@@ -277,6 +280,10 @@ func (d *Daemon) handleRequest(req Request) Response {
 		return d.handleConnect(req)
 	case "disconnect":
 		return d.handleDisconnect()
+	case "mute":
+		return d.handleSetMute(true)
+	case "unmute":
+		return d.handleSetMute(false)
 	default:
 		return Response{OK: false, Error: "unknown command: " + req.Cmd}
 	}
@@ -285,12 +292,20 @@ func (d *Daemon) handleRequest(req Request) Response {
 func (d *Daemon) handleStatus() Response {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.statusResponseLocked(true, "")
+}
+
+func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
+	hasAudio := d.session != nil && d.session.HasAudio()
 	return Response{
-		OK:       true,
-		State:    d.state,
-		Device:   d.device,
-		DeviceIP: d.deviceIP,
-		NeedsPIN: d.state == StatePINRequired,
+		OK:         ok,
+		State:      d.state,
+		Device:     d.device,
+		DeviceIP:   d.deviceIP,
+		HasAudio:   hasAudio,
+		AudioMuted: d.audioMuted,
+		NeedsPIN:   d.state == StatePINRequired,
+		Error:      errMsg,
 	}
 }
 
@@ -398,6 +413,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 		d.device = ""
 		d.deviceIP = ""
 		d.deviceIDStr = ""
+		d.audioMuted = false
 		d.pendingTarget = ""
 		d.pendingPort = 0
 		d.client = nil
@@ -570,6 +586,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	d.client = client
 	d.session = session
 	d.capture = capture
+	d.audioMuted = false
 	d.mu.Unlock()
 
 	log.Printf("[daemon] streaming to %s", d.device)
@@ -605,6 +622,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	d.device = ""
 	d.deviceIP = ""
 	d.deviceIDStr = ""
+	d.audioMuted = false
 	d.pendingTarget = ""
 	d.pendingPort = 0
 	d.client = nil
@@ -627,6 +645,34 @@ func (d *Daemon) handleDisconnect() Response {
 	d.stopLocked()
 	return Response{OK: true, State: StateIdle}
 }
+
+func (d *Daemon) handleSetMute(muted bool) Response {
+	d.mu.Lock()
+	if d.state != StateStreaming || d.session == nil {
+		resp := d.statusResponseLocked(false, "not currently streaming")
+		d.mu.Unlock()
+		return resp
+	}
+	if d.cfg.NoAudio || !d.session.HasAudio() {
+		resp := d.statusResponseLocked(false, "audio is not available for this session")
+		d.mu.Unlock()
+		return resp
+	}
+	session := d.session
+	d.mu.Unlock()
+
+	if err := session.SetAudioMuted(muted); err != nil {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.statusResponseLocked(false, "failed to update audio mute state: "+err.Error())
+	}
+
+	d.mu.Lock()
+	d.audioMuted = muted
+	defer d.mu.Unlock()
+	return d.statusResponseLocked(true, "")
+}
+
 
 // stopLocked stops the current session. Must be called with d.mu held.
 func (d *Daemon) stopLocked() {

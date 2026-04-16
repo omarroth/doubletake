@@ -1391,6 +1391,24 @@ func (s *MirrorSession) HasAudio() bool {
 	return s.audioStream != nil
 }
 
+// SetAudioMuted updates mirrored audio volume on the receiver.
+// AirPlay uses SET_PARAMETER volume where 0 dB is max and -144 dB is muted.
+func (s *MirrorSession) SetAudioMuted(muted bool) error {
+	if s == nil || s.client == nil || s.sessionURI == "" {
+		return fmt.Errorf("audio control unavailable")
+	}
+
+	volume := "0.000000"
+	if muted {
+		volume = "-144.000000"
+	}
+	body := []byte("volume: " + volume + "\r\n")
+	if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", body, nil); err != nil {
+		return fmt.Errorf("set audio muted=%t: %w", muted, err)
+	}
+	return nil
+}
+
 // AudioStream returns the audio stream for this session (may be nil).
 func (s *MirrorSession) AudioStream() *AudioStream {
 	return s.audioStream

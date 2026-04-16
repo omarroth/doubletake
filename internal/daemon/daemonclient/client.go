@@ -49,6 +49,17 @@ func (c *Client) Disconnect() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "disconnect"})
 }
 
+// Mute mutes mirrored audio on the current session.
+func (c *Client) Mute() (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "mute"})
+}
+
+// Unmute unmutes mirrored audio on the current session.
+func (c *Client) Unmute() (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "unmute"})
+}
+
+
 func (c *Client) send(req daemon.Request) (*daemon.Response, error) {
 	conn, err := net.DialTimeout("unix", c.SocketPath, 5*time.Second)
 	if err != nil {

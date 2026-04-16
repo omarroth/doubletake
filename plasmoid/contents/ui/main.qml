@@ -14,6 +14,8 @@ PlasmoidItem {
     property string daemonState: "idle"
     property string connectedDevice: ""
     property string connectedIP: ""
+    property bool hasAudio: false
+    property bool audioMuted: false
     property var deviceList: []
     property string errorText: ""
     property var pendingCommands: (new Object())
@@ -85,11 +87,15 @@ PlasmoidItem {
                 root.daemonState = resp.state || "idle"
                 root.connectedDevice = resp.device || ""
                 root.connectedIP = resp.device_ip || ""
+                root.hasAudio = !!resp.has_audio
+                root.audioMuted = !!resp.audio_muted
                 root.errorText = ""
             } else {
                 root.daemonState = "idle"
                 root.connectedDevice = ""
                 root.connectedIP = ""
+                root.hasAudio = false
+                root.audioMuted = false
             }
         } else if (action === "discover") {
             if (resp.ok && resp.devices) {
@@ -103,7 +109,10 @@ PlasmoidItem {
                 root.errorText = resp.error || "Connection failed"
             }
             root.runCtl(["status"], "status")
-        } else if (action === "disconnect") {
+        } else if (action === "disconnect" || action === "mute" || action === "unmute") {
+            if (!resp.ok) {
+                root.errorText = resp.error || "Audio control failed"
+            }
             root.runCtl(["status"], "status")
         }
     }
@@ -182,6 +191,18 @@ PlasmoidItem {
                     enabled: !root.isBusy
                     onClicked: {
                         root.runCtl(["discover"], "discover")
+                    }
+                }
+                Controls.ToolButton {
+                    icon.name: root.audioMuted ? "audio-volume-muted" : "audio-volume-high"
+                    display: Controls.ToolButton.IconOnly
+                    visible: root.isStreaming && root.hasAudio
+                    enabled: !root.isBusy
+                    Controls.ToolTip.text: root.audioMuted ? "Unmute audio" : "Mute audio"
+                    Controls.ToolTip.visible: hovered
+                    onClicked: {
+                        var action = root.audioMuted ? "unmute" : "mute"
+                        root.runCtl([action], action)
                     }
                 }
             }

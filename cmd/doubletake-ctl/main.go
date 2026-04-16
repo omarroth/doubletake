@@ -57,6 +57,10 @@ func main() {
 		resp, err = client.Connect("", 0, args[1])
 	case "disconnect":
 		resp, err = client.Disconnect()
+	case "mute":
+		resp, err = client.Mute()
+	case "unmute":
+		resp, err = client.Unmute()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		usage()
@@ -78,5 +82,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl [-socket path] <command> [args]\n\nCommands:\n  status              Show daemon state\n  discover            Discover AirPlay devices on the network\n  devices             List cached discovered devices\n  connect [target] [pin]  Start mirroring (to target IP, or first discovered device)\n  pin <4-digit-PIN>   Submit PIN for a device waiting for pairing\n  disconnect          Stop mirroring\n\nFlags:\n  -socket path        Override daemon socket path (default: %s)\n", daemon.DefaultSocketPath())
+	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl [-socket path] <command> [args]\n\nCommands:\n  status              Show daemon state\n  discover            Discover AirPlay devices on the network\n  devices             List cached discovered devices\n  connect [target] [pin]  Start mirroring (to target IP, or first discovered device)\n  pin <4-digit-PIN>   Submit PIN for a device waiting for pairing\n  disconnect          Stop mirroring\n  mute                Mute mirrored audio\n  unmute              Unmute mirrored audio\n\nFlags:\n  -socket path        Override daemon socket path (default: %s)\n", daemon.DefaultSocketPath())
 }
