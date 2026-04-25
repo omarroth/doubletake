@@ -1510,16 +1510,19 @@ var appStartTime = time.Now()
 // Format: upper 32 bits = seconds, lower 32 bits = fractional seconds (1/2^32).
 // Uses boot-relative time (no epoch offset), matching real Apple senders.
 //
-// A small forward bias is added so that the first frame's converted timestamp
-// exceeds the GStreamer pipeline base_time on the receiver. Without this,
-// UxPlay's mismatch retry loop in video_process double-applies its
-// remote_clock_offset, producing a ~56-year PTS on the first buffer. GStreamer
-// prerolls that frame but then drops every subsequent frame whose PTS (correctly
-// at 33 ms, 66 ms, …) looks like a massive backwards time jump.
-const videoTimestampBias = 5 * time.Millisecond
+// A forward bias is added so that frame timestamps are intentionally ahead of
+// wall-clock boot time. This avoids first-frame base_time edge cases and also
+// acts as the sender-side playout latency target.
+func videoTimestampBias() time.Duration {
+	bias := TargetLatency()
+	if bias < 5*time.Millisecond {
+		return 5 * time.Millisecond
+	}
+	return bias
+}
 
 func ntpTimeNow() uint64 {
-	d := time.Since(appStartTime) + videoTimestampBias
+	d := time.Since(appStartTime) + videoTimestampBias()
 	sec := uint64(d / time.Second)
 	nsecFrac := uint64(d % time.Second)
 	frac := (nsecFrac << 32) / uint64(time.Second)

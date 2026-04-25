@@ -63,7 +63,9 @@ func (c AudioCodec) AudioFormatIndex() int64 {
 
 // AudioCodecInfo returns SETUP parameters for the supported mirrored-audio codec.
 func (c AudioCodec) Info() (ct int64, spf int64, audioFormat int64, latencyMin int64, latencyMax int64, latencySamples uint32) {
-	return 2, 352, 0x40000, 3750, 3750, 3750
+	latency := targetLatencySamples44k1()
+	latencyI64 := int64(latency)
+	return 2, 352, 0x40000, latencyI64, latencyI64, latency
 }
 
 func audioLatencySamplesForCodec(ct byte, override uint32) uint32 {
@@ -71,7 +73,7 @@ func audioLatencySamplesForCodec(ct byte, override uint32) uint32 {
 		return override
 	}
 	_ = ct
-	return 3750
+	return targetLatencySamples44k1()
 }
 
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.

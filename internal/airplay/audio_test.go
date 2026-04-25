@@ -23,15 +23,16 @@ func TestAudioCodecFormatIndex(t *testing.T) {
 }
 
 func TestAudioLatencySamplesForCodec(t *testing.T) {
+	defaultLatency := targetLatencySamples44k1()
 	tests := []struct {
 		name     string
 		ct       byte
 		override uint32
 		want     uint32
 	}{
-		{name: "default ALAC", ct: byte(AudioCodecALAC), want: 3750},
+		{name: "default ALAC", ct: byte(AudioCodecALAC), want: defaultLatency},
 		{name: "override wins", ct: byte(AudioCodecALAC), override: 11025, want: 11025},
-		{name: "unknown codec falls back", ct: 99, want: 3750},
+		{name: "unknown codec falls back", ct: 99, want: defaultLatency},
 	}
 
 	for _, tt := range tests {
