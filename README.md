@@ -11,6 +11,8 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 - Hardware-accelerated H.264 encoding (NVENC, VA-API) with software fallback
 - ChaCha20-Poly1305 stream encryption
 - mDNS device discovery
+- Daemon mode with multi-target streaming control (`doubletake-ctl`)
+- Configurable latency target (`-target-latency-ms`, default 100ms)
 - KDE Plasma widget for quick access (see [plasmoid/](plasmoid/))
 
 ## Requirements
@@ -38,6 +40,7 @@ sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
 
 ```sh
 go build -o doubletake ./cmd/doubletake
+go build -o doubletake-ctl ./cmd/doubletake-ctl
 ```
 
 ## Usage
@@ -64,12 +67,23 @@ go build -o doubletake ./cmd/doubletake
 # Force a lower bitrate on weaker Wi-Fi
 ./doubletake -target 192.168.1.77 -bitrate 4500
 
+# Set a target playout latency (default is 100ms)
+./doubletake -target 192.168.1.77 -target-latency-ms 100
+
 # Hardware encoding
 ./doubletake -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
 ./doubletake -target 192.168.1.77 -hwaccel vaapi   # Intel/AMD
 
 # Debug mode (verbose protocol logging)
 ./doubletake -target 192.168.1.77 -debug
+
+# Run daemon mode and control from a second shell
+./doubletake -daemonize
+doubletake-ctl status
+doubletake-ctl connect 192.168.1.77
+doubletake-ctl connect 192.168.1.133
+doubletake-ctl disconnect 192.168.1.77
+doubletake-ctl disconnect
 ```
 
 ### Flags
@@ -86,10 +100,32 @@ go build -o doubletake ./cmd/doubletake
 | `-height` | 1080 | Stream height |
 | `-fps` | 30 | Frames per second |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
+| `-target-latency-ms` | 100 | Target end-to-end latency in milliseconds (audio + video timing) |
 | `-hwaccel` | auto | Hardware accel: `auto`, `nvenc`, `vaapi`, `none` |
+| `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |
+| `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |
 | `-no-audio` | false | Disable audio streaming |
 | `-test` | false | Use synthetic video source |
+| `-daemonize` | false | Run as background daemon with Unix socket control interface |
+| `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock` | Daemon control socket path |
 | `-debug` | false | Verbose debug logging |
+
+### Daemon Control (`doubletake-ctl`)
+
+```sh
+doubletake-ctl status
+doubletake-ctl discover
+doubletake-ctl devices
+doubletake-ctl connect [target] [pin]
+doubletake-ctl pin <4-digit-PIN>
+doubletake-ctl disconnect [target]
+doubletake-ctl mute [target]
+doubletake-ctl unmute [target]
+```
+
+- `disconnect` without a target stops all active streams.
+- `disconnect <target>` stops only that receiver.
+- `mute`/`unmute` can operate globally or per target.
 
 ## Disclaimer
 
