@@ -46,8 +46,9 @@ kpackagetool6 -t Plasma/Applet -r org.doubletake.plasmoid
 
 4. Click the tray icon to:
    - **Discover** AirPlay devices on your network
-   - **Connect** to a device from the list
-   - **Disconnect** from the current session
+   - **Connect** to one or more devices from the list
+   - **Disconnect** a specific device from its row button
+   - **Mute/Unmute** mirrored audio for all active streams
 
 5. Middle-click the icon for quick toggle (connect/disconnect).
 

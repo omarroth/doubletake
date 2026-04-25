@@ -44,21 +44,35 @@ func (c *Client) Connect(target string, port int, pin string) (*daemon.Response,
 	return c.send(daemon.Request{Cmd: "connect", Target: target, Port: port, Pin: pin})
 }
 
-// Disconnect stops the current mirroring session.
+// Disconnect stops all active mirroring sessions.
 func (c *Client) Disconnect() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "disconnect"})
 }
 
-// Mute mutes mirrored audio on the current session.
+// DisconnectTarget stops the mirroring session to a specific receiver IP.
+func (c *Client) DisconnectTarget(target string) (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "disconnect", Target: target})
+}
+
+// Mute mutes mirrored audio on all active sessions.
 func (c *Client) Mute() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "mute"})
 }
 
-// Unmute unmutes mirrored audio on the current session.
+// MuteTarget mutes mirrored audio on the session to a specific receiver IP.
+func (c *Client) MuteTarget(target string) (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "mute", Target: target})
+}
+
+// Unmute unmutes mirrored audio on all active sessions.
 func (c *Client) Unmute() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "unmute"})
 }
 
+// UnmuteTarget unmutes mirrored audio on the session to a specific receiver IP.
+func (c *Client) UnmuteTarget(target string) (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "unmute", Target: target})
+}
 
 func (c *Client) send(req daemon.Request) (*daemon.Response, error) {
 	conn, err := net.DialTimeout("unix", c.SocketPath, 5*time.Second)

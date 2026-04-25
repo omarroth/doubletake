@@ -56,11 +56,23 @@ func main() {
 		}
 		resp, err = client.Connect("", 0, args[1])
 	case "disconnect":
-		resp, err = client.Disconnect()
+		if len(args) >= 2 {
+			resp, err = client.DisconnectTarget(args[1])
+		} else {
+			resp, err = client.Disconnect()
+		}
 	case "mute":
-		resp, err = client.Mute()
+		if len(args) >= 2 {
+			resp, err = client.MuteTarget(args[1])
+		} else {
+			resp, err = client.Mute()
+		}
 	case "unmute":
-		resp, err = client.Unmute()
+		if len(args) >= 2 {
+			resp, err = client.UnmuteTarget(args[1])
+		} else {
+			resp, err = client.Unmute()
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", cmd)
 		usage()
@@ -82,5 +94,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl [-socket path] <command> [args]\n\nCommands:\n  status              Show daemon state\n  discover            Discover AirPlay devices on the network\n  devices             List cached discovered devices\n  connect [target] [pin]  Start mirroring (to target IP, or first discovered device)\n  pin <4-digit-PIN>   Submit PIN for a device waiting for pairing\n  disconnect          Stop mirroring\n  mute                Mute mirrored audio\n  unmute              Unmute mirrored audio\n\nFlags:\n  -socket path        Override daemon socket path (default: %s)\n", daemon.DefaultSocketPath())
+	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl [-socket path] <command> [args]\n\nCommands:\n  status                      Show daemon state and all active streams\n  discover                    Discover AirPlay devices on the network\n  devices                     List cached discovered devices\n  connect [target] [pin]      Start mirroring (to target IP, or first free device)\n  pin <4-digit-PIN>           Submit PIN for a device waiting for pairing\n  disconnect [target]         Stop mirroring (all streams, or only the given IP)\n  mute [target]               Mute mirrored audio (all streams, or only the given IP)\n  unmute [target]             Unmute mirrored audio (all streams, or only the given IP)\n\nFlags:\n  -socket path                Override daemon socket path (default: %s)\n", daemon.DefaultSocketPath())
 }

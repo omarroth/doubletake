@@ -17,16 +17,17 @@ PlasmoidItem {
     property bool hasAudio: false
     property bool audioMuted: false
     property var deviceList: []
+    property var streamList: []
     property string errorText: ""
     property var pendingCommands: (new Object())
 
-    // Sorted device list: streaming device pinned to top, rest sorted by IP
+    // Sorted device list: active stream targets pinned to top, rest sorted by IP
     readonly property var sortedDeviceList: {
         var list = (root.deviceList || []).slice()
         list.sort(function(a, b) {
-            var aStreaming = root.isStreaming && root.connectedIP === a.ip
-            var bStreaming = root.isStreaming && root.connectedIP === b.ip
-            if (aStreaming !== bStreaming) return aStreaming ? -1 : 1
+            var aActive = root.isDeviceStreaming(a.ip) || root.isDeviceConnecting(a.ip)
+            var bActive = root.isDeviceStreaming(b.ip) || root.isDeviceConnecting(b.ip)
+            if (aActive !== bActive) return aActive ? -1 : 1
             if (a.ip < b.ip) return -1
             if (a.ip > b.ip) return 1
             return 0
@@ -38,7 +39,31 @@ PlasmoidItem {
     readonly property bool isStreaming: root.daemonState === "streaming"
     readonly property bool isConnecting: root.daemonState === "connecting"
     readonly property bool needsPIN: root.daemonState === "pin_required"
-    readonly property bool isBusy: root.daemonState === "discovering" || root.daemonState === "connecting"
+    readonly property bool isBusy: root.daemonState === "discovering"
+    readonly property bool hasAnyAudioStream: {
+        var streams = root.streamList || []
+        for (var i = 0; i < streams.length; i++) {
+            var s = streams[i]
+            if (s.state === "streaming" && s.has_audio) {
+                return true
+            }
+        }
+        return false
+    }
+    readonly property bool allAudioStreamsMuted: {
+        var streams = root.streamList || []
+        var foundAudio = false
+        for (var i = 0; i < streams.length; i++) {
+            var s = streams[i]
+            if (s.state === "streaming" && s.has_audio) {
+                foundAudio = true
+                if (!s.audio_muted) {
+                    return false
+                }
+            }
+        }
+        return foundAudio
+    }
 
     Plasmoid.icon: root.isStreaming ? "video-display" : "video-display-symbolic"
     Plasmoid.status: root.isStreaming
@@ -47,6 +72,36 @@ PlasmoidItem {
 
     toolTipMainText: root.isStreaming ? "Mirroring to " + root.connectedDevice : "AirPlay Mirroring"
     toolTipSubText: root.isStreaming ? "Click to manage" : "No active session"
+
+    function streamForIP(ip) {
+        var streams = root.streamList || []
+        for (var i = 0; i < streams.length; i++) {
+            if (streams[i].device_ip === ip) {
+                return streams[i]
+            }
+        }
+        return null
+    }
+
+    function isDeviceStreaming(ip) {
+        var s = root.streamForIP(ip)
+        return !!s && s.state === "streaming"
+    }
+
+    function isDeviceConnecting(ip) {
+        var s = root.streamForIP(ip)
+        return !!s && s.state === "connecting"
+    }
+
+    function deviceHasAudio(ip) {
+        var s = root.streamForIP(ip)
+        return !!s && s.state === "streaming" && !!s.has_audio
+    }
+
+    function isDeviceAudioMuted(ip) {
+        var s = root.streamForIP(ip)
+        return !!s && !!s.audio_muted
+    }
 
     // --- Daemon communication ---
 
@@ -85,10 +140,27 @@ PlasmoidItem {
         if (action === "status") {
             if (resp.ok) {
                 root.daemonState = resp.state || "idle"
-                root.connectedDevice = resp.device || ""
-                root.connectedIP = resp.device_ip || ""
-                root.hasAudio = !!resp.has_audio
-                root.audioMuted = !!resp.audio_muted
+                root.streamList = resp.streams || []
+
+                var primary = null
+                for (var i = 0; i < root.streamList.length; i++) {
+                    if (root.streamList[i].state === "streaming") {
+                        primary = root.streamList[i]
+                        break
+                    }
+                }
+
+                if (primary) {
+                    root.connectedDevice = primary.device || ""
+                    root.connectedIP = primary.device_ip || ""
+                    root.hasAudio = !!primary.has_audio
+                    root.audioMuted = !!primary.audio_muted
+                } else {
+                    root.connectedDevice = resp.device || ""
+                    root.connectedIP = resp.device_ip || ""
+                    root.hasAudio = !!resp.has_audio
+                    root.audioMuted = !!resp.audio_muted
+                }
                 root.errorText = ""
             } else {
                 root.daemonState = "idle"
@@ -96,6 +168,7 @@ PlasmoidItem {
                 root.connectedIP = ""
                 root.hasAudio = false
                 root.audioMuted = false
+                root.streamList = []
             }
         } else if (action === "discover") {
             if (resp.ok && resp.devices) {
@@ -194,14 +267,14 @@ PlasmoidItem {
                     }
                 }
                 Controls.ToolButton {
-                    icon.name: root.audioMuted ? "audio-volume-muted" : "audio-volume-high"
+                    icon.name: root.allAudioStreamsMuted ? "audio-volume-muted" : "audio-volume-high"
                     display: Controls.ToolButton.IconOnly
-                    visible: root.isStreaming && root.hasAudio
+                    visible: root.hasAnyAudioStream
                     enabled: !root.isBusy
-                    Controls.ToolTip.text: root.audioMuted ? "Unmute audio" : "Mute audio"
+                    Controls.ToolTip.text: root.allAudioStreamsMuted ? "Unmute all mirrored audio" : "Mute all mirrored audio"
                     Controls.ToolTip.visible: hovered
                     onClicked: {
-                        var action = root.audioMuted ? "unmute" : "mute"
+                        var action = root.allAudioStreamsMuted ? "unmute" : "mute"
                         root.runCtl([action], action)
                     }
                 }
@@ -301,8 +374,10 @@ PlasmoidItem {
                         topPadding: Kirigami.Units.smallSpacing
                         bottomPadding: Kirigami.Units.smallSpacing
 
-                        readonly property bool isThisDeviceStreaming: root.isStreaming && root.connectedIP === modelData.ip
-                        readonly property bool isThisDeviceConnecting: root.isConnecting && root.connectedIP === modelData.ip
+                        readonly property bool isThisDeviceStreaming: root.isDeviceStreaming(modelData.ip)
+                        readonly property bool isThisDeviceConnecting: root.isDeviceConnecting(modelData.ip)
+                        readonly property bool isThisDeviceAudioAvailable: root.deviceHasAudio(modelData.ip)
+                        readonly property bool isThisDeviceAudioMuted: root.isDeviceAudioMuted(modelData.ip)
 
                         contentItem: RowLayout {
                             spacing: Kirigami.Units.smallSpacing
@@ -351,6 +426,20 @@ PlasmoidItem {
                                 visible: deviceDelegate.isThisDeviceConnecting
                             }
 
+                            // Per-device mute toggle
+                            Controls.ToolButton {
+                                icon.name: deviceDelegate.isThisDeviceAudioMuted ? "audio-volume-muted" : "audio-volume-high"
+                                display: Controls.ToolButton.IconOnly
+                                visible: deviceDelegate.isThisDeviceStreaming && deviceDelegate.isThisDeviceAudioAvailable
+                                enabled: !root.isBusy
+                                Controls.ToolTip.text: deviceDelegate.isThisDeviceAudioMuted ? "Unmute this device" : "Mute this device"
+                                Controls.ToolTip.visible: hovered
+                                onClicked: {
+                                    var action = deviceDelegate.isThisDeviceAudioMuted ? "unmute" : "mute"
+                                    root.runCtl([action, modelData.ip], action)
+                                }
+                            }
+
                             // Connect / Disconnect button
                             Controls.ToolButton {
                                 icon.name: deviceDelegate.isThisDeviceStreaming ? "media-playback-stop" : "media-playback-start"
@@ -360,9 +449,8 @@ PlasmoidItem {
                                 enabled: !root.isBusy
                                 onClicked: {
                                     if (deviceDelegate.isThisDeviceStreaming) {
-                                        root.runCtl(["disconnect"], "disconnect")
+                                        root.runCtl(["disconnect", modelData.ip], "disconnect")
                                     } else {
-                                        root.connectedIP = modelData.ip
                                         root.runCtl(["connect", modelData.ip], "connect")
                                     }
                                 }
@@ -371,9 +459,8 @@ PlasmoidItem {
 
                         onClicked: {
                             if (deviceDelegate.isThisDeviceStreaming) {
-                                root.runCtl(["disconnect"], "disconnect")
+                                root.runCtl(["disconnect", modelData.ip], "disconnect")
                             } else if (!root.isBusy) {
-                                root.connectedIP = modelData.ip
                                 root.runCtl(["connect", modelData.ip], "connect")
                             }
                         }
