@@ -107,7 +107,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	gstArgs = append(gstArgs, "!")
 	gstArgs = append(gstArgs, encoderParts.parts...)
 	gstArgs = append(gstArgs,
-		"!", "h264parse", "config-interval=0",
+		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)
@@ -196,7 +196,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	gstArgs = append(gstArgs, "!")
 	gstArgs = append(gstArgs, encoder.parts...)
 	gstArgs = append(gstArgs,
-		"!", "h264parse", "config-interval=0",
+		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
 	)

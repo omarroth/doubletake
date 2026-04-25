@@ -586,6 +586,7 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	var vclBuf []byte               // AVCC-formatted data accumulating for current access unit
 	var pendingKeyframe bool        // true if vclBuf contains IDR slice(s)
 	var codecSent bool              // true if codec frame sent for current keyframe
+	var streamPrimed bool           // true after first SPS/PPS+IDR has been sent
 	var frameCount int
 	var nalLog strings.Builder
 
@@ -598,6 +599,17 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	flushVCL := func() error {
 		if len(vclBuf) == 0 {
 			return nil
+		}
+
+		// New sessions can attach mid-stream when using broadcast capture. Until we
+		// have an IDR plus current SPS/PPS, drop VCL units to avoid sending
+		// undecodable non-IDR frames that may cause receivers to close the stream.
+		if !streamPrimed {
+			if !pendingKeyframe || latestSPS == nil || latestPPS == nil {
+				vclBuf = vclBuf[:0]
+				nalLog.Reset()
+				return nil
+			}
 		}
 
 		// Graduated P-frame dropping based on congestion level.
@@ -626,6 +638,7 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 				close(s.firstFrameSent)
 			}
 			codecSent = true
+			streamPrimed = true
 		}
 
 		frameData := vclBuf
