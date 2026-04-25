@@ -40,6 +40,15 @@ PlasmoidItem {
     readonly property bool isConnecting: root.daemonState === "connecting"
     readonly property bool needsPIN: root.daemonState === "pin_required"
     readonly property bool isBusy: root.daemonState === "discovering"
+    readonly property bool hasAnyStreamingTarget: {
+        var streams = root.streamList || []
+        for (var i = 0; i < streams.length; i++) {
+            if (streams[i].state === "streaming") {
+                return true
+            }
+        }
+        return false
+    }
     readonly property bool hasAnyAudioStream: {
         var streams = root.streamList || []
         for (var i = 0; i < streams.length; i++) {
@@ -264,6 +273,17 @@ PlasmoidItem {
                     enabled: !root.isBusy
                     onClicked: {
                         root.runCtl(["discover"], "discover")
+                    }
+                }
+                Controls.ToolButton {
+                    icon.name: "media-playback-stop"
+                    display: Controls.ToolButton.IconOnly
+                    visible: root.hasAnyStreamingTarget
+                    enabled: !root.isBusy
+                    Controls.ToolTip.text: "Stop streaming to all targets"
+                    Controls.ToolTip.visible: hovered
+                    onClicked: {
+                        root.runCtl(["disconnect"], "disconnect")
                     }
                 }
                 Controls.ToolButton {
