@@ -203,12 +203,16 @@ func main() {
 	// FairPlay setup — establishes fp-setup state and ekey/eiv used for the
 	// final encrypted mirror stream. Pair-verify and FairPlay are both needed
 	// for Apple TV compatibility in the normal modern flow.
-	if client.FpEkey == nil {
+	// Non-Apple devices (e.g. Samsung AirPlay 2 TVs) do not implement /fp-setup;
+	// skip FairPlay entirely for receivers that don't advertise the feature.
+	if client.FpEkey == nil && info.SupportsFairPlay() {
 		if err := client.FairPlaySetup(ctx); err != nil {
 			log.Fatalf("FairPlay setup failed: %v", err)
 		} else {
 			log.Println("FairPlay setup complete")
 		}
+	} else if !info.SupportsFairPlay() {
+		log.Println("device does not support FairPlay, skipping fp-setup")
 	}
 
 	streamCfg := airplay.StreamConfig{

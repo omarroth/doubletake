@@ -137,6 +137,13 @@ func (c *AirPlayClient) GetInfo() (*ReceiverInfo, error) {
 	return &info, nil
 }
 
+// SupportsFairPlay reports whether the receiver advertises FairPlay SAP support
+// (FeatureFPSAP25, bit 14). Non-Apple devices such as Samsung AirPlay 2 TVs
+// typically do not set this bit and return 404 on /fp-setup.
+func (i *ReceiverInfo) SupportsFairPlay() bool {
+	return i.Features&FeatureFPSAP25 != 0
+}
+
 func (c *AirPlayClient) Pair(ctx context.Context, pin string) error {
 	if pin != "" {
 		return c.pairWithPIN(ctx, pin)

@@ -618,11 +618,16 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	}
 	_ = paired
 
-	// FairPlay setup
-	if err := client.FairPlaySetup(ctx); err != nil {
-		client.Close()
-		removeStream(fmt.Sprintf("FairPlay setup failed: %v", err))
-		return
+	// FairPlay setup — only for receivers that advertise FairPlay SAP support.
+	// Non-Apple devices (e.g. Samsung AirPlay 2 TVs) return 404 on /fp-setup.
+	if info.SupportsFairPlay() {
+		if err := client.FairPlaySetup(ctx); err != nil {
+			client.Close()
+			removeStream(fmt.Sprintf("FairPlay setup failed: %v", err))
+			return
+		}
+	} else {
+		log.Printf("[daemon] device does not support FairPlay, skipping fp-setup")
 	}
 
 	streamCfg := airplay.StreamConfig{
