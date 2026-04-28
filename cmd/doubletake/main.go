@@ -205,13 +205,15 @@ func main() {
 	// for Apple TV compatibility in the normal modern flow.
 	// Non-Apple devices (e.g. Samsung AirPlay 2 TVs) do not implement /fp-setup;
 	// skip FairPlay entirely for receivers that don't advertise the feature.
-	if client.FpEkey == nil && info.SupportsFairPlay() {
-		if err := client.FairPlaySetup(ctx); err != nil {
-			log.Fatalf("FairPlay setup failed: %v", err)
-		} else {
-			log.Println("FairPlay setup complete")
+	if info.SupportsFairPlay() {
+		if client.FpEkey == nil {
+			if err := client.FairPlaySetup(ctx); err != nil {
+				log.Fatalf("FairPlay setup failed: %v", err)
+			} else {
+				log.Println("FairPlay setup complete")
+			}
 		}
-	} else if !info.SupportsFairPlay() {
+	} else {
 		log.Println("device does not support FairPlay, skipping fp-setup")
 	}
 
