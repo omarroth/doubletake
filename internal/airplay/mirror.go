@@ -213,18 +213,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	// Modern HAP receivers look for shk on the audio stream descriptor.
+	// supportsDynamicStreamID must be false; true triggers a negotiation path
+	// that Apple TV firmware does not complete, causing a 400 Bad Request.
+	// streamConnections is omitted — Apple TV does not expect it from senders
+	// and including it (as a dict) causes the SETUP to be rejected.
 	if audioMode == audioSecurityChaCha && len(audioChaChaKey) == 32 {
 		audioStreamDesc["shk"] = audioChaChaKey
 		audioStreamDesc["isMedia"] = true
-		audioStreamDesc["supportsDynamicStreamID"] = true
-		audioStreamDesc["streamConnections"] = map[string]interface{}{
-			"streamConnectionTypeRTP": map[string]interface{}{
-				"streamConnectionKeyUseStreamEncryptionKey": true,
-			},
-			"streamConnectionTypeRTCP": map[string]interface{}{
-				"streamConnectionKeyPort": int64(audioControlLPort),
-			},
-		}
+		audioStreamDesc["supportsDynamicStreamID"] = false
 		dbg("[SETUP] audio stream descriptor includes shk (%d bytes)", len(audioChaChaKey))
 	} else if c.FpEkey != nil && c.fpIV != nil {
 		audioSetupPlist["et"] = int64(32)
