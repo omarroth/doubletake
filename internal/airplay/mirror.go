@@ -222,13 +222,12 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		audioStreamDesc["isMedia"] = true
 		audioStreamDesc["supportsDynamicStreamID"] = false
 		dbg("[SETUP] audio stream descriptor includes shk (%d bytes)", len(audioChaChaKey))
-	}
-	if c.FpEkey != nil && c.fpIV != nil {
+	} else if c.FpEkey != nil && c.fpIV != nil {
 		audioSetupPlist["et"] = int64(32)
 		audioSetupPlist["ekey"] = c.FpEkey
 		audioSetupPlist["eiv"] = c.fpIV
 		dbg("[SETUP] FairPlay ekey=%d bytes, eiv=%d bytes, et=32", len(c.FpEkey), len(c.fpIV))
-	} else if audioMode != audioSecurityChaCha || len(audioChaChaKey) != 32 {
+	} else {
 		dbg("[SETUP] WARNING: no FairPlay ekey/eiv — audio will likely not work")
 	}
 
