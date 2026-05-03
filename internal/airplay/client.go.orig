@@ -52,8 +52,6 @@ type AirPlayClient struct {
 	PairKeys  *PairKeys
 	sessionID string // X-Apple-Session-ID, set once per connection
 	PairingID string // Our pairing identifier (UUID)
-	dacpID    string
-	activeRemote string
 
 	// Encryption state after pair-verify
 	encrypted     bool
@@ -81,8 +79,6 @@ func NewAirPlayClient(host string, port int) *AirPlayClient {
 		port:      port,
 		sessionID: generateUUID(),
 		PairingID: generateUUID(),
-		dacpID:    generateHex16(),
-		activeRemote: generateNumeric(),
 	}
 }
 
@@ -263,13 +259,9 @@ func (c *AirPlayClient) rtspRequest(method, uri, contentType string, body []byte
 	for k, v := range extraHeaders {
 		fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
 	}
-	fmt.Fprintf(&buf, "DACP-ID: %s\r\n", c.dacpID)
-	fmt.Fprintf(&buf, "Active-Remote: %s\r\n", c.activeRemote)
 	if contentType != "" && len(body) > 0 {
 		fmt.Fprintf(&buf, "Content-Type: %s\r\n", contentType)
 	}
-	fmt.Fprintf(&buf, "DACP-ID: %s\r\n", c.dacpID)
-	fmt.Fprintf(&buf, "Active-Remote: %s\r\n", c.activeRemote)
 	fmt.Fprintf(&buf, "Content-Length: %d\r\n", len(body))
 	if c.sessionID != "" {
 		fmt.Fprintf(&buf, "X-Apple-Session-ID: %s\r\n", c.sessionID)
@@ -673,13 +665,3 @@ func (mc *mirrorCipher) EncryptFrame(payload []byte) []byte {
 
 	return out
 }
-
-func generateHex16() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func generateNumeric() string {
-	b := make([]byte, 4)
-	rand.Read(b)
