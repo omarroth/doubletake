@@ -1,4 +1,4 @@
-.PHONY: all build doubletake doubletake-ctl doubletake-release doubletake-ctl-release install install-man uninstall test clean
+.PHONY: all build doubletake doubletake-ctl doubletake-release doubletake-ctl-release manpages-release install install-man uninstall test clean
 
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
@@ -18,6 +18,9 @@ doubletake-release:
 
 doubletake-ctl-release:
 	CGO_ENABLED=0 go build -ldflags='-s -w -extldflags=-static' -o doubletake-ctl ./cmd/doubletake-ctl
+
+manpages-release:
+	tar -czf doubletake-manpages.tar.gz -C man man1
 
 test:
 	go test ./...
