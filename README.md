@@ -36,49 +36,85 @@ sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
   gst-plugins-ugly gst-libav
 ```
 
+You can also install from the AUR:
+
+- [`doubletake`](https://aur.archlinux.org/packages/doubletake) (stable release package)
+- [`doubletake-git`](https://aur.archlinux.org/packages/doubletake-git) (latest from git)
+- [`doubletake-bin`](https://aur.archlinux.org/packages/doubletake-bin) (prebuilt binary package)
+
 ## Build
 
 ```sh
-go build -o doubletake ./cmd/doubletake
-go build -o doubletake-ctl ./cmd/doubletake-ctl
+make
+```
+
+This builds both binaries into `bin/`:
+
+- `bin/doubletake`
+- `bin/doubletake-ctl`
+
+## Install
+
+Install binaries and man pages (default prefix: `/usr/local`):
+
+```sh
+sudo make install
+```
+
+Use a custom prefix if needed:
+
+```sh
+make install PREFIX=$HOME/.local
+```
+
+Uninstall:
+
+```sh
+sudo make uninstall
+```
+
+Run tests:
+
+```sh
+make test
 ```
 
 ## Usage
 
 ```sh
 # Discover Apple TVs on the network and stream
-./doubletake
+doubletake
 
 # Disable audio for video-only mirroring
-./doubletake -no-audio
+doubletake -no-audio
 
 # Connect to a specific Apple TV
-./doubletake -target 192.168.1.77
+doubletake -target 192.168.1.77
 
 # First-time pairing with PIN (saves credentials for reuse)
-./doubletake -target 192.168.1.77 -pair
+doubletake -target 192.168.1.77 -pair
 
 # Use saved credentials
-./doubletake -target 192.168.1.77 -creds airplay-credentials.json
+doubletake -target 192.168.1.77 -creds airplay-credentials.json
 
 # Adjust stream settings (bitrate 0 = auto)
-./doubletake -target 192.168.1.77 -width 1920 -height 1080 -fps 30 -bitrate 0
+doubletake -target 192.168.1.77 -width 1920 -height 1080 -fps 30 -bitrate 0
 
 # Force a lower bitrate on weaker Wi-Fi
-./doubletake -target 192.168.1.77 -bitrate 4500
+doubletake -target 192.168.1.77 -bitrate 4500
 
 # Set a target playout latency (default is 100ms)
-./doubletake -target 192.168.1.77 -target-latency-ms 100
+doubletake -target 192.168.1.77 -target-latency-ms 100
 
 # Hardware encoding
-./doubletake -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
-./doubletake -target 192.168.1.77 -hwaccel vaapi   # Intel/AMD
+doubletake -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
+doubletake -target 192.168.1.77 -hwaccel vaapi   # Intel/AMD
 
 # Debug mode (verbose protocol logging)
-./doubletake -target 192.168.1.77 -debug
+doubletake -target 192.168.1.77 -debug
 
 # Run daemon mode and control from a second shell
-./doubletake -daemonize
+doubletake -daemonize
 doubletake-ctl status
 doubletake-ctl connect 192.168.1.77
 doubletake-ctl connect 192.168.1.133
