@@ -1,0 +1,121 @@
+.TH DOUBLETAKE 1 "May 2026" "doubletake" "User Commands"
+.SH NAME
+doubletake \- AirPlay 2 screen mirroring sender for Linux
+.SH SYNOPSIS
+.B doubletake
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B doubletake
+is an AirPlay 2 screen mirroring sender that streams your Linux desktop to an Apple TV
+using the AirPlay 2 mirroring protocol. It supports both Wayland (PipeWire/xdg-desktop-portal)
+and X11 screen capture with hardware-accelerated H.264 encoding.
+.SH FEATURES
+.IP \(bu 2
+Full AirPlay 2 mirroring protocol (RTSP/HTTP + encrypted video stream)
+.IP \(bu 2
+FairPlay SAP authentication
+.IP \(bu 2
+SRP-6a pairing with PIN and persistent credential storage
+.IP \(bu 2
+Hardware-accelerated H.264 encoding (NVENC, VA-API) with software fallback
+.IP \(bu 2
+ChaCha20-Poly1305 stream encryption
+.IP \(bu 2
+mDNS device discovery
+.IP \(bu 2
+Daemon mode with multi-target streaming control via
+.B doubletake-ctl
+.SH OPTIONS
+.TP
+.B \-target \fIIP\fR
+Connect to a specific Apple TV by IP address (skips mDNS discovery)
+.TP
+.B \-port \fIPORT\fR
+AirPlay port (default: 7000)
+.TP
+.B \-pin \fIPIN\fR
+4-digit PIN for pairing
+.TP
+.B \-pair
+Force new pairing even if credentials exist
+.TP
+.B \-cred-backend \fIBACKEND\fR
+Credential storage backend: \fBfile\fR or \fBkeyring\fR (default: file)
+.TP
+.B \-creds \fIPATH\fR
+Path to credentials file (default: ~/.config/doubletake/credentials.json)
+.TP
+.B \-width \fIWIDTH\fR
+Stream width in pixels (default: 1920)
+.TP
+.B \-height \fIHEIGHT\fR
+Stream height in pixels (default: 1080)
+.TP
+.B \-fps \fIFPS\fR
+Frames per second (default: 30)
+.TP
+.B \-bitrate \fIKBPS\fR
+Target bitrate in kbps (0 = auto, default: 0)
+.TP
+.B \-target-latency-ms \fIMS\fR
+Target playout latency in milliseconds (default: 100)
+.TP
+.B \-no-audio
+Disable audio for video-only mirroring
+.TP
+.B \-hwaccel \fIMETHOD\fR
+Hardware acceleration method: \fBnvenc\fR (NVIDIA) or \fBvaapi\fR (Intel/AMD)
+.TP
+.B \-debug
+Enable verbose protocol logging
+.TP
+.B \-daemonize
+Run in daemon mode for multi-target control via
+.B doubletake-ctl
+.SH EXAMPLES
+.TP
+Discover and connect to any Apple TV on the network:
+.B doubletake
+.TP
+Connect to a specific Apple TV:
+.B doubletake \-target 192.168.1.77
+.TP
+Pair with a PIN (saves credentials for reuse):
+.B doubletake \-target 192.168.1.77 \-pair \-pin 1234
+.TP
+Stream with custom resolution and bitrate:
+.B doubletake \-target 192.168.1.77 \-width 1280 \-height 720 \-fps 30 \-bitrate 4500
+.TP
+Force lower bitrate on weak Wi-Fi:
+.B doubletake \-target 192.168.1.77 \-bitrate 3000
+.TP
+Use hardware acceleration (NVIDIA):
+.B doubletake \-target 192.168.1.77 \-hwaccel nvenc
+.TP
+Run in daemon mode:
+.B doubletake \-daemonize
+.TP
+Debug mode with verbose logging:
+.B doubletake \-target 192.168.1.77 \-debug
+.SH DAEMON MODE
+When run with \fB\-daemonize\fR, doubletake runs as a background service that can control
+multiple simultaneous connections. Use
+.B doubletake-ctl
+to manage the daemon.
+.SH REQUIREMENTS
+.IP \(bu 2
+Go 1.23 or later
+.IP \(bu 2
+GStreamer 1.0 (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
+.IP \(bu 2
+PipeWire (Wayland) or X11 for screen capture
+.SH FILES
+.TP
+.I ~/.config/doubletake/credentials.json
+Default location for saved AirPlay credentials
+.SH SEE ALSO
+.B doubletake-ctl(1)
+.SH AUTHOR
+Written by Omar Roth.
+.SH LICENSE
+GPLv3+

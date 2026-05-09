@@ -1,4 +1,7 @@
-.PHONY: all build doubletake doubletake-ctl release-doubletake release-doubletake-ctl test clean
+.PHONY: all build doubletake doubletake-ctl doubletake-release doubletake-ctl-release install install-man uninstall test clean
+
+PREFIX ?= /usr/local
+MANDIR ?= $(PREFIX)/share/man
 
 all: doubletake doubletake-ctl
 
@@ -18,6 +21,21 @@ doubletake-ctl-release:
 
 test:
 	go test ./...
+
+install: all install-man
+	install -m 755 bin/doubletake $(PREFIX)/bin/
+	install -m 755 bin/doubletake-ctl $(PREFIX)/bin/
+
+install-man:
+	install -d $(MANDIR)/man1
+	install -m 644 man/man1/doubletake.1 $(MANDIR)/man1/
+	install -m 644 man/man1/doubletake-ctl.1 $(MANDIR)/man1/
+
+uninstall:
+	rm -f $(PREFIX)/bin/doubletake
+	rm -f $(PREFIX)/bin/doubletake-ctl
+	rm -f $(MANDIR)/man1/doubletake.1
+	rm -f $(MANDIR)/man1/doubletake-ctl.1
 
 clean:
 	rm -rf bin/

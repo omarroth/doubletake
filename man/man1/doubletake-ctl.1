@@ -1,0 +1,57 @@
+.TH DOUBLETAKE-CTL 1 "May 2026" "doubletake" "User Commands"
+.SH NAME
+doubletake-ctl \- Control doubletake daemon
+.SH SYNOPSIS
+.B doubletake-ctl
+\fICOMMAND\fR [\fIARGUMENTS\fR]
+.SH DESCRIPTION
+.B doubletake-ctl
+is a command-line interface for controlling the
+.B doubletake
+daemon. It allows you to query status, connect to and disconnect from Apple TVs,
+and manage multiple simultaneous mirroring sessions.
+.SH COMMANDS
+.TP
+.B status
+Query the status of the running doubletake daemon and list active connections
+.TP
+.B connect \fITARGET\fR
+Connect to an Apple TV at the specified IP address
+.TP
+.B disconnect [\fITARGET\fR]
+Disconnect from an Apple TV. If no target is specified, disconnects all active connections
+.SH EXAMPLES
+.TP
+Check daemon status:
+.B doubletake-ctl status
+.TP
+Connect to an Apple TV:
+.B doubletake-ctl connect 192.168.1.77
+.TP
+Connect to multiple Apple TVs:
+.B doubletake-ctl connect 192.168.1.77
+.B doubletake-ctl connect 192.168.1.100
+.TP
+Disconnect from a specific Apple TV:
+.B doubletake-ctl disconnect 192.168.1.77
+.TP
+Disconnect all connections:
+.B doubletake-ctl disconnect
+.SH USAGE
+First, start the doubletake daemon in a separate terminal or background:
+.IP
+.B doubletake \-daemonize
+.IP
+Then use
+.B doubletake-ctl
+to manage connections:
+.IP
+.B doubletake-ctl status
+.B doubletake-ctl connect 192.168.1.77
+.B doubletake-ctl connect 192.168.1.100
+.SH SEE ALSO
+.B doubletake(1)
+.SH AUTHOR
+Written by Omar Roth.
+.SH LICENSE
+GPLv3+
