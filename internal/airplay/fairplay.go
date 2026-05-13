@@ -7,11 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"doubletake/internal/fpemu"
+	"doubletake/internal/fairplay"
 )
-
-// fairPlayM1 is the fixed m1 blob that matches the snapshot state.
-var fairPlayM1 = mustDecodeHexFP("46504c590301010000000004020003bb")
 
 func mustDecodeHexFP(s string) []byte {
 	b, err := hex.DecodeString(s)
@@ -22,13 +19,14 @@ func mustDecodeHexFP(s string) []byte {
 }
 
 // FairPlaySetup performs the complete FairPlay SAP handshake using the
-// standalone ARM64 interpreter.
+// configured FairPlay v3 client implementation.
 func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] starting FairPlay SAP handshake...")
 
+	fpClient := fairplay.NewClient{}
+
 	// Phase 1: Send m1, receive m2
-	m1 := make([]byte, len(fairPlayM1))
-	copy(m1, fairPlayM1)
+	m1 := fpClient.M1()
 
 	dbg("[FP] posting m1 (%d bytes) to /fp-setup", len(m1))
 	m2, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m1,
@@ -43,10 +41,10 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] received m2 (%d bytes)", len(m2))
 	dbg("[FP] m2 first 32: %02x", m2[:min(32, len(m2))])
 
-	// Phase 2: Compute m3 via standalone interpreter, send to server
-	m3raw, err := fpemu.FPSAPExchangeM3(m2)
+	// Phase 2: Compute m3 through the FairPlay client.
+	m3raw, err := fpClient.ComputeM3(m2)
 	if err != nil {
-		return fmt.Errorf("FPSAPExchange: %w", err)
+		return fmt.Errorf("fairplay compute m3: %w", err)
 	}
 
 	// Ensure FPLY framing
