@@ -326,11 +326,9 @@ type AudioStream struct {
 	cipher          cipher.Block // AES-128 for audio encryption (nil = no encryption)
 	aesIV           []byte       // 16-byte IV for AES-CBC
 	chachaCipher    cipher.AEAD  // ChaCha20-Poly1305 for modern Apple receivers
-	securityMode    audioSecurityMode
 	chachaNonce     uint64
 	chachaNonceMode audioChaChaNonceMode
 	chachaAADMode   audioChaChaAADMode
-	ct              byte   // compression type: 2=ALAC
 	spf             uint16 // samples per frame
 	latencySamples  uint32 // audio latency in samples (for sync packets)
 	mu              sync.Mutex
@@ -390,10 +388,8 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 		cipher:          block,
 		aesIV:           aesIV,
 		chachaCipher:    aead,
-		securityMode:    securityMode,
 		chachaNonceMode: defaultAudioChaChaNonceMode(),
 		chachaAADMode:   defaultAudioChaChaAADMode(),
-		ct:              ct,
 		spf:             spf,
 		latencySamples:  latencySamples,
 	}
@@ -469,7 +465,7 @@ func (as *AudioStream) nextAudioChaChaNonce(seq uint16, rtpTime uint32, reuse *u
 	return value, nonce
 }
 
-func (as *AudioStream) audioChaChaAAD(header []byte, rtpTime uint32) []byte {
+func (as *AudioStream) audioChaChaAAD(header []byte) []byte {
 	switch as.chachaAADMode {
 	case audioChaChaAADRTPHeader:
 		return header
@@ -484,14 +480,7 @@ func (as *AudioStream) audioChaChaAAD(header []byte, rtpTime uint32) []byte {
 	}
 }
 
-// sendAudioPacketWithSeq sends a single RTP audio packet with explicit seq and RTP timestamp.
-// The caller manages sequence numbers (frame-based, not packet-based).
-// payload is the raw encoded frame data.
-func (as *AudioStream) sendAudioPacketWithSeq(payload []byte, rtpTime uint32, seq uint16) error {
-	_, err := as.sendAudioPacketWithSeqAndNonce(payload, rtpTime, seq, nil)
-	return err
-}
-
+// sendAudioPacketWithSeqAndNonce sends a single RTP audio packet with explicit seq and RTP timestamp.
 func (as *AudioStream) sendAudioPacketWithSeqAndNonce(payload []byte, rtpTime uint32, seq uint16, reuseNonce *uint64) (uint64, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
@@ -510,7 +499,7 @@ func (as *AudioStream) sendAudioPacketWithSeqAndNonce(payload []byte, rtpTime ui
 	if as.chachaCipher != nil {
 		var nonce [audioChaChaNonceSize]byte
 		usedNonce, nonce = as.nextAudioChaChaNonce(seq, rtpTime, reuseNonce)
-		aad := as.audioChaChaAAD(header, rtpTime)
+		aad := as.audioChaChaAAD(header)
 		sealed := as.chachaCipher.Seal(nil, nonce[:], payload, aad)
 		packetPayload = make([]byte, len(sealed)+8)
 		copy(packetPayload, sealed)

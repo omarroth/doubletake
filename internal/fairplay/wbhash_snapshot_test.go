@@ -105,8 +105,8 @@ func TestWBHashSnapshotReadRangesForAnalysis(t *testing.T) {
 					if !snapshotPages[page] {
 						continue
 					}
-					start := maxU64(addr, page)
-					end := minU64(addr+uint64(n), page+wbStaticPageSize)
+					start := max(addr, page)
+					end := min(addr+uint64(n), page+wbStaticPageSize)
 					rangesByPage[page] = append(rangesByPage[page], wbHashReadRange{start: start - page, end: end - page})
 					readsByPage[page]++
 				}
@@ -143,8 +143,8 @@ func TestWBHashSnapshotReadPCsForAnalysis(t *testing.T) {
 					if !snapshotPages[page] {
 						continue
 					}
-					start := maxU64(addr, page)
-					end := minU64(addr+uint64(n), page+wbStaticPageSize)
+					start := max(addr, page)
+					end := min(addr+uint64(n), page+wbStaticPageSize)
 					source := wbHashReadSource{page: page, pc: pc}
 					rangesBySource[source] = append(rangesBySource[source], wbHashReadRange{start: start - page, end: end - page})
 					readsBySource[source]++
@@ -324,16 +324,4 @@ func formatWBHashReadRanges(ranges []wbHashReadRange) string {
 	return strings.Join(parts, ", ")
 }
 
-func minU64(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
-}
 
-func maxU64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}

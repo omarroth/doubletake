@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -98,12 +97,6 @@ func (c *AirPlayClient) Close() error {
 		return c.conn.Close()
 	}
 	return nil
-}
-
-// ClearSessionID clears the session ID so requests don't include X-Apple-Session-ID.
-// Used for the raw/legacy protocol path (raw pair-verify).
-func (c *AirPlayClient) ClearSessionID() {
-	c.sessionID = ""
 }
 
 func (c *AirPlayClient) GetInfo() (*ReceiverInfo, error) {
@@ -522,19 +515,6 @@ func (c *AirPlayClient) readEncryptedFrame() ([]byte, error) {
 	return plaintext, nil
 }
 
-// readDecryptedBytes reads and decrypts enough bytes from the encrypted channel.
-func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
-	var buf []byte
-	for len(buf) < n {
-		frame, err := c.readEncryptedFrame()
-		if err != nil {
-			return nil, err
-		}
-		buf = append(buf, frame...)
-	}
-	return buf[:n], nil
-}
-
 // StreamConfig holds the configuration for a mirroring session.
 type StreamConfig struct {
 	Width     int
@@ -551,28 +531,6 @@ type StreamConfig struct {
 	// host-firewall rules. The range must fit at least 4 ports.
 	PortMin int
 	PortMax int
-}
-
-// generateStreamKey creates a random AES-128 key for stream encryption.
-func generateStreamKey() (key, iv []byte, err error) {
-	key = make([]byte, 16)
-	iv = make([]byte, 16)
-	if _, err = rand.Read(key); err != nil {
-		return nil, nil, err
-	}
-	if _, err = rand.Read(iv); err != nil {
-		return nil, nil, err
-	}
-	return key, iv, nil
-}
-
-// newStreamCipher creates an AES-CTR cipher for stream encryption.
-func newStreamCipher(key, iv []byte) (cipher.Stream, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewCTR(block, iv), nil
 }
 
 // mirrorCipher implements the AirPlay mirroring AES-CTR encryption scheme

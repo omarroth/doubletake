@@ -1,5 +1,56 @@
 package fairplay
 
+import "encoding/binary"
+
+func wbStaticBytesAtSpans(addr uint64, n int, spans []struct {
+	addr uint64
+	data []byte
+}) ([]byte, bool) {
+	for _, span := range spans {
+		if n > len(span.data) || addr < span.addr {
+			continue
+		}
+		offset := addr - span.addr
+		if offset <= uint64(len(span.data)-n) {
+			return span.data[int(offset):], true
+		}
+	}
+	return nil, false
+}
+
+func wbStaticSpansRead8(addr uint64, spans []struct {
+	addr uint64
+	data []byte
+}) (uint8, bool) {
+	b, ok := wbStaticBytesAtSpans(addr, 1, spans)
+	if !ok {
+		return 0, false
+	}
+	return b[0], true
+}
+
+func wbStaticSpansRead32(addr uint64, spans []struct {
+	addr uint64
+	data []byte
+}) (uint32, bool) {
+	b, ok := wbStaticBytesAtSpans(addr, 4, spans)
+	if !ok {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(b), true
+}
+
+func wbStaticSpansRead64(addr uint64, spans []struct {
+	addr uint64
+	data []byte
+}) (uint64, bool) {
+	b, ok := wbStaticBytesAtSpans(addr, 8, spans)
+	if !ok {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(b), true
+}
+
 const (
 	wbStaticConstPageBase       uint64 = 0x1a1305000
 	wbStaticVectorConstPageBase uint64 = 0x1a1306000
@@ -529,86 +580,38 @@ func wbStaticPage130ERead32OrMem(mem *fpMem, addr uint64) uint32 {
 	return mem.read32(addr)
 }
 
+var wbStaticPage130DSpans = [...]struct {
+	addr uint64
+	data []byte
+}{
+	{addr: wbStaticPage130DBase + 0xd20, data: wbStaticPage130DBytesD20[:]},
+}
+
 func wbStaticPage130DRead32OK(addr uint64) (uint32, bool) {
 	if addr == wbStaticPage130DBase+0x70c {
 		return 0x0000002c, true
 	}
-	if addr < wbStaticPage130DBase+0xd20 {
-		return 0, false
-	}
-	offset := addr - (wbStaticPage130DBase + 0xd20)
-	if offset > uint64(len(wbStaticPage130DBytesD20)-4) {
-		return 0, false
-	}
-	b := wbStaticPage130DBytesD20[offset:]
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24, true
+	return wbStaticSpansRead32(addr, wbStaticPage130DSpans[:])
 }
 
 func wbStaticPage130DRead64OK(addr uint64) (uint64, bool) {
-	if addr < wbStaticPage130DBase+0xd20 {
-		return 0, false
-	}
-	offset := addr - (wbStaticPage130DBase + 0xd20)
-	if offset > uint64(len(wbStaticPage130DBytesD20)-8) {
-		return 0, false
-	}
-	b := wbStaticPage130DBytesD20[offset:]
-	return uint64(b[0]) |
-		uint64(b[1])<<8 |
-		uint64(b[2])<<16 |
-		uint64(b[3])<<24 |
-		uint64(b[4])<<32 |
-		uint64(b[5])<<40 |
-		uint64(b[6])<<48 |
-		uint64(b[7])<<56, true
+	return wbStaticSpansRead64(addr, wbStaticPage130DSpans[:])
 }
 
-func wbStaticPage1309BytesAt(addr uint64, n int) ([]byte, bool) {
-	if addr >= wbStaticPage1309Base+0x280 {
-		offset := addr - (wbStaticPage1309Base + 0x280)
-		if offset <= uint64(len(wbStaticPage1309Bytes280)-n) {
-			return wbStaticPage1309Bytes280[int(offset):], true
-		}
-	}
-	if addr >= wbStaticPage1309Base+0x2ad {
-		offset := addr - (wbStaticPage1309Base + 0x2ad)
-		if offset <= uint64(len(wbStaticPage1309Bytes2AD)-n) {
-			return wbStaticPage1309Bytes2AD[int(offset):], true
-		}
-	}
-	if addr >= wbStaticPage1309Base+0x2e0 {
-		offset := addr - (wbStaticPage1309Base + 0x2e0)
-		if offset <= uint64(len(wbStaticPage1309Bytes2E0)-n) {
-			return wbStaticPage1309Bytes2E0[int(offset):], true
-		}
-	}
-	if addr >= wbStaticPage1309Base+0x314 {
-		offset := addr - (wbStaticPage1309Base + 0x314)
-		if offset <= uint64(len(wbStaticPage1309Bytes314)-n) {
-			return wbStaticPage1309Bytes314[int(offset):], true
-		}
-	}
-	if addr >= wbStaticPage1309Base+0x347 {
-		offset := addr - (wbStaticPage1309Base + 0x347)
-		if offset <= uint64(len(wbStaticPage1309Bytes347)-n) {
-			return wbStaticPage1309Bytes347[int(offset):], true
-		}
-	}
-	if addr >= wbStaticPage1309Base+0x37a {
-		offset := addr - (wbStaticPage1309Base + 0x37a)
-		if offset <= uint64(len(wbStaticPage1309Bytes37A)-n) {
-			return wbStaticPage1309Bytes37A[int(offset):], true
-		}
-	}
-	return nil, false
+var wbStaticPage1309Spans = [...]struct {
+	addr uint64
+	data []byte
+}{
+	{addr: wbStaticPage1309Base + 0x280, data: wbStaticPage1309Bytes280[:]},
+	{addr: wbStaticPage1309Base + 0x2ad, data: wbStaticPage1309Bytes2AD[:]},
+	{addr: wbStaticPage1309Base + 0x2e0, data: wbStaticPage1309Bytes2E0[:]},
+	{addr: wbStaticPage1309Base + 0x314, data: wbStaticPage1309Bytes314[:]},
+	{addr: wbStaticPage1309Base + 0x347, data: wbStaticPage1309Bytes347[:]},
+	{addr: wbStaticPage1309Base + 0x37a, data: wbStaticPage1309Bytes37A[:]},
 }
 
 func wbStaticPage1309Read8OK(addr uint64) (uint8, bool) {
-	b, ok := wbStaticPage1309BytesAt(addr, 1)
-	if !ok {
-		return 0, false
-	}
-	return b[0], true
+	return wbStaticSpansRead8(addr, wbStaticPage1309Spans[:])
 }
 
 func wbStaticPage1309Read32OK(addr uint64) (uint32, bool) {
@@ -644,167 +647,55 @@ func wbStaticPage1309Read32OK(addr uint64) (uint32, bool) {
 	case wbStaticPage1309Base + 0x278:
 		return 0x00000054, true
 	}
-	b, ok := wbStaticPage1309BytesAt(addr, 4)
-	if !ok {
-		return 0, false
-	}
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24, true
-}
-
-func wbStaticPage130CBytesAt(addr uint64, n int) ([]byte, bool) {
-	for _, span := range wbStaticPage130CSpans {
-		if n > len(span.data) || addr < span.addr {
-			continue
-		}
-		offset := addr - span.addr
-		if offset <= uint64(len(span.data)-n) {
-			return span.data[int(offset):], true
-		}
-	}
-	return nil, false
+	return wbStaticSpansRead32(addr, wbStaticPage1309Spans[:])
 }
 
 func wbStaticPage130CRead8OK(addr uint64) (uint8, bool) {
-	b, ok := wbStaticPage130CBytesAt(addr, 1)
-	if !ok {
-		return 0, false
-	}
-	return b[0], true
+	return wbStaticSpansRead8(addr, wbStaticPage130CSpans[:])
 }
 
 func wbStaticPage130CRead32OK(addr uint64) (uint32, bool) {
-	b, ok := wbStaticPage130CBytesAt(addr, 4)
-	if !ok {
-		return 0, false
-	}
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24, true
+	return wbStaticSpansRead32(addr, wbStaticPage130CSpans[:])
 }
 
 func wbStaticPage130CRead64OK(addr uint64) (uint64, bool) {
-	b, ok := wbStaticPage130CBytesAt(addr, 8)
-	if !ok {
-		return 0, false
-	}
-	return uint64(b[0]) |
-		uint64(b[1])<<8 |
-		uint64(b[2])<<16 |
-		uint64(b[3])<<24 |
-		uint64(b[4])<<32 |
-		uint64(b[5])<<40 |
-		uint64(b[6])<<48 |
-		uint64(b[7])<<56, true
-}
-
-func wbStaticPage1314BytesAt(addr uint64, n int) ([]byte, bool) {
-	for _, span := range wbStaticPage1314Spans {
-		if n > len(span.data) || addr < span.addr {
-			continue
-		}
-		offset := addr - span.addr
-		if offset <= uint64(len(span.data)-n) {
-			return span.data[int(offset):], true
-		}
-	}
-	return nil, false
+	return wbStaticSpansRead64(addr, wbStaticPage130CSpans[:])
 }
 
 func wbStaticPage1314Read8OK(addr uint64) (uint8, bool) {
-	b, ok := wbStaticPage1314BytesAt(addr, 1)
-	if !ok {
-		return 0, false
-	}
-	return b[0], true
+	return wbStaticSpansRead8(addr, wbStaticPage1314Spans[:])
 }
 
 func wbStaticPage1314Read32OK(addr uint64) (uint32, bool) {
-	b, ok := wbStaticPage1314BytesAt(addr, 4)
-	if !ok {
-		return 0, false
-	}
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24, true
+	return wbStaticSpansRead32(addr, wbStaticPage1314Spans[:])
 }
 
 func wbStaticPage1314Read64OK(addr uint64) (uint64, bool) {
-	b, ok := wbStaticPage1314BytesAt(addr, 8)
-	if !ok {
-		return 0, false
-	}
-	return uint64(b[0]) |
-		uint64(b[1])<<8 |
-		uint64(b[2])<<16 |
-		uint64(b[3])<<24 |
-		uint64(b[4])<<32 |
-		uint64(b[5])<<40 |
-		uint64(b[6])<<48 |
-		uint64(b[7])<<56, true
-}
-
-func wbStaticPage1311BytesAt(addr uint64, n int) ([]byte, bool) {
-	for _, span := range wbStaticPage1311Spans {
-		if n > len(span.data) || addr < span.addr {
-			continue
-		}
-		offset := addr - span.addr
-		if offset <= uint64(len(span.data)-n) {
-			return span.data[int(offset):], true
-		}
-	}
-	return nil, false
+	return wbStaticSpansRead64(addr, wbStaticPage1314Spans[:])
 }
 
 func wbStaticPage1311Read8OK(addr uint64) (uint8, bool) {
-	b, ok := wbStaticPage1311BytesAt(addr, 1)
-	if !ok {
-		return 0, false
-	}
-	return b[0], true
+	return wbStaticSpansRead8(addr, wbStaticPage1311Spans[:])
 }
 
 func wbStaticPage1311Read32OK(addr uint64) (uint32, bool) {
-	b, ok := wbStaticPage1311BytesAt(addr, 4)
-	if !ok {
-		return 0, false
-	}
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24, true
+	return wbStaticSpansRead32(addr, wbStaticPage1311Spans[:])
 }
 
 func wbStaticPage1311Read64OK(addr uint64) (uint64, bool) {
-	b, ok := wbStaticPage1311BytesAt(addr, 8)
-	if !ok {
-		return 0, false
-	}
-	return uint64(b[0]) |
-		uint64(b[1])<<8 |
-		uint64(b[2])<<16 |
-		uint64(b[3])<<24 |
-		uint64(b[4])<<32 |
-		uint64(b[5])<<40 |
-		uint64(b[6])<<48 |
-		uint64(b[7])<<56, true
+	return wbStaticSpansRead64(addr, wbStaticPage1311Spans[:])
 }
 
-func wbStaticPage130ABytesAt(addr uint64, n int) ([]byte, bool) {
-	if addr >= wbStaticPage130ABase+0x144 {
-		offset := addr - (wbStaticPage130ABase + 0x144)
-		if offset <= uint64(len(wbStaticPage130ABytes144)-n) {
-			return wbStaticPage130ABytes144[int(offset):], true
-		}
-	}
-	if addr >= wbStaticPage130ABase+0x830 {
-		offset := addr - (wbStaticPage130ABase + 0x830)
-		if offset <= uint64(len(wbStaticPage130ABytes830)-n) {
-			return wbStaticPage130ABytes830[int(offset):], true
-		}
-	}
-	return nil, false
+var wbStaticPage130ASpans = [...]struct {
+	addr uint64
+	data []byte
+}{
+	{addr: wbStaticPage130ABase + 0x144, data: wbStaticPage130ABytes144[:]},
+	{addr: wbStaticPage130ABase + 0x830, data: wbStaticPage130ABytes830[:]},
 }
 
 func wbStaticPage130ARead8OK(addr uint64) (uint8, bool) {
-	b, ok := wbStaticPage130ABytesAt(addr, 1)
-	if !ok {
-		return 0, false
-	}
-	return b[0], true
+	return wbStaticSpansRead8(addr, wbStaticPage130ASpans[:])
 }
 
 func wbStaticPage130ARead32OK(addr uint64) (uint32, bool) {
@@ -820,40 +711,18 @@ func wbStaticPage130ARead32OK(addr uint64) (uint32, bool) {
 	case wbStaticPage130ABase + 0xe98:
 		return 0x00000048, true
 	}
-	b, ok := wbStaticPage130ABytesAt(addr, 4)
-	if !ok {
-		return 0, false
-	}
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24, true
+	return wbStaticSpansRead32(addr, wbStaticPage130ASpans[:])
 }
 
 func wbStaticPage130ARead64OK(addr uint64) (uint64, bool) {
 	if addr == wbStaticPage130ABase+0x890 {
 		return 0x0000005800000000, true
 	}
-	b, ok := wbStaticPage130ABytesAt(addr, 8)
-	if !ok {
-		return 0, false
-	}
-	return uint64(b[0]) |
-		uint64(b[1])<<8 |
-		uint64(b[2])<<16 |
-		uint64(b[3])<<24 |
-		uint64(b[4])<<32 |
-		uint64(b[5])<<40 |
-		uint64(b[6])<<48 |
-		uint64(b[7])<<56, true
+	return wbStaticSpansRead64(addr, wbStaticPage130ASpans[:])
 }
 
 func wbStaticPage130EReadS32(addr uint64) uint64 {
-	return fpSignExtend(uint64(wbStaticPage130ERead32(addr)), 32)
-}
-
-func wbStaticPage130ERead8(addr uint64) uint8 {
-	if v, ok := wbStaticPage130ERead8OK(addr); ok {
-		return v
-	}
-	panic("unexpected static 0x1a130e000 read8")
+	return fpSignExtend32(uint64(wbStaticPage130ERead32(addr)))
 }
 
 func wbStaticPage130ERead8OK(addr uint64) (uint8, bool) {

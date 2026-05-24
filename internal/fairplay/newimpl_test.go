@@ -28,8 +28,7 @@ func TestNewClientComputeM3CapturedM2(t *testing.T) {
 		t.Fatalf("m3 hash tail = %x, want %x", got, wantTail)
 	}
 
-	server := NewServer{FixedM2: capturedM2}
-	if err := server.VerifyM3(capturedM2, m3); err != nil {
+	if err := (NewServer{}).VerifyM3(capturedM2, m3); err != nil {
 		t.Fatalf("VerifyM3 failed: %v", err)
 	}
 }

@@ -576,7 +576,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Start heartbeat in background
 	go session.heartbeatLoop(ctx, controlURI, sessionUUID)
 	go session.dataHeartbeatLoop(ctx)
-	go session.feedbackLoop(ctx, controlURI)
+	go session.feedbackLoop(ctx)
 
 	return session, nil
 }
@@ -785,13 +785,6 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			}
 		}
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // h264Parser incrementally extracts NAL units from either Annex-B or length-prefixed AVC streams.
@@ -1308,7 +1301,7 @@ func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
 // feedbackLoop sends periodic POST /feedback requests like AirMyPC (every 2s).
 // Sends an immediate first feedback to prevent UxPlay's 3-second timeout from
 // killing the connection before the first ticker fires.
-func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
+func (s *MirrorSession) feedbackLoop(ctx context.Context) {
 	// Wait for first video frame before sending feedback
 	select {
 	case <-ctx.Done():

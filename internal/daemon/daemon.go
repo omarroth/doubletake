@@ -96,7 +96,6 @@ func DefaultSocketPath() string {
 type activeStream struct {
 	device     string // friendly name
 	deviceIP   string
-	deviceID   string
 	state      State
 	audioMuted bool
 	session    *airplay.MirrorSession
@@ -539,7 +538,6 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	d.mu.Lock()
 	if entry, ok := d.streams[target]; ok {
 		entry.device = info.Name
-		entry.deviceID = deviceID
 	}
 	d.mu.Unlock()
 

@@ -17,8 +17,6 @@ import (
 // white-box hash.
 type NewClient struct{}
 
-func (NewClient) Name() string { return "new" }
-
 func (NewClient) M1() []byte {
 	out := make([]byte, len(FixedM1))
 	copy(out, FixedM1)
@@ -66,34 +64,11 @@ func (NewClient) ComputeM3(m2 []byte) ([]byte, error) {
 	return out, nil
 }
 
-// NewServer is the in-process pure-Go server. Per the project plan
-// (see the user's "O1" choice), m1→m2 has no oracle: we have never
-// observed Apple TV's m1-to-m2 transformation rule, so this server
-// returns a fixed well-formed m2 (the previously-captured Apple TV
-// response by default).
-//
-// VerifyM3 cross-checks the hash tail using WBHash.
-type NewServer struct {
-	FixedM2 []byte
-}
+// NewServer is the in-process pure-Go receiver used by tests to
+// cross-check the hash tail of an m3 using WBHash.
+type NewServer struct{}
 
-func (NewServer) Name() string { return "new" }
-
-func (s *NewServer) ComputeM2(m1 []byte) ([]byte, error) {
-	if len(m1) < 16 {
-		return nil, fmt.Errorf("fairplay: m1 too short: %d bytes", len(m1))
-	}
-	if s.FixedM2 != nil {
-		out := make([]byte, len(s.FixedM2))
-		copy(out, s.FixedM2)
-		return out, nil
-	}
-	out := make([]byte, len(capturedM2))
-	copy(out, capturedM2)
-	return out, nil
-}
-
-func (s *NewServer) VerifyM3(m2, m3 []byte) error {
+func (NewServer) VerifyM3(m2, m3 []byte) error {
 	if len(m3) < 164 {
 		return fmt.Errorf("%w: m3 length %d < 164", ErrM3Invalid, len(m3))
 	}

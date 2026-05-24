@@ -19,11 +19,6 @@ func New(socketPath string) *Client {
 	return &Client{SocketPath: socketPath}
 }
 
-// NewDefault creates a client using the default socket path.
-func NewDefault() *Client {
-	return &Client{SocketPath: daemon.DefaultSocketPath()}
-}
-
 // Status returns the daemon's current state.
 func (c *Client) Status() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "status"})

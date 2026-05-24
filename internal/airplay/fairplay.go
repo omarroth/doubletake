@@ -4,19 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha512"
-	"encoding/hex"
 	"fmt"
 
 	"doubletake/internal/fairplay"
 )
-
-func mustDecodeHexFP(s string) []byte {
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		panic(err)
-	}
-	return b
-}
 
 // FairPlaySetup performs the complete FairPlay SAP handshake using the
 // configured FairPlay v3 client implementation.

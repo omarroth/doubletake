@@ -248,8 +248,8 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	x := new(big.Int).SetBytes(xHash[:])
 
 	// k = H(N, pad(g))
-	padN := padTo(srpN.Bytes(), 384)
-	padG := padTo(srpG.Bytes(), 384)
+	padN := padTo384(srpN.Bytes())
+	padG := padTo384(srpG.Bytes())
 	kHash := sha512.Sum512(append(padN, padG...))
 	k := new(big.Int).SetBytes(kHash[:])
 
@@ -260,7 +260,7 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 
 	B := new(big.Int).SetBytes(serverPubB)
 
-	uHash := sha512.Sum512(append(padTo(A.Bytes(), 384), padTo(B.Bytes(), 384)...))
+	uHash := sha512.Sum512(append(padTo384(A.Bytes()), padTo384(B.Bytes())...))
 	u := new(big.Int).SetBytes(uHash[:])
 
 	// S = (B - k * g^x mod N)^(a + u*x) mod N
@@ -298,7 +298,7 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	// M3: Send client public key + proof
 	m3 := tlv8EncodeOrdered([]tlv8Item{
 		{Tag: tlvState, Value: []byte{0x03}},
-		{Tag: tlvPublicKey, Value: padTo(A.Bytes(), 384)},
+		{Tag: tlvPublicKey, Value: padTo384(A.Bytes())},
 		{Tag: tlvProof, Value: m1Proof[:]},
 	})
 	m4Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m3, c.pairHeaders())
@@ -323,13 +323,13 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	// M5: Exchange Ed25519 keys over encrypted channel
 	hkdfSalt := []byte("Pair-Setup-Encrypt-Salt")
 	hkdfInfo := []byte("Pair-Setup-Encrypt-Info")
-	sessionKey := hkdfSHA512(K, hkdfSalt, hkdfInfo, 32)
+	sessionKey := hkdfSHA512(K, hkdfSalt, hkdfInfo)
 
 	clientID := []byte(c.PairingID)
 
 	sigSalt := []byte("Pair-Setup-Controller-Sign-Salt")
 	sigInfo := []byte("Pair-Setup-Controller-Sign-Info")
-	sigKey := hkdfSHA512(K, sigSalt, sigInfo, 32)
+	sigKey := hkdfSHA512(K, sigSalt, sigInfo)
 
 	sigInput := bytes.Join([][]byte{sigKey, clientID, c.PairKeys.Ed25519Public}, nil)
 	signature := ed25519.Sign(c.PairKeys.Ed25519Private, sigInput)
@@ -409,7 +409,7 @@ func (c *AirPlayClient) PairVerify(ctx context.Context) error {
 	}
 
 	// Derive session encryption key
-	verifyKey := hkdfSHA512(shared, []byte("Pair-Verify-Encrypt-Salt"), []byte("Pair-Verify-Encrypt-Info"), 32)
+	verifyKey := hkdfSHA512(shared, []byte("Pair-Verify-Encrypt-Salt"), []byte("Pair-Verify-Encrypt-Info"))
 
 	// Decrypt and verify server's response if encrypted data present
 	if len(serverEncrypted) > 0 {
@@ -469,8 +469,8 @@ func (c *AirPlayClient) PairVerify(ctx context.Context) error {
 	// After pair-verify, the AirPlay control channel is encrypted using HAP framing.
 	// Derive channel encryption keys from the X25519 shared secret.
 	c.PairKeys.SharedSecret = shared
-	c.encWriteKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Write-Encryption-Key"), 32)
-	c.encReadKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Read-Encryption-Key"), 32)
+	c.encWriteKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Write-Encryption-Key"))
+	c.encReadKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Read-Encryption-Key"))
 	c.PairKeys.WriteKey = c.encWriteKey
 	c.PairKeys.ReadKey = c.encReadKey
 
@@ -523,16 +523,6 @@ func tlv8EncodeOrdered(items []tlv8Item) []byte {
 	return buf.Bytes()
 }
 
-// tlv8Encode encodes TLV8 items from a map (order not guaranteed).
-// Prefer tlv8EncodeOrdered for protocol messages.
-func tlv8Encode(items map[byte][]byte) []byte {
-	var ordered []tlv8Item
-	for tag, value := range items {
-		ordered = append(ordered, tlv8Item{Tag: tag, Value: value})
-	}
-	return tlv8EncodeOrdered(ordered)
-}
-
 func tlv8Decode(data []byte) map[byte][]byte {
 	result := make(map[byte][]byte)
 	for len(data) >= 2 {
@@ -548,31 +538,24 @@ func tlv8Decode(data []byte) map[byte][]byte {
 	return result
 }
 
-// hkdfSHA512 derives a key using HKDF-SHA-512.
-func hkdfSHA512(secret, salt, info []byte, length int) []byte {
+// hkdfSHA512 derives a 32-byte key using HKDF-SHA-512.
+func hkdfSHA512(secret, salt, info []byte) []byte {
 	r := hkdf.New(sha512.New, secret, salt, info)
-	key := make([]byte, length)
+	key := make([]byte, 32)
 	if _, err := io.ReadFull(r, key); err != nil {
 		panic(fmt.Sprintf("hkdf read: %v", err))
 	}
 	return key
 }
 
-// padTo pads data with leading zeros to the specified length.
-func padTo(data []byte, size int) []byte {
-	if len(data) >= size {
+// padTo384 pads data with leading zeros to 384 bytes (SRP modulus size).
+func padTo384(data []byte) []byte {
+	if len(data) >= 384 {
 		return data
 	}
-	padded := make([]byte, size)
-	copy(padded[size-len(data):], data)
+	padded := make([]byte, 384)
+	copy(padded[384-len(data):], data)
 	return padded
-}
-
-// nonceBytes converts a uint64 nonce to a 12-byte nonce for ChaCha20.
-func nonceBytes(n uint64) []byte {
-	nonce := make([]byte, 12)
-	binary.LittleEndian.PutUint64(nonce[4:], n)
-	return nonce
 }
 
 // rawPairVerify performs a non-HAP ("AirMyPC-style") pair-verify that keeps the

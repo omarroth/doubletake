@@ -8,7 +8,6 @@ const (
 	wbMTUpperMask      = uint32(0x80000000)
 	wbMTLowerMask      = uint32(0x7fffffff)
 	wbMTPostXor        = uint32(0x1ad24274)
-	wbMTTemperXor      = uint32(0x13467351)
 )
 
 func wbMTWordAddr(stateBase uint64, wordIndex uint32) uint64 {
@@ -28,11 +27,11 @@ func (s *fpState) wbMTTwistWord(stateBase uint64, wordIndex, sourceIndex uint32)
 }
 
 func (s *fpState) wbMTEnterFirstTwist(regs *[31]uint64) {
-	dispatchOffset := fpSignExtend(uint64((regs[20]+0x26)&0xffffffff), 32) << 3
+	dispatchOffset := fpSignExtend32(uint64((regs[20]+0x26)&0xffffffff)) << 3
 	stateBase := s.mem.read64(regs[24]+dispatchOffset) - 0xf
 
 	regs[7] = 0x323e88a7
-	regs[8] = fpSignExtend(uint64(s.mem.read32(regs[29]+0xffffffffffffff68)), 32) + 0x1a12cfbe4
+	regs[8] = fpSignExtend32(uint64(s.mem.read32(regs[29]+0xffffffffffffff68))) + 0x1a12cfbe4
 	regs[24] = stateBase
 	regs[19] = regs[23]
 	regs[14] = 0xcdc17759
@@ -97,8 +96,8 @@ func (s *fpState) wbMTSecondTwistStep(regs *[31]uint64) {
 	}
 
 	dispatchIndex := (regs[13] + 0xd) & 0xffffffff
-	dispatchOffset := fpSignExtend(uint64(dispatchIndex), 32) << 2
-	regs[11] = fpSignExtend(uint64(s.mem.read32(regs[25]+dispatchOffset)), 32) + regs[20]
+	dispatchOffset := fpSignExtend32(uint64(dispatchIndex)) << 2
+	regs[11] = fpSignExtend32(uint64(s.mem.read32(regs[25]+dispatchOffset))) + regs[20]
 	s.cpu.pc = regs[11]
 }
 
@@ -109,29 +108,4 @@ func (s *fpState) wbMTTwistTail(regs *[31]uint64) {
 	twisted := s.mem.read32(wbMTWordAddr(stateBase, wbMTMiddleWord-1)) ^
 		(twistInput >> 1) ^ s.wbMTMag01(twistInput&1) ^ wbMTPostXor
 	s.mem.write32(wbMTWordAddr(stateBase, wbMTLastWord), twisted)
-}
-
-func wbMTTemperWord(word uint32) uint32 {
-	word ^= word >> 11
-	word ^= (word << 7) & 0x9d2c5680
-	word ^= (word << 15) & 0xefc60000
-	word ^= word >> 18
-	return word ^ wbMTTemperXor
-}
-
-func (s *fpState) wbMTNextTemperedWord(regs *[31]uint64) {
-	stateBase := regs[24]
-	wordIndex := s.mem.read32(s.cpu.sp + 0x94)
-	nextWordIndex := wordIndex + 1
-	s.mem.write32(s.cpu.sp+0x94, nextWordIndex)
-
-	word := s.mem.read32(wbMTWordAddr(stateBase, wordIndex))
-	counterAddr := s.mem.read64(s.cpu.sp + 0x58)
-	s.mem.write32(counterAddr, nextWordIndex)
-
-	regs[9] = uint64(word)
-	regs[10] = uint64(nextWordIndex)
-	regs[11] = counterAddr
-	regs[19] = uint64(wbMTTemperWord(word))
-	regs[24] = s.mem.read64(s.cpu.sp + 0x60)
 }

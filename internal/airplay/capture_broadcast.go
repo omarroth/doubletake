@@ -18,10 +18,8 @@ import (
 //	go session1.StreamFrames(ctx, sink1.AsCapture(), 0)
 //	go session2.StreamFrames(ctx, sink2.AsCapture(), 0)
 type BroadcastCapture struct {
-	src  *ScreenCapture
-	mu   sync.Mutex
-	done chan struct{}
-	err  error // set once Run() exits
+	src *ScreenCapture
+	mu  sync.Mutex
 
 	sinks []*BroadcastSink
 }
@@ -38,10 +36,7 @@ type BroadcastSink struct {
 
 // NewBroadcastCapture wraps src. Call AddSink before calling Run.
 func NewBroadcastCapture(src *ScreenCapture) *BroadcastCapture {
-	return &BroadcastCapture{
-		src:  src,
-		done: make(chan struct{}),
-	}
+	return &BroadcastCapture{src: src}
 }
 
 // AddSink registers a new fan-out reader. Must be called before Run.
@@ -81,7 +76,6 @@ func (bc *BroadcastCapture) Run() error {
 		for _, s := range sinks {
 			s.close()
 		}
-		close(bc.done)
 	}()
 
 	for {
@@ -109,30 +103,9 @@ func (bc *BroadcastCapture) Run() error {
 			}
 		}
 		if err != nil {
-			bc.err = err
 			return err
 		}
 	}
-}
-
-// Done returns a channel that is closed when Run has finished.
-func (bc *BroadcastCapture) Done() <-chan struct{} {
-	return bc.done
-}
-
-// Err returns the error that caused Run to exit (nil if still running).
-func (bc *BroadcastCapture) Err() error {
-	select {
-	case <-bc.done:
-		return bc.err
-	default:
-		return nil
-	}
-}
-
-// Source returns the underlying ScreenCapture.
-func (bc *BroadcastCapture) Source() *ScreenCapture {
-	return bc.src
 }
 
 // --- BroadcastSink ---
@@ -157,12 +130,6 @@ func (s *BroadcastSink) close() {
 	s.closed = true
 	s.pr.CloseWithError(io.EOF)
 	s.pw.CloseWithError(io.EOF)
-}
-
-// Read implements io.Reader — reads broadcast data. Blocks until data arrives
-// or the broadcast ends.
-func (s *BroadcastSink) Read(p []byte) (int, error) {
-	return s.pr.Read(p)
 }
 
 // AsCapture wraps this sink in a synthetic ScreenCapture so it can be passed

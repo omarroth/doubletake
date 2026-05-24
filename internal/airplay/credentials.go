@@ -82,17 +82,6 @@ func (cs *CredentialStore) Lookup(deviceID string) *SavedCredentials {
 	return creds
 }
 
-// Len returns the number of stored credential entries.
-// Only supported by the file backend; returns 0 for other backends.
-func (cs *CredentialStore) Len() int {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	if fb, ok := cs.backend.(*fileBackend); ok {
-		return len(fb.devices)
-	}
-	return 0
-}
-
 // Save stores credentials for a device.
 func (cs *CredentialStore) Save(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey) error {
 	cs.mu.Lock()

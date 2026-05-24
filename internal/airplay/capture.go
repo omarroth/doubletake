@@ -38,7 +38,6 @@ type ScreenCapture struct {
 	cmd      *exec.Cmd // gst-launch-1.0 process
 	stdout   io.ReadCloser
 	cancel   context.CancelFunc
-	pwNodeID uint32
 	dbusConn *dbus.Conn    // portal session D-Bus connection (must stay open for Wayland)
 	waitCh   chan struct{} // closed when process exits
 	waitErr  error         // set before waitCh is closed
@@ -137,7 +136,6 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		cmd:      cmd,
 		stdout:   stdout,
 		cancel:   cancel,
-		pwNodeID: nodeID,
 		dbusConn: dbusConn,
 		waitCh:   make(chan struct{}),
 	}
@@ -694,7 +692,7 @@ func requestScreencast(ctx context.Context, restoreToken string) (uint32, *os.Fi
 		sessionPath, "", startOpts)
 	if call.Err != nil {
 		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("Start: %w", call.Err)
+		return 0, nil, nil, "", fmt.Errorf("start: %w", call.Err)
 	}
 	if err := call.Store(&requestHandle); err != nil {
 		conn.Close()

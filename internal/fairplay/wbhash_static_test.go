@@ -115,25 +115,7 @@ func TestWBHashStaticPage1309MatchesSnapshot(t *testing.T) {
 		}
 	}
 
-	byteRanges := []struct {
-		offset uint64
-		data   []byte
-	}{
-		{offset: 0x280, data: wbStaticPage1309Bytes280[:]},
-		{offset: 0x2ad, data: wbStaticPage1309Bytes2AD[:]},
-		{offset: 0x2e0, data: wbStaticPage1309Bytes2E0[:]},
-		{offset: 0x314, data: wbStaticPage1309Bytes314[:]},
-		{offset: 0x347, data: wbStaticPage1309Bytes347[:]},
-		{offset: 0x37a, data: wbStaticPage1309Bytes37A[:]},
-	}
-	for _, byteRange := range byteRanges {
-		for i, got := range byteRange.data {
-			want := page[byteRange.offset+uint64(i)]
-			if got != want {
-				t.Fatalf("wbStaticPage1309 byte at 0x%x = 0x%x, want snapshot value 0x%x", byteRange.offset+uint64(i), got, want)
-			}
-		}
-	}
+	checkStaticSpansAgainstSnapshot(t, "wbStaticPage1309", page, wbStaticPage1309Base, wbStaticPage1309Spans[:], nil, nil, nil)
 }
 
 func TestWBHashStaticPage130AMatchesSnapshot(t *testing.T) {
@@ -160,156 +142,34 @@ func TestWBHashStaticPage130AMatchesSnapshot(t *testing.T) {
 	if got64 != want64 {
 		t.Fatalf("wbStaticPage130ARead64OK(0x%x) = 0x%x, want snapshot value 0x%x", wbStaticPage130ABase+0x890, got64, want64)
 	}
-	for i, got := range wbStaticPage130ABytes144 {
-		want := page[0x144+i]
-		if got != want {
-			t.Fatalf("wbStaticPage130ABytes144[%d] = 0x%x, want snapshot value 0x%x", i, got, want)
-		}
-	}
-	for i, got := range wbStaticPage130ABytes830 {
-		want := page[0x830+i]
-		if got != want {
-			t.Fatalf("wbStaticPage130ABytes830[%d] = 0x%x, want snapshot value 0x%x", i, got, want)
-		}
-	}
+	checkStaticSpansAgainstSnapshot(t, "wbStaticPage130A", page, wbStaticPage130ABase, wbStaticPage130ASpans[:], nil, nil, nil)
 }
 
 func TestWBHashStaticPage130CMatchesSnapshot(t *testing.T) {
 	if !snapshotPageBasesForTest(t)[wbStaticPage130CBase] {
 		t.Skip("0x1a130c000 page is omitted after static inlining")
 	}
-
 	page := snapshotPageForTest(t, wbStaticPage130CBase)
-	for _, span := range wbStaticPage130CSpans {
-		offset := span.addr - wbStaticPage130CBase
-		for i, got := range span.data {
-			want := page[offset+uint64(i)]
-			if got != want {
-				t.Fatalf("wbStaticPage130C byte at 0x%x = 0x%x, want snapshot value 0x%x", offset+uint64(i), got, want)
-			}
-			got8, ok := wbStaticPage130CRead8OK(span.addr + uint64(i))
-			if !ok {
-				t.Fatalf("wbStaticPage130CRead8OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			if got8 != want {
-				t.Fatalf("wbStaticPage130CRead8OK(0x%x) = 0x%x, want snapshot value 0x%x", span.addr+uint64(i), got8, want)
-			}
-		}
-		for i := 0; i+4 <= len(span.data); i += 4 {
-			addr := span.addr + uint64(i)
-			got, ok := wbStaticPage130CRead32OK(addr)
-			if !ok {
-				t.Fatalf("wbStaticPage130CRead32OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			want := binary.LittleEndian.Uint32(page[offset+uint64(i):])
-			if got != want {
-				t.Fatalf("wbStaticPage130CRead32OK(0x%x) = 0x%x, want snapshot value 0x%x", addr, got, want)
-			}
-		}
-		for i := 0; i+8 <= len(span.data); i += 8 {
-			addr := span.addr + uint64(i)
-			got, ok := wbStaticPage130CRead64OK(addr)
-			if !ok {
-				t.Fatalf("wbStaticPage130CRead64OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			want := binary.LittleEndian.Uint64(page[offset+uint64(i):])
-			if got != want {
-				t.Fatalf("wbStaticPage130CRead64OK(0x%x) = 0x%x, want snapshot value 0x%x", addr, got, want)
-			}
-		}
-	}
+	checkStaticSpansAgainstSnapshot(t, "wbStaticPage130C", page, wbStaticPage130CBase, wbStaticPage130CSpans[:],
+		wbStaticPage130CRead8OK, wbStaticPage130CRead32OK, wbStaticPage130CRead64OK)
 }
 
 func TestWBHashStaticPage1314MatchesSnapshot(t *testing.T) {
 	if !snapshotPageBasesForTest(t)[wbStaticPage1314Base] {
 		t.Skip("0x1a1314000 page is omitted after static inlining")
 	}
-
 	page := snapshotPageForTest(t, wbStaticPage1314Base)
-	for _, span := range wbStaticPage1314Spans {
-		offset := span.addr - wbStaticPage1314Base
-		for i, got := range span.data {
-			want := page[offset+uint64(i)]
-			if got != want {
-				t.Fatalf("wbStaticPage1314 byte at 0x%x = 0x%x, want snapshot value 0x%x", offset+uint64(i), got, want)
-			}
-			got8, ok := wbStaticPage1314Read8OK(span.addr + uint64(i))
-			if !ok {
-				t.Fatalf("wbStaticPage1314Read8OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			if got8 != want {
-				t.Fatalf("wbStaticPage1314Read8OK(0x%x) = 0x%x, want snapshot value 0x%x", span.addr+uint64(i), got8, want)
-			}
-		}
-		for i := 0; i+4 <= len(span.data); i += 4 {
-			addr := span.addr + uint64(i)
-			got, ok := wbStaticPage1314Read32OK(addr)
-			if !ok {
-				t.Fatalf("wbStaticPage1314Read32OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			want := binary.LittleEndian.Uint32(page[offset+uint64(i):])
-			if got != want {
-				t.Fatalf("wbStaticPage1314Read32OK(0x%x) = 0x%x, want snapshot value 0x%x", addr, got, want)
-			}
-		}
-		for i := 0; i+8 <= len(span.data); i += 8 {
-			addr := span.addr + uint64(i)
-			got, ok := wbStaticPage1314Read64OK(addr)
-			if !ok {
-				t.Fatalf("wbStaticPage1314Read64OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			want := binary.LittleEndian.Uint64(page[offset+uint64(i):])
-			if got != want {
-				t.Fatalf("wbStaticPage1314Read64OK(0x%x) = 0x%x, want snapshot value 0x%x", addr, got, want)
-			}
-		}
-	}
+	checkStaticSpansAgainstSnapshot(t, "wbStaticPage1314", page, wbStaticPage1314Base, wbStaticPage1314Spans[:],
+		wbStaticPage1314Read8OK, wbStaticPage1314Read32OK, wbStaticPage1314Read64OK)
 }
 
 func TestWBHashStaticPage1311MatchesSnapshot(t *testing.T) {
 	if !snapshotPageBasesForTest(t)[wbStaticPage1311Base] {
 		t.Skip("0x1a1311000 page is omitted after static inlining")
 	}
-
 	page := snapshotPageForTest(t, wbStaticPage1311Base)
-	for _, span := range wbStaticPage1311Spans {
-		offset := span.addr - wbStaticPage1311Base
-		for i, got := range span.data {
-			want := page[offset+uint64(i)]
-			if got != want {
-				t.Fatalf("wbStaticPage1311 byte at 0x%x = 0x%x, want snapshot value 0x%x", offset+uint64(i), got, want)
-			}
-			got8, ok := wbStaticPage1311Read8OK(span.addr + uint64(i))
-			if !ok {
-				t.Fatalf("wbStaticPage1311Read8OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			if got8 != want {
-				t.Fatalf("wbStaticPage1311Read8OK(0x%x) = 0x%x, want snapshot value 0x%x", span.addr+uint64(i), got8, want)
-			}
-		}
-		for i := 0; i+4 <= len(span.data); i += 4 {
-			addr := span.addr + uint64(i)
-			got, ok := wbStaticPage1311Read32OK(addr)
-			if !ok {
-				t.Fatalf("wbStaticPage1311Read32OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			want := binary.LittleEndian.Uint32(page[offset+uint64(i):])
-			if got != want {
-				t.Fatalf("wbStaticPage1311Read32OK(0x%x) = 0x%x, want snapshot value 0x%x", addr, got, want)
-			}
-		}
-		for i := 0; i+8 <= len(span.data); i += 8 {
-			addr := span.addr + uint64(i)
-			got, ok := wbStaticPage1311Read64OK(addr)
-			if !ok {
-				t.Fatalf("wbStaticPage1311Read64OK did not handle offset 0x%x", offset+uint64(i))
-			}
-			want := binary.LittleEndian.Uint64(page[offset+uint64(i):])
-			if got != want {
-				t.Fatalf("wbStaticPage1311Read64OK(0x%x) = 0x%x, want snapshot value 0x%x", addr, got, want)
-			}
-		}
-	}
+	checkStaticSpansAgainstSnapshot(t, "wbStaticPage1311", page, wbStaticPage1311Base, wbStaticPage1311Spans[:],
+		wbStaticPage1311Read8OK, wbStaticPage1311Read32OK, wbStaticPage1311Read64OK)
 }
 
 func TestWBHashStaticInlinedPagesAreReadOnly(t *testing.T) {
@@ -356,6 +216,66 @@ func TestWBHashStaticInlinedPagesAreReadOnly(t *testing.T) {
 				t.Fatalf("WBHash failed: %v", err)
 			}
 		})
+	}
+}
+
+func checkStaticSpansAgainstSnapshot(
+	t *testing.T,
+	name string,
+	page []byte,
+	base uint64,
+	spans []struct {
+		addr uint64
+		data []byte
+	},
+	read8 func(uint64) (uint8, bool),
+	read32 func(uint64) (uint32, bool),
+	read64 func(uint64) (uint64, bool),
+) {
+	t.Helper()
+	for _, span := range spans {
+		offset := span.addr - base
+		for i, got := range span.data {
+			want := page[offset+uint64(i)]
+			if got != want {
+				t.Fatalf("%s byte at 0x%x = 0x%x, want snapshot value 0x%x", name, offset+uint64(i), got, want)
+			}
+			if read8 != nil {
+				got8, ok := read8(span.addr + uint64(i))
+				if !ok {
+					t.Fatalf("%sRead8OK did not handle offset 0x%x", name, offset+uint64(i))
+				}
+				if got8 != want {
+					t.Fatalf("%sRead8OK(0x%x) = 0x%x, want snapshot value 0x%x", name, span.addr+uint64(i), got8, want)
+				}
+			}
+		}
+		if read32 != nil {
+			for i := 0; i+4 <= len(span.data); i += 4 {
+				addr := span.addr + uint64(i)
+				got, ok := read32(addr)
+				if !ok {
+					t.Fatalf("%sRead32OK did not handle offset 0x%x", name, offset+uint64(i))
+				}
+				want := binary.LittleEndian.Uint32(page[offset+uint64(i):])
+				if got != want {
+					t.Fatalf("%sRead32OK(0x%x) = 0x%x, want snapshot value 0x%x", name, addr, got, want)
+				}
+			}
+		}
+		if read64 != nil {
+			for i := 0; i+8 <= len(span.data); i += 8 {
+				addr := span.addr + uint64(i)
+				got, ok := read64(addr)
+				if !ok {
+					t.Fatalf("%sRead64OK did not handle offset 0x%x", name, offset+uint64(i))
+				}
+				want := binary.LittleEndian.Uint64(page[offset+uint64(i):])
+				if got != want {
+					t.Fatalf("%sRead64OK(0x%x) = 0x%x, want snapshot value 0x%x", name, addr, got, want)
+				}
+			}
+		}
 	}
 }
 

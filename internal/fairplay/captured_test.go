@@ -1,0 +1,5 @@
+package fairplay
+
+// capturedM2 is a real /fp-setup phase-1 response captured from an Apple TV,
+// used by tests as a known-good fixture.
+var capturedM2 = mustHexFP("46504c59030102000000008202034a114c26b77d4e2eec2c8f89fdb653b5b32d3576bc176816d110a14c3f53c08dbb936183bfdfe0a4f3c12e85216003b46f738c40c54da6c436d29d1b342d63c7b314309ae79a33bb1787709ef077cbfe4190117a3423e270fd1a2eac44da1a7934f59dc681d1b70783f228c4d077c2d495f5285c3bf8df586fc2ebfe17fb5b65")
