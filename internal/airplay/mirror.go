@@ -244,11 +244,27 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		return nil, fmt.Errorf("marshal audio setup: %w", err2)
 	}
 
+	// The Apple TV will only respond to SETUP once it has been able to reach
+	// back to us (NTP probe to the timing UDP port and the event TCP port).
+	// If a firewall (UFW, nftables, etc.) blocks those inbound packets, the
+	// receiver just silently stalls. Emit a hint after a few seconds so users
+	// in that situation get an actionable error instead of an opaque hang.
+	setupHintDone := make(chan struct{})
+	go func() {
+		select {
+		case <-setupHintDone:
+		case <-time.After(3 * time.Second):
+			log.Printf("warning: Apple TV has not responded to SETUP yet — this usually means a firewall is blocking inbound traffic from %s. Required inbound from the Apple TV: UDP %d-%d (timing/control/data) and TCP %d (event channel).",
+				c.host, timingPort, timingPort+2, eventPort)
+		}
+	}()
 	audioRespBody, _, err2 := c.rtspRequest("SETUP", audioURI, "application/x-apple-binary-plist", audioSetupBody, nil)
+	close(setupHintDone)
 	if err2 != nil {
 		audioCtrlConn.Close()
 		audioDataConn.Close()
-		return nil, fmt.Errorf("SETUP phase 1 (audio): %w", err2)
+		return nil, fmt.Errorf("SETUP phase 1 (audio): %w (the Apple TV usually silently ignores SETUP when inbound UDP %d-%d or TCP %d is firewalled)",
+			err2, timingPort, timingPort+2, eventPort)
 	}
 
 	var audioResp map[string]interface{}
