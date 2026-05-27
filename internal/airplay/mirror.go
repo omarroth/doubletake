@@ -81,7 +81,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Allocate 3 consecutive UDP ports for audio: timing(N), control(N+1), data(N+2).
 	// Real Apple senders (AirMyPC, etc.) use consecutive ports; the Apple TV
 	// classifies incoming audio by source port and expects this pattern.
-	audioPorts, err := allocateConsecutiveUDPPorts(3)
+	audioPorts, err := allocateConsecutiveUDPPortsInRange(3, cfg.PortMin, cfg.PortMax)
 	if err != nil {
 		return nil, fmt.Errorf("allocate audio ports: %w", err)
 	}
@@ -96,7 +96,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	go ntpTimingResponder(ctx, timingConn)
 
 	// Start a TCP listener for the event (reverse) channel
-	eventListener, err := net.Listen("tcp", ":0")
+	eventListener, err := listenTCPInRange(cfg.PortMin, cfg.PortMax, timingPort)
 	if err != nil {
 		timingConn.Close()
 		return nil, fmt.Errorf("listen event port: %w", err)
@@ -254,8 +254,10 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		select {
 		case <-setupHintDone:
 		case <-time.After(3 * time.Second):
-			log.Printf("warning: Apple TV has not responded to SETUP yet — this usually means a firewall is blocking inbound traffic from %s. Required inbound from the Apple TV: UDP %d-%d (timing/control/data) and TCP %d (event channel).",
-				c.host, timingPort, timingPort+2, eventPort)
+			log.Printf("warning: Apple TV at %s has not responded to SETUP after 3s.", c.host)
+			log.Printf("  this usually means a host firewall is blocking the receiver's reverse handshake.")
+			log.Printf("  re-run with -port-range MIN-MAX (e.g. -port-range 60000-60010) and allow that")
+			log.Printf("  range inbound (UDP+TCP) from %s. See the Firewall section of the README.", c.host)
 		}
 	}()
 	audioRespBody, _, err2 := c.rtspRequest("SETUP", audioURI, "application/x-apple-binary-plist", audioSetupBody, nil)
@@ -263,8 +265,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if err2 != nil {
 		audioCtrlConn.Close()
 		audioDataConn.Close()
-		return nil, fmt.Errorf("SETUP phase 1 (audio): %w (the Apple TV usually silently ignores SETUP when inbound UDP %d-%d or TCP %d is firewalled)",
-			err2, timingPort, timingPort+2, eventPort)
+		return nil, fmt.Errorf("SETUP phase 1 (audio): %w",
+			err2)
 	}
 
 	var audioResp map[string]interface{}
@@ -1548,33 +1550,84 @@ func ntpTimeNow() uint64 {
 // allocateConsecutiveUDPPorts allocates `count` consecutive UDP port numbers.
 // Real Apple AirPlay senders use consecutive ports: timing(N), control(N+1), data(N+2).
 func allocateConsecutiveUDPPorts(count int) ([]net.PacketConn, error) {
-	for attempt := 0; attempt < 20; attempt++ {
-		// Get a random port
-		first, err := net.ListenPacket("udp", ":0")
-		if err != nil {
-			continue
-		}
-		base := first.LocalAddr().(*net.UDPAddr).Port
+	return allocateConsecutiveUDPPortsInRange(count, 0, 0)
+}
 
-		conns := []net.PacketConn{first}
-		ok := true
-		for i := 1; i < count; i++ {
-			c, err := net.ListenPacket("udp", fmt.Sprintf(":%d", base+i))
-			if err != nil {
-				ok = false
-				break
+// allocateConsecutiveUDPPortsInRange allocates `count` consecutive UDP ports.
+// When portMin/portMax are zero, the OS picks ephemeral ports. Otherwise the
+// search is limited to [portMin, portMax] inclusive.
+func allocateConsecutiveUDPPortsInRange(count, portMin, portMax int) ([]net.PacketConn, error) {
+	if portMin == 0 && portMax == 0 {
+		for attempt := 0; attempt < 20; attempt++ {
+			conns, ok := tryConsecutiveUDP(0, count)
+			if ok {
+				return conns, nil
 			}
-			conns = append(conns, c)
+			for _, c := range conns {
+				c.Close()
+			}
 		}
+		return nil, fmt.Errorf("could not allocate %d consecutive UDP ports after 20 attempts", count)
+	}
+	if portMin <= 0 || portMax <= 0 || portMin > portMax {
+		return nil, fmt.Errorf("invalid UDP port range %d-%d", portMin, portMax)
+	}
+	if portMax-portMin+1 < count {
+		return nil, fmt.Errorf("UDP port range %d-%d too small for %d consecutive ports", portMin, portMax, count)
+	}
+	for base := portMin; base <= portMax-count+1; base++ {
+		conns, ok := tryConsecutiveUDP(base, count)
 		if ok {
 			return conns, nil
 		}
-		// Close all and retry
 		for _, c := range conns {
 			c.Close()
 		}
 	}
-	return nil, fmt.Errorf("could not allocate %d consecutive UDP ports after 20 attempts", count)
+	return nil, fmt.Errorf("no %d consecutive free UDP ports in range %d-%d", count, portMin, portMax)
+}
+
+// tryConsecutiveUDP attempts to bind `count` consecutive UDP ports starting at
+// `base`. When base==0 the first port is OS-assigned and subsequent ports are
+// base+1, base+2, ... Returns the conns and whether all binds succeeded;
+// caller is responsible for closing partial results on failure.
+func tryConsecutiveUDP(base, count int) ([]net.PacketConn, bool) {
+	first, err := net.ListenPacket("udp", fmt.Sprintf(":%d", base))
+	if err != nil {
+		return nil, false
+	}
+	actualBase := first.LocalAddr().(*net.UDPAddr).Port
+	conns := []net.PacketConn{first}
+	for i := 1; i < count; i++ {
+		c, err := net.ListenPacket("udp", fmt.Sprintf(":%d", actualBase+i))
+		if err != nil {
+			return conns, false
+		}
+		conns = append(conns, c)
+	}
+	return conns, true
+}
+
+// listenTCPInRange opens a TCP listener within [portMin, portMax], skipping
+// ports that overlap the audio UDP triple [skipBase, skipBase+2]. When the
+// range is zero, the OS picks an ephemeral port.
+func listenTCPInRange(portMin, portMax, skipBase int) (net.Listener, error) {
+	if portMin == 0 && portMax == 0 {
+		return net.Listen("tcp", ":0")
+	}
+	if portMin <= 0 || portMax <= 0 || portMin > portMax {
+		return nil, fmt.Errorf("invalid TCP port range %d-%d", portMin, portMax)
+	}
+	for p := portMin; p <= portMax; p++ {
+		if skipBase > 0 && p >= skipBase && p <= skipBase+2 {
+			continue
+		}
+		l, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
+		if err == nil {
+			return l, nil
+		}
+	}
+	return nil, fmt.Errorf("no free TCP port in range %d-%d", portMin, portMax)
 }
 
 // ntpBootTimestamp returns a 64-bit NTP fixed-point timestamp using boot-relative

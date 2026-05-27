@@ -81,23 +81,27 @@ make test
 
 ## Firewall
 
-doubletake opens random high UDP ports (audio timing/control/data) and a random
-high TCP port (event channel) and advertises them to the Apple TV during SETUP.
-The Apple TV then connects back to those ports — until that reverse handshake
-completes, the receiver silently stalls and the SETUP request never returns.
+doubletake opens UDP ports (audio timing/control/data — 3 consecutive) and one
+TCP port (event channel) and advertises them to the Apple TV during SETUP. The
+Apple TV connects back to those ports — until that reverse handshake completes,
+the receiver silently stalls and SETUP never returns.
 
-If you run a host firewall, allow inbound connections from the Apple TV on the
-ephemeral port range used by the kernel (typically `32768-60999` on Linux). For
-example, with UFW:
+By default the OS assigns ephemeral ports. Use `-port-range MIN-MAX` to confine
+them to a small window you can open in your firewall (needs at least 4 ports):
 
 ```sh
-# Replace 192.168.1.77 with your Apple TV's IP
-sudo ufw allow from 192.168.1.77 proto udp to any port 32768:60999
-sudo ufw allow from 192.168.1.77 proto tcp to any port 32768:60999
+doubletake -target 192.168.1.77 -port-range 60000-60010
+```
+
+Then with UFW:
+
+```sh
+sudo ufw allow from any proto udp to any port 60000:60010
+sudo ufw allow from any proto tcp to any port 60000:60010
 ```
 
 For nftables/firewalld, add equivalent rules allowing inbound UDP and TCP from
-the Apple TV's address on the ephemeral port range.
+the Apple TV's address on the chosen range.
 
 ## Usage
 

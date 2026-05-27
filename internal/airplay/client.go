@@ -544,6 +544,13 @@ type StreamConfig struct {
 	NoEncrypt bool // Disable encryption for debugging
 	DirectKey bool // Use shk/shiv directly without SHA-512 derivation
 	NoAudio   bool // Disable audio streaming
+
+	// PortMin/PortMax bound the local ports used for the audio UDP triple
+	// (timing/control/data, 3 consecutive ports) and the event TCP listener.
+	// When both are zero the OS chooses ephemeral ports. Useful for narrowing
+	// host-firewall rules. The range must fit at least 4 ports.
+	PortMin int
+	PortMax int
 }
 
 // generateStreamKey creates a random AES-128 key for stream encryption.
