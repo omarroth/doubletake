@@ -18,6 +18,34 @@ import (
 	"doubletake/internal/daemon"
 )
 
+// parsePortRange parses a "min-max" string into inclusive port bounds.
+// An empty string returns (0, 0, nil) meaning "let the OS pick".
+func parsePortRange(s string) (int, int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, nil
+	}
+	parts := strings.SplitN(s, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("expected MIN-MAX, got %q", s)
+	}
+	lo, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("min: %w", err)
+	}
+	hi, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("max: %w", err)
+	}
+	if lo < 1 || hi > 65535 || lo > hi {
+		return 0, 0, fmt.Errorf("range %d-%d out of bounds (1-65535, min<=max)", lo, hi)
+	}
+	if hi-lo+1 < 4 {
+		return 0, 0, fmt.Errorf("range %d-%d too small; need at least 4 ports (3 UDP + 1 TCP)", lo, hi)
+	}
+	return lo, hi, nil
+}
+
 func main() {
 	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
@@ -35,6 +63,7 @@ func main() {
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
+	portRange := flag.String("port-range", "", "Local UDP/TCP port range for the receiver to reach back (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 4 ports.")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	daemonize := flag.Bool("daemonize", false, "Run as background daemon with Unix socket control interface")
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
@@ -211,6 +240,10 @@ func main() {
 		}
 	}
 
+	portMin, portMax, err := parsePortRange(*portRange)
+	if err != nil {
+		log.Fatalf("invalid -port-range: %v", err)
+	}
 	streamCfg := airplay.StreamConfig{
 		Width:     *width,
 		Height:    *height,
@@ -219,6 +252,8 @@ func main() {
 		NoEncrypt: *noEncrypt,
 		DirectKey: *directKey,
 		NoAudio:   *noAudio,
+		PortMin:   portMin,
+		PortMax:   portMax,
 	}
 	session, err := client.SetupMirror(ctx, streamCfg)
 	if err != nil {
