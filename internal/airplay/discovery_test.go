@@ -33,3 +33,21 @@ func TestUnescapeDNSName(t *testing.T) {
 		})
 	}
 }
+
+func TestSupportsFairPlaySAP(t *testing.T) {
+	rokuFeatures := uint64(0x38bcf46007f8ad0)
+	if (&ReceiverInfo{Features: rokuFeatures}).SupportsFairPlaySAP() {
+		t.Fatalf("Roku feature mask unexpectedly advertises FPSAP")
+	}
+	if (&AirPlayDevice{Features: rokuFeatures}).SupportsFairPlaySAP() {
+		t.Fatalf("Roku discovery feature mask unexpectedly advertises FPSAP")
+	}
+
+	withFairPlay := rokuFeatures | FeatureFPSAP25
+	if !(&ReceiverInfo{Features: withFairPlay}).SupportsFairPlaySAP() {
+		t.Fatalf("ReceiverInfo with FPSAP bit did not advertise FairPlay SAP")
+	}
+	if !(&AirPlayDevice{Features: withFairPlay}).SupportsFairPlaySAP() {
+		t.Fatalf("AirPlayDevice with FPSAP bit did not advertise FairPlay SAP")
+	}
+}

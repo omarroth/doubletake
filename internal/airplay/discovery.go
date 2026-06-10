@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -151,4 +152,24 @@ func (d *AirPlayDevice) SupportsScreen() bool {
 
 func (d *AirPlayDevice) SupportsTransientPairing() bool {
 	return d.Features&FeatureTransientPairing != 0
+}
+
+func (d *AirPlayDevice) SupportsFairPlaySAP() bool {
+	return d.Features&FeatureFPSAP25 != 0
+}
+
+func (i *ReceiverInfo) SupportsFairPlaySAP() bool {
+	return i != nil && i.Features&FeatureFPSAP25 != 0
+}
+
+// playoutLatencyFloor returns the minimum playout lead this receiver needs.
+// Modern Apple receivers advertise FairPlay SAP and have robust audio jitter
+// buffers, so they can play at very low latency (floor 0). Receivers without it
+// (Roku and other third-party AirPlay implementations) need a conservative lead
+// or they drop audio they can no longer schedule.
+func (i *ReceiverInfo) playoutLatencyFloor() time.Duration {
+	if i != nil && i.SupportsFairPlaySAP() {
+		return 0
+	}
+	return conservativePlayoutLatency
 }

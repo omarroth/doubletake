@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -234,7 +235,10 @@ func main() {
 	// for Apple TV compatibility in the normal modern flow.
 	if client.FpEkey == nil {
 		if err := client.FairPlaySetup(ctx); err != nil {
-			log.Fatalf("FairPlay setup failed: %v", err)
+			if !errors.Is(err, airplay.ErrFairPlayUnsupported) {
+				log.Fatalf("FairPlay setup failed: %v", err)
+			}
+			log.Printf("FairPlay SAP unsupported (%v); continuing with pair-verify DataStream setup", err)
 		} else {
 			log.Println("FairPlay setup complete")
 		}

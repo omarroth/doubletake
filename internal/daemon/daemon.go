@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -620,9 +621,12 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 
 	// FairPlay setup
 	if err := client.FairPlaySetup(ctx); err != nil {
-		client.Close()
-		removeStream(fmt.Sprintf("FairPlay setup failed: %v", err))
-		return
+		if !errors.Is(err, airplay.ErrFairPlayUnsupported) {
+			client.Close()
+			removeStream(fmt.Sprintf("FairPlay setup failed: %v", err))
+			return
+		}
+		log.Printf("[daemon] FairPlay SAP unsupported (%v); continuing with pair-verify DataStream setup", err)
 	}
 
 	streamCfg := airplay.StreamConfig{

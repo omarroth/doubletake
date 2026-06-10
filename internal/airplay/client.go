@@ -24,6 +24,7 @@ import (
 type ReceiverInfo struct {
 	Name              string  `plist:"name"`
 	Model             string  `plist:"model"`
+	Manufacturer      string  `plist:"manufacturer"`
 	DeviceID          string  `plist:"deviceID"`
 	ProtocolVersion   string  `plist:"protocolVersion"`
 	SourceVersion     string  `plist:"sourceVersion"`
@@ -38,6 +39,16 @@ type ReceiverInfo struct {
 	PSI               string  `plist:"psi"`
 	PI                string  `plist:"pi"`
 	MacAddress        string  `plist:"macAddress"`
+}
+
+// HTTPStatusError is returned when a receiver responds with a non-2xx RTSP/HTTP status.
+type HTTPStatusError struct {
+	StatusCode int
+	Body       []byte
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d (body: %s)", e.StatusCode, string(e.Body))
 }
 
 // AirPlayClient manages the connection to an AirPlay receiver.
@@ -322,7 +333,7 @@ func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, map[string]string, 
 			io.ReadFull(c.conn, errBody)
 		}
 		dbg("[READ] error response body (%d bytes): %s", len(errBody), hex.EncodeToString(errBody))
-		return nil, headers, fmt.Errorf("HTTP %d (body: %s)", statusCode, string(errBody))
+		return nil, headers, &HTTPStatusError{StatusCode: statusCode, Body: errBody}
 	}
 
 	if contentLength == 0 {
@@ -390,7 +401,7 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, map[string]string, 
 			remaining = remaining[:contentLength]
 		}
 		dbg("[ENC-READ] error response body (%d bytes): %s", len(remaining), hex.EncodeToString(remaining))
-		return nil, headers, fmt.Errorf("HTTP %d (body: %s)", statusCode, string(remaining))
+		return nil, headers, &HTTPStatusError{StatusCode: statusCode, Body: remaining}
 	}
 
 	if contentLength == 0 {

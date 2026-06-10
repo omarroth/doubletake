@@ -176,6 +176,47 @@ func (ac *AudioCapture) ReadFrame(buf []byte) (int, error) {
 	return n, nil
 }
 
+// DrainStale discards any PCM that buffered in the OS pipe between capture
+// start and the first read. The capture pipeline starts producing audio
+// immediately, but streaming does not begin until the first video frame is
+// sent; during that gap the kernel pipe accumulates a FIFO backlog that would
+// otherwise be read in order forever, leaving every frame permanently stale and
+// audio lagging video. Draining once just before the read loop starts streaming
+// from the freshest sample. It removes whatever backlog actually accumulated —
+// no fixed latency value is assumed.
+func (ac *AudioCapture) DrainStale() {
+	type deadlineReader interface {
+		SetReadDeadline(t time.Time) error
+	}
+	dr, ok := ac.pcmPipe.(deadlineReader)
+	if !ok {
+		return
+	}
+	buf := make([]byte, 32*1024)
+	var discarded int
+	for {
+		// Re-arm a short idle timeout each read: while a backlog exists, reads
+		// return buffered data immediately; once the pipe is empty the read
+		// blocks and this deadline fires before the next live frame (~8ms)
+		// arrives, ending the drain. This is a poll timeout, not a latency.
+		if err := dr.SetReadDeadline(time.Now().Add(2 * time.Millisecond)); err != nil {
+			break
+		}
+		n, err := ac.pcmPipe.Read(buf)
+		discarded += n
+		if err != nil {
+			break
+		}
+	}
+	// Restore blocking reads for steady-state streaming.
+	_ = dr.SetReadDeadline(time.Time{})
+	if discarded > 0 {
+		const bytesPerSecond = 44100 * 2 * 2 // 44.1kHz, stereo, S16LE
+		dbg("[AUDIO] drained %d bytes (~%.0fms) of startup backlog before streaming",
+			discarded, float64(discarded)/bytesPerSecond*1000)
+	}
+}
+
 func (ac *AudioCapture) Stop() {
 	if ac.stopped {
 		return
@@ -413,7 +454,7 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 			as.chachaNonceMode.String(), as.chachaAADMode.String())
 	}
 	if latencyOverride > 0 {
-		dbg("[AUDIO] receiver audio latency override: %d samples", latencySamples)
+		dbg("[AUDIO] audio latency: %d samples", latencySamples)
 	}
 	dbg("[AUDIO] local ports: data=%d (→remote %d) ctrl=%d (→remote %d)",
 		dataLocalPort, dataPort, ctrlLocalPort, controlPort)
@@ -594,12 +635,18 @@ func (as *AudioStream) sendSyncPacket(ntpTime uint64, isFirst bool) error {
 	latencySamples := as.latencySamples
 	as.mu.Unlock()
 
+	// anchorLatency is the playout lead time reported to the receiver: the newest
+	// audio we have sent (rtpNow) plays anchorLatency/44100 seconds after "now".
+	// This equals the negotiated session latency, the same forward bias video
+	// frames carry, so audio and video captured at the same instant play together.
+	anchorLatency := latencySamples
+
 	// Sync packet: 20 bytes total (8-byte RTP-like header + 12-byte payload)
 	// Format observed from real Apple senders:
 	//   header: V=2, X=1(first)/0(subsequent), M=1, PT=84, seq=4 (constant)
 	//   RTP timestamp = current playback position (sync_rtp)
 	//   payload: NTP_hi(4) + NTP_lo(4) + next_rtp(4)
-	//   next_rtp = sync_rtp + latencySamples
+	//   next_rtp = current receive head (rtpNow)
 	packet := make([]byte, 20)
 	if isFirst {
 		packet[0] = 0x90 // V=2, X=1
@@ -609,16 +656,16 @@ func (as *AudioStream) sendSyncPacket(ntpTime uint64, isFirst bool) error {
 	packet[1] = 0xd4 // M=1, PT=84
 	// seq field is constant 4 in working pcap captures
 	binary.BigEndian.PutUint16(packet[2:4], 4)
-	// Bytes 4-7: sync_rtp = current playback position
+	// Bytes 4-7: sync_rtp = current playback position = receive head - anchorLatency
 	syncRtp := rtpNow
-	if rtpNow >= latencySamples {
-		syncRtp = rtpNow - latencySamples
+	if rtpNow >= anchorLatency {
+		syncRtp = rtpNow - anchorLatency
 	}
 	binary.BigEndian.PutUint32(packet[4:8], syncRtp)
 	// Bytes 8-15: NTP timestamp (current wall-clock time)
 	binary.BigEndian.PutUint64(packet[8:16], ntpTime)
-	// Bytes 16-19: next_rtp = sync_rtp + latencySamples
-	binary.BigEndian.PutUint32(packet[16:20], syncRtp+latencySamples)
+	// Bytes 16-19: next_rtp = current receive head
+	binary.BigEndian.PutUint32(packet[16:20], rtpNow)
 
 	_, err := as.ctrlConn.WriteTo(packet, as.ctrlAddr)
 	return err
@@ -743,6 +790,11 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 	retransmitIdx := 0
 	burstDone := false
 	frameBuf := make([]byte, 8192)
+
+	// Capture started before video did, so the OS pipe holds a backlog of stale
+	// audio accumulated while we waited for the first video frame. Drop it so we
+	// begin streaming from the freshest sample and audio lines up with video.
+	capture.DrainStale()
 
 	for {
 		select {

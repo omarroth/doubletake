@@ -39,6 +39,7 @@ type MirrorSession struct {
 	chachaNonce    uint64              // per-frame nonce counter
 	frameSeq       uint32
 	firstFrameSent chan struct{} // closed after first video frame is sent
+	timestampBias  time.Duration
 
 	// Audio
 	audioStream *AudioStream
@@ -128,6 +129,16 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		}()
 	}()
 
+	sessionLatency := TargetLatency()
+	// Audio and video share this latency so they stay in sync, and it doubles as
+	// the receiver's playout buffer lead. Receivers without a robust jitter buffer
+	// (non-FairPlay-SAP, e.g. Roku) need a conservative floor or they drop audio;
+	// modern Apple receivers can run at the low target latency unchanged.
+	if floor := c.info.playoutLatencyFloor(); sessionLatency < floor {
+		dbg("[SETUP] raising session latency to receiver playout floor: %v", floor)
+		sessionLatency = floor
+	}
+
 	// ---- Working SETUP sequence ----
 	// The receiver expects the audio session to be created first, then the video
 	// stream to be attached to that session, and only then does it accept RECORD.
@@ -173,6 +184,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	audioControlLPort := audioCtrlConn.LocalAddr().(*net.UDPAddr).Port
 
 	audioCT, audioSPF, audioFmt, latMin, latMax, _ := selectedAudioCodec.Info()
+	audioLatencySamples := samplesFor44k1(sessionLatency)
+	latMin = int64(audioLatencySamples)
+	latMax = int64(audioLatencySamples)
 	audioFormatIndex := selectedAudioCodec.AudioFormatIndex()
 	audioRedundant := int64(0)
 	if useAudioFEC(audioMode == audioSecurityChaCha) {
@@ -315,8 +329,6 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		}
 	}
 
-	audioLatencySamples := uint32(0)
-
 	// ---- Phase 2: SETUP video stream ----
 	// Video SETUP uses the same sessionUUID but a different streamConnectionID.
 	// The Apple TV attaches this video stream to the existing session.
@@ -455,8 +467,12 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		if parseErr != nil {
 			dbg("[SETUP] invalid Audio-Latency header %q: %v", value, parseErr)
 		} else if parsed > 0 {
+			// The receiver reported its authoritative playout latency. Drive both
+			// audio and video from it so they stay in sync (the anchor lead is the
+			// shared playout time), overriding our conservative fallback floor.
 			audioLatencySamples = uint32(parsed)
-			dbg("[SETUP] receiver audio latency: %d samples", audioLatencySamples)
+			sessionLatency = time.Duration(audioLatencySamples) * time.Second / 44100
+			dbg("[SETUP] receiver audio latency: %d samples (%v); using for audio+video", audioLatencySamples, sessionLatency)
 		}
 	}
 
@@ -483,21 +499,23 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		noAudio:        cfg.NoAudio,
 		sessionURI:     controlURI,
 		timingConn:     timingConn,
+		timestampBias:  sessionLatency,
 	}
 
 	// Set up video cipher.
 	// AppleTV (encrypted pair-verify) uses ChaCha20-Poly1305 with HKDF-derived key.
 	// UxPlay (plaintext pair-verify) uses AES-CTR with SHA-512-derived key.
-	if encKey != nil && c.encrypted && c.fpAesKey != nil {
+	if encKey != nil && c.encrypted && ((c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0) || c.fpAesKey != nil) {
 		// ChaCha20-Poly1305 path: HKDF-SHA512 key derivation.
 		// The receiver's _GetDataStreamSecurityKeys calls the FP helper's HKDF method.
 		// The sender side uses PairingSessionDeriveKey via the PairingClient, which
 		// does HKDF with the pair-verify X25519 ECDH shared secret as IKM.
-		// Try the pair-verify shared secret first; fall back to raw FP aesKey.
 		ikm := c.fpAesKey
 		if c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0 {
 			ikm = c.PairKeys.SharedSecret
-			dbg("[SETUP] using pair-verify shared secret as HKDF IKM (%d bytes)", len(ikm))
+			dbg("[SETUP] using pair-verify shared secret as DataStream HKDF IKM (%d bytes)", len(ikm))
+		} else {
+			dbg("[SETUP] using raw FairPlay AES key as DataStream HKDF IKM (%d bytes)", len(ikm))
 		}
 		chachaKey, err := deriveChaChaKey(ikm, videoStreamConnectionID)
 		if err != nil {
@@ -638,7 +656,7 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			return nil
 		}
 
-		packetTimestamp := ntpTimeNow()
+		packetTimestamp := s.ntpTimeNow()
 
 		// Send SPS+PPS as unencrypted avcC codec frame before keyframes
 		if pendingKeyframe && !codecSent && latestSPS != nil && latestPPS != nil {
@@ -1540,7 +1558,22 @@ func videoTimestampBias() time.Duration {
 }
 
 func ntpTimeNow() uint64 {
-	d := time.Since(appStartTime) + videoTimestampBias()
+	return ntpTimeWithBias(videoTimestampBias())
+}
+
+func (s *MirrorSession) ntpTimeNow() uint64 {
+	bias := s.timestampBias
+	if bias <= 0 {
+		bias = videoTimestampBias()
+	}
+	return ntpTimeWithBias(bias)
+}
+
+func ntpTimeWithBias(bias time.Duration) uint64 {
+	if bias < 5*time.Millisecond {
+		bias = 5 * time.Millisecond
+	}
+	d := time.Since(appStartTime) + bias
 	sec := uint64(d / time.Second)
 	nsecFrac := uint64(d % time.Second)
 	frac := (nsecFrac << 32) / uint64(time.Second)
