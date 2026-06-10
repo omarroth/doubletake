@@ -32,6 +32,8 @@ type MirrorSession struct {
 	DataPort      int
 	videoWidth    int
 	videoHeight   int
+	displayWidth  int    // receiver presentation width (codec header offset 56)
+	displayHeight int    // receiver presentation height (codec header offset 60)
 	sessionURI    string // RTSP session URI for TEARDOWN
 
 	streamCipher   func([]byte) []byte // AES-CTR encryption
@@ -493,13 +495,21 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		eventConn:      receiverEventConn,
 		eventListener:  eventListener,
 		DataPort:       dataPort,
-		videoWidth:     cfg.Width,
-		videoHeight:    cfg.Height,
 		firstFrameSent: make(chan struct{}),
 		noAudio:        cfg.NoAudio,
 		sessionURI:     controlURI,
 		timingConn:     timingConn,
 		timestampBias:  sessionLatency,
+	}
+
+	// Presentation (display) size advertised in the codec header. Genuine senders
+	// report the receiver's display size here so the receiver can center content
+	// whose aspect ratio differs from the display (e.g. portrait content on a
+	// landscape TV). When the receiver does not advertise a usable display size,
+	// these stay zero and sendCodecFrame falls back to the encoded content size.
+	if dw, dh := c.info.DisplaySize(); dw > 0 && dh > 0 {
+		session.displayWidth, session.displayHeight = dw, dh
+		dbg("[SETUP] receiver display size: %dx%d", dw, dh)
 	}
 
 	// Set up video cipher.
@@ -660,6 +670,14 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 
 		// Send SPS+PPS as unencrypted avcC codec frame before keyframes
 		if pendingKeyframe && !codecSent && latestSPS != nil && latestPPS != nil {
+			// Derive the encoded content dimensions from the SPS itself so the
+			// codec header reports exactly what the encoder produced, regardless
+			// of the captured surface size (which we no longer pin to a config
+			// value — Wayland surfaces in particular are not pixel-perfect).
+			if w, h, ok := spsDimensions(latestSPS); ok && (s.videoWidth != w || s.videoHeight != h) {
+				dbg("[STREAM] encoded content size from SPS: %dx%d", w, h)
+				s.videoWidth, s.videoHeight = w, h
+			}
 			avcC := buildAVCCConfig(latestSPS, latestPPS)
 			if frameCount < 20 {
 				dbg("[STREAM] sending codec frame avcC len=%d hdr=%02x", len(avcC), avcC[:min(8, len(avcC))])
@@ -926,6 +944,175 @@ func avccWrap(raw []byte) []byte {
 	return b
 }
 
+// h264BitReader reads bits and Exp-Golomb codes from an H.264 RBSP byte slice.
+type h264BitReader struct {
+	data []byte
+	pos  int  // bit position
+	err  bool // set if a read ran past the end of data
+}
+
+func (r *h264BitReader) readBit() uint {
+	if r.pos >= len(r.data)*8 {
+		r.err = true
+		return 0
+	}
+	b := r.data[r.pos>>3]
+	bit := (b >> uint(7-(r.pos&7))) & 1
+	r.pos++
+	return uint(bit)
+}
+
+func (r *h264BitReader) readBits(n int) uint {
+	var v uint
+	for i := 0; i < n; i++ {
+		v = (v << 1) | r.readBit()
+	}
+	return v
+}
+
+// readUE reads an unsigned Exp-Golomb coded value.
+func (r *h264BitReader) readUE() uint {
+	zeros := 0
+	for r.readBit() == 0 {
+		if r.err || zeros > 31 {
+			r.err = true
+			return 0
+		}
+		zeros++
+	}
+	if zeros == 0 {
+		return 0
+	}
+	return (1 << uint(zeros)) - 1 + r.readBits(zeros)
+}
+
+// readSE reads a signed Exp-Golomb coded value.
+func (r *h264BitReader) readSE() int {
+	k := r.readUE()
+	if k&1 != 0 {
+		return int((k + 1) / 2)
+	}
+	return -int(k / 2)
+}
+
+// stripEmulationPrevention removes H.264 emulation prevention bytes
+// (00 00 03 -> 00 00) from an RBSP byte slice.
+func stripEmulationPrevention(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	zeros := 0
+	for i := 0; i < len(b); i++ {
+		if zeros >= 2 && b[i] == 0x03 && i+1 < len(b) && b[i+1] <= 0x03 {
+			zeros = 0
+			continue // drop the emulation prevention byte
+		}
+		if b[i] == 0 {
+			zeros++
+		} else {
+			zeros = 0
+		}
+		out = append(out, b[i])
+	}
+	return out
+}
+
+// spsDimensions parses an H.264 SPS NAL (raw, including the 1-byte NAL header,
+// without a start code) and returns the coded picture width and height in
+// pixels. ok is false if the SPS could not be parsed. Crop offsets are
+// interpreted assuming 4:2:0 chroma, which is the only format the capture
+// encoders emit.
+func spsDimensions(sps []byte) (width, height int, ok bool) {
+	if len(sps) < 4 || sps[0]&0x1f != 7 {
+		return 0, 0, false
+	}
+	r := &h264BitReader{data: stripEmulationPrevention(sps[1:])}
+
+	profileIDC := r.readBits(8)
+	r.readBits(8) // constraint_set flags + reserved
+	r.readBits(8) // level_idc
+	r.readUE()    // seq_parameter_set_id
+
+	switch profileIDC {
+	case 100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135:
+		chromaFormatIDC := r.readUE()
+		if chromaFormatIDC == 3 {
+			r.readBit() // separate_colour_plane_flag
+		}
+		r.readUE()  // bit_depth_luma_minus8
+		r.readUE()  // bit_depth_chroma_minus8
+		r.readBit() // qpprime_y_zero_transform_bypass_flag
+		if r.readBit() == 1 {
+			n := 8
+			if chromaFormatIDC == 3 {
+				n = 12
+			}
+			for i := 0; i < n; i++ {
+				if r.readBit() == 1 {
+					size := 16
+					if i >= 6 {
+						size = 64
+					}
+					lastScale := 8
+					nextScale := 8
+					for j := 0; j < size; j++ {
+						if nextScale != 0 {
+							nextScale = (lastScale + r.readSE() + 256) % 256
+						}
+						if nextScale != 0 {
+							lastScale = nextScale
+						}
+					}
+				}
+			}
+		}
+	}
+
+	r.readUE() // log2_max_frame_num_minus4
+	picOrderCntType := r.readUE()
+	if picOrderCntType == 0 {
+		r.readUE() // log2_max_pic_order_cnt_lsb_minus4
+	} else if picOrderCntType == 1 {
+		r.readBit() // delta_pic_order_always_zero_flag
+		r.readSE()  // offset_for_non_ref_pic
+		r.readSE()  // offset_for_top_to_bottom_field
+		for n := r.readUE(); n > 0; n-- {
+			r.readSE() // offset_for_ref_frame[i]
+		}
+	}
+	r.readUE()  // max_num_ref_frames
+	r.readBit() // gaps_in_frame_num_value_allowed_flag
+
+	picWidthInMbsMinus1 := r.readUE()
+	picHeightInMapUnitsMinus1 := r.readUE()
+	frameMbsOnlyFlag := r.readBit()
+	if frameMbsOnlyFlag == 0 {
+		r.readBit() // mb_adaptive_frame_field_flag
+	}
+	r.readBit() // direct_8x8_inference_flag
+
+	var cropLeft, cropRight, cropTop, cropBottom uint
+	if r.readBit() == 1 { // frame_cropping_flag
+		cropLeft = r.readUE()
+		cropRight = r.readUE()
+		cropTop = r.readUE()
+		cropBottom = r.readUE()
+	}
+	if r.err {
+		return 0, 0, false
+	}
+
+	w := int(picWidthInMbsMinus1+1) * 16
+	h := int(2-frameMbsOnlyFlag) * int(picHeightInMapUnitsMinus1+1) * 16
+	// 4:2:0: CropUnitX = SubWidthC = 2, CropUnitY = SubHeightC*(2-frameMbsOnlyFlag).
+	cropUnitX := 2
+	cropUnitY := 2 * int(2-frameMbsOnlyFlag)
+	w -= int(cropLeft+cropRight) * cropUnitX
+	h -= int(cropTop+cropBottom) * cropUnitY
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
+}
+
 // buildAVCCConfig builds an AVCDecoderConfigurationRecord (avcC) from raw SPS and PPS.
 // Includes 4-byte trailer (02 00 00 00) observed in iPhone captures.
 func buildAVCCConfig(sps, pps []byte) []byte {
@@ -987,12 +1174,25 @@ func (s *MirrorSession) sendCodecFrame(payload []byte, ntpTimestamp uint64) erro
 	header[6] = 0x16 // h264 SPS+PPS option
 	header[7] = 0x01
 	binary.LittleEndian.PutUint64(header[8:16], ntpTimestamp)
+	// Mirror codec header dimension fields (see RPiPlay raop_rtp_mirror.c):
+	//   offset 40/44 = width_source/height_source = the encoded content size
+	//   offset 56/60 = width/height               = the presentation/display size
+	// Genuine senders set the display size to the receiver's display so the
+	// receiver can center/pillarbox content whose aspect ratio differs from the
+	// display (e.g. portrait content on a landscape TV). Sending the content size
+	// for both makes the Apple TV anchor the surface at the top-left instead of
+	// centering it. When the receiver advertised no display size, fall back to
+	// the content size.
+	dispW, dispH := s.displayWidth, s.displayHeight
+	if dispW <= 0 || dispH <= 0 {
+		dispW, dispH = s.videoWidth, s.videoHeight
+	}
 	putFloat32LE(header[16:20], float32(s.videoWidth))
 	putFloat32LE(header[20:24], float32(s.videoHeight))
 	putFloat32LE(header[40:44], float32(s.videoWidth))
 	putFloat32LE(header[44:48], float32(s.videoHeight))
-	putFloat32LE(header[56:60], float32(s.videoWidth))
-	putFloat32LE(header[60:64], float32(s.videoHeight))
+	putFloat32LE(header[56:60], float32(dispW))
+	putFloat32LE(header[60:64], float32(dispH))
 
 	dbg("[SEND] codec frame: seq=%d payLen=%d hdr[4:6]=%02x%02x ts=%d",
 		s.frameSeq, len(payload), header[4], header[5], ntpTimestamp)

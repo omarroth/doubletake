@@ -104,6 +104,28 @@ func TestIsFirstSlice(t *testing.T) {
 	}
 }
 
+func TestSPSDimensions(t *testing.T) {
+	// Baseline-profile SPS (profile_idc=66, level 31) encoding 1280x720,
+	// frame_mbs_only=1, no cropping. Hand-encoded RBSP.
+	sps := []byte{0x67, 0x42, 0x00, 0x1F, 0xF8, 0x0A, 0x00, 0xB7, 0x20}
+	w, h, ok := spsDimensions(sps)
+	if !ok {
+		t.Fatal("expected SPS to parse")
+	}
+	if w != 1280 || h != 720 {
+		t.Fatalf("expected 1280x720, got %dx%d", w, h)
+	}
+
+	// Non-SPS NAL (type 1) must be rejected.
+	if _, _, ok := spsDimensions([]byte{0x61, 0x80, 0x00, 0x00}); ok {
+		t.Fatal("expected non-SPS NAL to be rejected")
+	}
+	// Truncated SPS must be rejected.
+	if _, _, ok := spsDimensions([]byte{0x67, 0x42}); ok {
+		t.Fatal("expected truncated SPS to be rejected")
+	}
+}
+
 func TestPlistStreamPortsLegacy(t *testing.T) {
 	stream := map[string]interface{}{
 		"dataPort":    uint64(6100),
