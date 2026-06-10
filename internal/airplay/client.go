@@ -22,23 +22,51 @@ import (
 
 // ReceiverInfo contains the capabilities returned by GET /info.
 type ReceiverInfo struct {
-	Name              string  `plist:"name"`
-	Model             string  `plist:"model"`
-	Manufacturer      string  `plist:"manufacturer"`
-	DeviceID          string  `plist:"deviceID"`
-	ProtocolVersion   string  `plist:"protocolVersion"`
-	SourceVersion     string  `plist:"sourceVersion"`
-	Features          uint64  `plist:"features"`
-	StatusFlags       uint64  `plist:"statusFlags"`
-	PK                []byte  `plist:"pk"`
-	HasUDPMirror      bool    `plist:"hasUDPMirroringSupport"`
-	HDRCapability     string  `plist:"receiverHDRCapability"`
-	VolumeControlType int     `plist:"volumeControlType"`
-	InitialVolume     float64 `plist:"initialVolume"`
-	KeepAliveBody     bool    `plist:"keepAliveSendStatsAsBody"`
-	PSI               string  `plist:"psi"`
-	PI                string  `plist:"pi"`
-	MacAddress        string  `plist:"macAddress"`
+	Name              string        `plist:"name"`
+	Model             string        `plist:"model"`
+	Manufacturer      string        `plist:"manufacturer"`
+	DeviceID          string        `plist:"deviceID"`
+	ProtocolVersion   string        `plist:"protocolVersion"`
+	SourceVersion     string        `plist:"sourceVersion"`
+	Features          uint64        `plist:"features"`
+	StatusFlags       uint64        `plist:"statusFlags"`
+	PK                []byte        `plist:"pk"`
+	HasUDPMirror      bool          `plist:"hasUDPMirroringSupport"`
+	HDRCapability     string        `plist:"receiverHDRCapability"`
+	VolumeControlType int           `plist:"volumeControlType"`
+	InitialVolume     float64       `plist:"initialVolume"`
+	KeepAliveBody     bool          `plist:"keepAliveSendStatsAsBody"`
+	PSI               string        `plist:"psi"`
+	PI                string        `plist:"pi"`
+	MacAddress        string        `plist:"macAddress"`
+	Displays          []DisplayInfo `plist:"displays"`
+}
+
+// DisplayInfo describes a receiver display advertised in the /info response.
+type DisplayInfo struct {
+	Width        int `plist:"width"`
+	Height       int `plist:"height"`
+	WidthPixels  int `plist:"widthPixels"`
+	HeightPixels int `plist:"heightPixels"`
+}
+
+// DisplaySize returns the receiver's primary display resolution in pixels, or
+// (0, 0) if the receiver did not advertise a usable display size. The mirror
+// codec header uses this as the presentation (display) size so the receiver
+// can center/pillarbox content whose aspect ratio differs from the display.
+func (i *ReceiverInfo) DisplaySize() (int, int) {
+	if i == nil || len(i.Displays) == 0 {
+		return 0, 0
+	}
+	d := i.Displays[0]
+	w, h := d.WidthPixels, d.HeightPixels
+	if w <= 0 || h <= 0 {
+		w, h = d.Width, d.Height
+	}
+	if w <= 0 || h <= 0 {
+		return 0, 0
+	}
+	return w, h
 }
 
 // HTTPStatusError is returned when a receiver responds with a non-2xx RTSP/HTTP status.
@@ -548,8 +576,6 @@ func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
 
 // StreamConfig holds the configuration for a mirroring session.
 type StreamConfig struct {
-	Width     int
-	Height    int
 	FPS       int
 	Bitrate   int  // Video bitrate in kbps
 	NoEncrypt bool // Disable encryption for debugging

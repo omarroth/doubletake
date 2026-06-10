@@ -163,7 +163,7 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 	}
 	defer client.Close()
 
-	session, err := client.SetupMirror(ctx, StreamConfig{Width: 1280, Height: 720, FPS: 30, NoAudio: true})
+	session, err := client.SetupMirror(ctx, StreamConfig{FPS: 30, NoAudio: true})
 	if err != nil {
 		t.Fatalf("SetupMirror(no audio): %v", err)
 	}

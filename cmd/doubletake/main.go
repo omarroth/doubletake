@@ -54,8 +54,6 @@ func main() {
 	credFile := flag.String("creds", airplay.DefaultCredentialsPath(), "Path to saved pairing credentials")
 	credBackend := flag.String("cred-backend", "file", "Credential storage backend: file or keyring (system keyring via Secret Service)")
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
-	width := flag.Int("width", 1920, "Stream width")
-	height := flag.Int("height", 1080, "Stream height")
 	fps := flag.Int("fps", 30, "Frames per second")
 	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = auto, default tunes for resolution/FPS)")
 	targetLatencyMs := flag.Int("target-latency-ms", 100, "Target end-to-end latency in milliseconds (applies to audio and video timing)")
@@ -75,7 +73,7 @@ func main() {
 	airplay.DebugMode = *debug
 
 	if *daemonize {
-		runDaemon(*socketPath, *credFile, *credBackend, *width, *height, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio)
+		runDaemon(*socketPath, *credFile, *credBackend, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio)
 		return
 	}
 
@@ -249,8 +247,6 @@ func main() {
 		log.Fatalf("invalid -port-range: %v", err)
 	}
 	streamCfg := airplay.StreamConfig{
-		Width:     *width,
-		Height:    *height,
 		FPS:       *fps,
 		Bitrate:   *bitrate,
 		NoEncrypt: *noEncrypt,
@@ -275,8 +271,6 @@ func main() {
 		}
 		var err error
 		capture, err = airplay.StartTestCapture(ctx, airplay.CaptureConfig{
-			Width:   *width,
-			Height:  *height,
 			FPS:     *fps,
 			Bitrate: *bitrate,
 			HWAccel: *hwaccel,
@@ -286,8 +280,6 @@ func main() {
 		}
 	} else {
 		captureCfg := airplay.CaptureConfig{
-			Width:   *width,
-			Height:  *height,
 			FPS:     *fps,
 			Bitrate: *bitrate,
 			HWAccel: *hwaccel,
@@ -403,13 +395,11 @@ func compareIPs(a, b string) int {
 	return 0
 }
 
-func runDaemon(socketPath, credFile, credBackend string, width, height, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio bool) {
+func runDaemon(socketPath, credFile, credBackend string, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio bool) {
 	cfg := daemon.Config{
 		SocketPath:  socketPath,
 		CredFile:    credFile,
 		CredBackend: credBackend,
-		Width:       width,
-		Height:      height,
 		FPS:         fps,
 		Bitrate:     bitrate,
 		HWAccel:     hwaccel,

@@ -17,8 +17,6 @@ import (
 
 // CaptureConfig holds screen capture settings.
 type CaptureConfig struct {
-	Width   int
-	Height  int
 	FPS     int
 	Bitrate int    // Video bitrate in kbps (0 = auto)
 	HWAccel string // "auto", "vaapi", "none"
@@ -31,6 +29,11 @@ const (
 	defaultVideoBitrateKbps = 4500
 	minVideoBitrateKbps     = 1800
 	maxVideoBitrateKbps     = 12000
+
+	// Synthetic test capture has no real display to size itself from, so it
+	// uses a fixed resolution.
+	testCaptureWidth  = 1920
+	testCaptureHeight = 1080
 )
 
 // ScreenCapture manages screen capture via GStreamer.
@@ -86,8 +89,11 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 
 	// Single GStreamer pipeline: capture from PipeWire portal and encode to H.264.
 	// Keep the pipeline simple — pipewiresrc ! videoconvert handles DMA-BUF to
-	// system memory conversion automatically.  videoscale and videorate are applied
-	// after conversion so caps negotiation isn't blocked.
+	// system memory conversion automatically. The stream is encoded at the portal's
+	// native resolution; we do not rescale to a configured size because the captured
+	// surface size is whatever the compositor hands us (Wayland surfaces are not
+	// pixel-perfect to any requested size). The actual encoded dimensions are read
+	// back from the H.264 SPS downstream.
 	// videorate drop-only=true passes frames through without duplicating during
 	// idle periods (avoids wasting bandwidth on static screens). skip-to-first
 	// avoids buffering before the first frame.
@@ -96,9 +102,8 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		"--quiet",
 		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
 		"!", "videoconvert",
-		"!", "videoscale",
 		"!", "videorate", "drop-only=true", "skip-to-first=true",
-		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 	}
 	if encoderParts.needsVulkan {
@@ -166,19 +171,22 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	encoder := detectGstEncoder(cfg)
 
 	// Detect primary monitor geometry — ximagesrc captures the full X screen
-	// (all monitors combined). On multi-monitor setups this wastes CPU on
-	// pixels we don't need. Crop to the primary monitor.
-	startX, endX := detectPrimaryMonitor(display, cfg.Width)
+	// (all monitors combined). On multi-monitor setups this wastes CPU on pixels
+	// we don't need, so crop to the primary monitor. The encoded resolution is
+	// then the primary monitor's native resolution (no rescaling).
+	startX, startY, endX, endY := detectPrimaryMonitor(display)
 
 	ximageSrcArgs := []string{
 		"ximagesrc", fmt.Sprintf("display-name=%s", display), "use-damage=false",
 	}
-	if endX > startX {
+	if endX > startX && endY > startY {
 		ximageSrcArgs = append(ximageSrcArgs,
 			fmt.Sprintf("startx=%d", startX),
+			fmt.Sprintf("starty=%d", startY),
 			fmt.Sprintf("endx=%d", endX-1),
+			fmt.Sprintf("endy=%d", endY-1),
 		)
-		dbg("[CAPTURE] cropping ximagesrc to x=%d..%d", startX, endX-1)
+		dbg("[CAPTURE] cropping ximagesrc to x=%d..%d y=%d..%d", startX, endX-1, startY, endY-1)
 	}
 
 	gstArgs := []string{"--quiet"}
@@ -187,8 +195,6 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "videoconvert",
-		"!", "videoscale",
-		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d", cfg.Width, cfg.Height),
 	)
 	if encoder.needsVulkan {
 		gstArgs = append(gstArgs, "!", "vulkanupload")
@@ -282,22 +288,22 @@ func (sc *ScreenCapture) Stop() {
 	}
 }
 
-// detectPrimaryMonitor queries xrandr to find the primary monitor's X offset
-// and width. Returns (startX, endX) where endX = startX + monitor_width.
-// If detection fails or the screen is already <= targetWidth, returns (0, 0)
-// meaning no cropping is needed.
-func detectPrimaryMonitor(display string, targetWidth int) (int, int) {
+// detectPrimaryMonitor queries xrandr to find the primary monitor's geometry.
+// Returns (startX, startY, endX, endY) bounding the primary monitor, where
+// endX = startX + monitor_width and endY = startY + monitor_height. If
+// detection fails it returns all zeros, meaning no cropping should be applied.
+func detectPrimaryMonitor(display string) (startX, startY, endX, endY int) {
 	// Run xrandr to get connected outputs with geometry
 	out, err := exec.Command("xrandr", "--display", display, "--query").Output()
 	if err != nil {
 		dbg("[CAPTURE] xrandr failed: %v, skipping monitor crop", err)
-		return 0, 0
+		return 0, 0, 0, 0
 	}
 
 	// Parse lines like: "DP-3 connected primary 1920x1080+0+0"
 	// or "DP-1 connected 1920x1080+1920+0"
 	// Format: <name> connected [primary] <W>x<H>+<X>+<Y>
-	var primaryX, primaryW int
+	var px, py, pw, ph int
 	var found bool
 	for _, line := range strings.Split(string(out), "\n") {
 		if !strings.Contains(line, " connected") {
@@ -305,8 +311,8 @@ func detectPrimaryMonitor(display string, targetWidth int) (int, int) {
 		}
 		// Try primary first
 		if strings.Contains(line, " primary ") {
-			if x, w, ok := parseXrandrGeometry(line); ok {
-				primaryX, primaryW = x, w
+			if x, y, w, h, ok := parseXrandrGeometry(line); ok {
+				px, py, pw, ph = x, y, w, h
 				found = true
 				break
 			}
@@ -318,31 +324,26 @@ func detectPrimaryMonitor(display string, targetWidth int) (int, int) {
 			if !strings.Contains(line, " connected") {
 				continue
 			}
-			if x, w, ok := parseXrandrGeometry(line); ok {
-				primaryX, primaryW = x, w
+			if x, y, w, h, ok := parseXrandrGeometry(line); ok {
+				px, py, pw, ph = x, y, w, h
 				found = true
 				break
 			}
 		}
 	}
 
-	if !found {
+	if !found || pw <= 0 || ph <= 0 {
 		dbg("[CAPTURE] couldn't parse xrandr output, skipping monitor crop")
-		return 0, 0
+		return 0, 0, 0, 0
 	}
 
-	// Only crop if the monitor width is close to or larger than targetWidth
-	// and we're actually on a multi-monitor setup (total screen > single monitor)
-	if primaryW <= 0 || primaryW < targetWidth {
-		return 0, 0
-	}
-
-	dbg("[CAPTURE] primary monitor: %dx? at x=%d", primaryW, primaryX)
-	return primaryX, primaryX + primaryW
+	dbg("[CAPTURE] primary monitor: %dx%d at +%d+%d", pw, ph, px, py)
+	return px, py, px + pw, py + ph
 }
 
-// parseXrandrGeometry extracts the X offset and width from an xrandr output line.
-func parseXrandrGeometry(line string) (xOffset, width int, ok bool) {
+// parseXrandrGeometry extracts the X/Y offset and width/height from an xrandr
+// output line.
+func parseXrandrGeometry(line string) (xOffset, yOffset, width, height int, ok bool) {
 	// Match WxH+X+Y pattern
 	for _, field := range strings.Fields(line) {
 		// e.g. "1920x1080+0+0" or "3840x2160+1920+0"
@@ -359,13 +360,21 @@ func parseXrandrGeometry(line string) (xOffset, width int, ok bool) {
 		if len(plusParts) != 3 {
 			continue
 		}
+		h, err := strconv.Atoi(plusParts[0])
+		if err != nil {
+			continue
+		}
 		x, err := strconv.Atoi(plusParts[1])
 		if err != nil {
 			continue
 		}
-		return x, w, true
+		y, err := strconv.Atoi(plusParts[2])
+		if err != nil {
+			continue
+		}
+		return x, y, w, h, true
 	}
-	return 0, 0, false
+	return 0, 0, 0, 0, false
 }
 
 // encoderResult holds the detected encoder pipeline parts and whether it needs
@@ -483,7 +492,7 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 	gstArgs := []string{
 		"--quiet",
 		"videotestsrc", "pattern=18", "is-live=true", "do-timestamp=true",
-		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", cfg.Width, cfg.Height, fps),
+		"!", fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", testCaptureWidth, testCaptureHeight, fps),
 		"!", "timeoverlay",
 		"!", "videoconvert",
 		"!", "x264enc",
@@ -557,14 +566,10 @@ func captureBitrateKbps(cfg CaptureConfig) int {
 	if fps <= 0 {
 		fps = 30
 	}
-	width := cfg.Width
-	if width <= 0 {
-		width = 1920
-	}
-	height := cfg.Height
-	if height <= 0 {
-		height = 1080
-	}
+	// The encoded resolution is not known until frames flow (it comes from the
+	// captured display), so size the auto bitrate for a 1080p budget. Pass
+	// -bitrate to override for higher-resolution displays.
+	width, height := 1920, 1080
 
 	bitrate := recommendedBitrateKbps(width, height, fps)
 	log.Printf("[CAPTURE] auto bitrate selected: %d kbps for %dx%d@%dfps", bitrate, width, height, fps)

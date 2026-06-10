@@ -72,8 +72,6 @@ type Config struct {
 	SocketPath  string
 	CredFile    string
 	CredBackend string
-	Width       int
-	Height      int
 	FPS         int
 	Bitrate     int
 	HWAccel     string
@@ -630,8 +628,6 @@ func (d *Daemon) connectAndStream(ctx context.Context, target string, port int, 
 	}
 
 	streamCfg := airplay.StreamConfig{
-		Width:     d.cfg.Width,
-		Height:    d.cfg.Height,
 		FPS:       d.cfg.FPS,
 		Bitrate:   d.cfg.Bitrate,
 		NoEncrypt: d.cfg.NoEncrypt,
@@ -725,8 +721,6 @@ func (d *Daemon) getOrStartBroadcastLocked(restoreToken, deviceID string) (*airp
 
 	// Start a fresh screen capture.
 	capCfg := airplay.CaptureConfig{
-		Width:        d.cfg.Width,
-		Height:       d.cfg.Height,
 		FPS:          d.cfg.FPS,
 		Bitrate:      d.cfg.Bitrate,
 		HWAccel:      d.cfg.HWAccel,
