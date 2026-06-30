@@ -191,8 +191,10 @@ doubletake-ctl unmute [target]
 
 The majority of code for this project was written by LLMs. I've read through the code to make sure there's nothing obviously stupid, but if you're in a production or security-sensitive environment and need to use AirPlay (for whatever reason), do not use this project.
 
-Since I assume most of the code for this project was trained from [UxPlay](https://github.com/FDH2/UxPlay) and similar projects, I've provided this project under the same license. Most of the reverse engineering work has already been done by many other people and this project would not be possible without them.
+Since I assume most of the code for this project was trained from [UxPlay](https://github.com/FDH2/UxPlay) and similar projects, I've provided this project under a similar license. Most of the reverse engineering work has already been done by many other people and this project would not be possible without them.
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, modify, and redistribute this software under the terms of the GPL-3.0. See the LICENSE file for full details.
+This project is licensed under the [GNU Lesser General Public License v3.0 or later](LICENSE) (`LGPL-3.0-or-later`). See the LICENSE file for the LGPL terms and [COPYING.GPL](COPYING.GPL) for the incorporated GPLv3 terms.
+
+Releases v0.3.2 and earlier were provided under the GNU General Public License v3.0 or later (`GPL-3.0-or-later`).

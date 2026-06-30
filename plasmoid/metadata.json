@@ -11,7 +11,7 @@
         "EnabledByDefault": true,
         "Icon": "video-display",
         "Id": "org.doubletake.plasmoid",
-        "License": "MIT",
+        "License": "LGPL-3.0-or-later",
         "Name": "doubletake",
         "Version": "0.1.0"
     },
