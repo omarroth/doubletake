@@ -3,6 +3,7 @@ package airplay
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +25,18 @@ type AirPlayDevice struct {
 
 // DiscoverAirPlayDevices browses the local network for AirPlay receivers.
 func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
-	resolver, err := zeroconf.NewResolver(nil)
+	ifaces, traffic, err := airPlayMDNSInterfaces()
+	if err != nil {
+		return nil, fmt.Errorf("mDNS interfaces: %w", err)
+	}
+	if len(ifaces) == 0 {
+		return nil, nil
+	}
+
+	resolver, err := zeroconf.NewResolver(
+		zeroconf.SelectIfaces(ifaces),
+		zeroconf.SelectIPTraffic(traffic),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("zeroconf resolver: %w", err)
 	}
@@ -50,6 +62,101 @@ func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
 	<-ctx.Done()
 	<-done
 	return devices, nil
+}
+
+func airPlayMDNSInterfaces() ([]net.Interface, zeroconf.IPType, error) {
+	systemIfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ifaces := make([]net.Interface, 0, len(systemIfaces))
+	var traffic zeroconf.IPType
+	for _, iface := range systemIfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		hasIPv4, hasIPv6 := mdnsAddressFamilies(addrs)
+		if !isAirPlayMDNSInterface(iface, hasIPv4, hasIPv6) {
+			continue
+		}
+
+		ifaces = append(ifaces, iface)
+		if hasIPv4 {
+			traffic |= zeroconf.IPv4
+		}
+		if hasIPv6 {
+			traffic |= zeroconf.IPv6
+		}
+	}
+
+	return ifaces, traffic, nil
+}
+
+func isAirPlayMDNSInterface(iface net.Interface, hasIPv4, hasIPv6 bool) bool {
+	if iface.Flags&net.FlagUp == 0 {
+		return false
+	}
+	if iface.Flags&net.FlagMulticast == 0 {
+		return false
+	}
+	if iface.Flags&(net.FlagLoopback|net.FlagPointToPoint) != 0 {
+		return false
+	}
+	if isNonLANInterfaceName(iface.Name) {
+		return false
+	}
+	return hasIPv4 || hasIPv6
+}
+
+func isNonLANInterfaceName(name string) bool {
+	name = strings.ToLower(name)
+	prefixes := [...]string{
+		"bnep", "bluetooth", "bt", "pan",
+		"br-", "cilium", "cni", "docker", "flannel", "kube", "podman", "veth", "virbr",
+		"tailscale", "tap", "tun", "utun", "wg", "zt",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func mdnsAddressFamilies(addrs []net.Addr) (hasIPv4, hasIPv6 bool) {
+	for _, addr := range addrs {
+		ip := ipFromAddr(addr)
+		if ip == nil || !isUsableMDNSAddress(ip) {
+			continue
+		}
+		if ip.To4() != nil {
+			hasIPv4 = true
+		} else {
+			hasIPv6 = true
+		}
+	}
+	return hasIPv4, hasIPv6
+}
+
+func ipFromAddr(addr net.Addr) net.IP {
+	switch addr := addr.(type) {
+	case *net.IPNet:
+		return addr.IP
+	case *net.IPAddr:
+		return addr.IP
+	default:
+		return nil
+	}
+}
+
+func isUsableMDNSAddress(ip net.IP) bool {
+	return ip != nil &&
+		!ip.IsUnspecified() &&
+		!ip.IsLoopback() &&
+		!ip.IsLinkLocalUnicast() &&
+		!ip.IsMulticast()
 }
 
 func parseServiceEntry(entry *zeroconf.ServiceEntry) *AirPlayDevice {
