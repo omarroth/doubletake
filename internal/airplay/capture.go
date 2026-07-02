@@ -87,20 +87,25 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 
 	encoderParts := detectGstEncoder(cfg)
 
-	// Single GStreamer pipeline: capture from PipeWire portal and encode to H.264.
-	// Keep the pipeline simple — pipewiresrc ! videoconvert handles DMA-BUF to
-	// system memory conversion automatically. The stream is encoded at the portal's
-	// native resolution; we do not rescale to a configured size because the captured
-	// surface size is whatever the compositor hands us (Wayland surfaces are not
-	// pixel-perfect to any requested size). The actual encoded dimensions are read
-	// back from the H.264 SPS downstream.
-	// videorate drop-only=true passes frames through without duplicating during
-	// idle periods (avoids wasting bandwidth on static screens). skip-to-first
-	// avoids buffering before the first frame.
+	// Single GStreamer pipeline: capture from the PipeWire portal and encode to
+	// H.264.
+	//   - vapostproc imports the portal's DMA-BUF via VA-API (plain videoconvert
+	//     fails to negotiate DMA-BUF on many drivers, giving a black screen).
+	//   - format=I420 forces 4:2:0 — RGB screens otherwise make x264enc emit
+	//     "High 4:4:4 Predictive", which most receiver decoders reject (black).
+	//   - videorate re-stamps buffers onto a regular fps timeline: the portal can
+	//     deliver pts=0, which confuses encoder/muxer timing. drop-only=true never
+	//     duplicates frames during idle periods (no wasted bandwidth on a static
+	//     screen); skip-to-first avoids buffering before the first frame.
+	// The stream is encoded at the portal's native resolution; we do not rescale
+	// because the captured surface size is whatever the compositor hands us. The
+	// actual encoded dimensions are read back from the H.264 SPS downstream.
 	const pwFdNum = 3
 	gstArgs := []string{
 		"--quiet",
 		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
+		"!", "vapostproc",
+		"!", "video/x-raw,format=I420",
 		"!", "videoconvert",
 		"!", "videorate", "drop-only=true", "skip-to-first=true",
 		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
@@ -125,6 +130,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	if err != nil {
 		cancel()
 		pwFd.Close()
+		dbusConn.Close()
 		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
 	stderr, _ := cmd.StderrPipe()
@@ -132,6 +138,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	if err := cmd.Start(); err != nil {
 		cancel()
 		pwFd.Close()
+		dbusConn.Close()
 		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
 	pwFd.Close() // child inherited it
@@ -258,7 +265,7 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 }
 
 func (sc *ScreenCapture) Stop() {
-	if sc.stopped || sc.cmd == nil {
+	if sc.stopped {
 		return
 	}
 	sc.stopped = true
@@ -266,7 +273,7 @@ func (sc *ScreenCapture) Stop() {
 		sc.cancel()
 	}
 
-	// Close stdout to unblock any pending Read() call
+	// Close stdout to unblock any pending Read() call.
 	if sc.stdout != nil {
 		sc.stdout.Close()
 	}
@@ -274,14 +281,15 @@ func (sc *ScreenCapture) Stop() {
 	if sc.dbusConn != nil {
 		sc.dbusConn.Close()
 	}
-	if sc.cmd.Process != nil {
+
+	if sc.cmd != nil && sc.cmd.Process != nil {
 		_ = sc.cmd.Process.Signal(os.Interrupt)
 	}
 
 	select {
 	case <-sc.waitCh:
 	case <-time.After(2 * time.Second):
-		if sc.cmd.Process != nil {
+		if sc.cmd != nil && sc.cmd.Process != nil {
 			_ = sc.cmd.Process.Kill()
 		}
 		<-sc.waitCh
