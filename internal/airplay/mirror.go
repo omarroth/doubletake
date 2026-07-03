@@ -136,9 +136,13 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// the receiver's playout buffer lead. Receivers without a robust jitter buffer
 	// (non-FairPlay-SAP, e.g. Roku) need a conservative floor or they drop audio;
 	// modern Apple receivers can run at the low target latency unchanged.
+	// if floor := c.info.playoutLatencyFloor(); sessionLatency < floor {
+	// 	dbg("[SETUP] raising session latency to receiver playout floor: %v", floor)
+	// 	sessionLatency = floor
+	// }
 	if floor := c.info.playoutLatencyFloor(); sessionLatency < floor {
-		dbg("[SETUP] raising session latency to receiver playout floor: %v", floor)
-		sessionLatency = floor
+		dbg("[SETUP] receiver playout floor: %v; ignoring, using configured latency %v",
+			floor, sessionLatency)
 	}
 
 	// ---- Working SETUP sequence ----
@@ -464,22 +468,34 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	if len(recordBody) > 0 {
 		dbg("[SETUP] RECORD response body: %02x", recordBody)
 	}
+	// if value, ok := recordRespHeaders["audio-latency"]; ok {
+	// 	parsed, parseErr := strconv.ParseUint(value, 10, 32)
+	// 	if parseErr != nil {
+	// 		dbg("[SETUP] invalid Audio-Latency header %q: %v", value, parseErr)
+	// 	} else if parsed > 0 {
+	// 		// The receiver reported its authoritative playout latency. Drive both
+	// 		// audio and video from it so they stay in sync (the anchor lead is the
+	// 		// shared playout time), overriding our conservative fallback floor.
+	// 		audioLatencySamples = uint32(parsed)
+	// 		sessionLatency = time.Duration(audioLatencySamples) * time.Second / 44100
+	// 		dbg("[SETUP] receiver audio latency: %d samples (%v); using for audio+video", audioLatencySamples, sessionLatency)
+	// 	}
+	// }
 	if value, ok := recordRespHeaders["audio-latency"]; ok {
 		parsed, parseErr := strconv.ParseUint(value, 10, 32)
 		if parseErr != nil {
 			dbg("[SETUP] invalid Audio-Latency header %q: %v", value, parseErr)
 		} else if parsed > 0 {
-			// The receiver reported its authoritative playout latency. Drive both
-			// audio and video from it so they stay in sync (the anchor lead is the
-			// shared playout time), overriding our conservative fallback floor.
-			audioLatencySamples = uint32(parsed)
-			sessionLatency = time.Duration(audioLatencySamples) * time.Second / 44100
-			dbg("[SETUP] receiver audio latency: %d samples (%v); using for audio+video", audioLatencySamples, sessionLatency)
+			receiverLatency := time.Duration(parsed) * time.Second / 44100
+
+			dbg("[SETUP] receiver audio latency: %d samples (%v); ignoring, using configured latency %v",
+				parsed, receiverLatency, sessionLatency)
+
+			audioLatencySamples = samplesFor44k1(sessionLatency)
 		}
 	}
-
 	// Set volume to maximum (0 dB)
-	volumeBody := []byte("volume: 0.000000\r\n")
+	volumeBody := []byte("volume: 20.000000\r\n")
 	_, _, err = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
 	if err != nil {
 		dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)

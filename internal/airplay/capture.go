@@ -21,8 +21,12 @@ type CaptureConfig struct {
 	Bitrate int    // Video bitrate in kbps (0 = auto)
 	HWAccel string // "auto", "vaapi", "none"
 
+	X11WindowID   uint64
+	X11WindowName string
+
 	RestoreToken     string
 	SaveRestoreToken func(string) error
+	
 }
 
 const (
@@ -51,7 +55,12 @@ type ScreenCapture struct {
 // StartCapture detects the display server (Wayland or X11) and initiates screen
 // capture accordingly. On Wayland it uses xdg-desktop-portal + PipeWire for
 // capture; on X11 it uses ximagesrc. Both use GStreamer for H.264 encoding.
+
 func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
+	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
+		return startX11Capture(ctx, cfg)
+	}
+
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		return startWaylandCapture(ctx, cfg)
 	}
@@ -60,6 +69,16 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 	}
 	return nil, fmt.Errorf("no display server detected (neither WAYLAND_DISPLAY nor DISPLAY is set)")
 }
+
+// func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
+// 	if os.Getenv("WAYLAND_DISPLAY") != "" {
+// 		return startWaylandCapture(ctx, cfg)
+// 	}
+// 	if os.Getenv("DISPLAY") != "" {
+// 		return startX11Capture(ctx, cfg)
+// 	}
+// 	return nil, fmt.Errorf("no display server detected (neither WAYLAND_DISPLAY nor DISPLAY is set)")
+// }
 
 func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	// Check dependencies
@@ -174,27 +193,57 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	}
 
 	display := os.Getenv("DISPLAY")
-
 	encoder := detectGstEncoder(cfg)
 
-	// Detect primary monitor geometry — ximagesrc captures the full X screen
-	// (all monitors combined). On multi-monitor setups this wastes CPU on pixels
-	// we don't need, so crop to the primary monitor. The encoded resolution is
-	// then the primary monitor's native resolution (no rescaling).
-	startX, startY, endX, endY := detectPrimaryMonitor(display)
-
 	ximageSrcArgs := []string{
-		"ximagesrc", fmt.Sprintf("display-name=%s", display), "use-damage=false",
+		"ximagesrc",
+		fmt.Sprintf("display-name=%s", display),
+		"use-damage=false",
+		"show-pointer=false",
 	}
-	if endX > startX && endY > startY {
-		ximageSrcArgs = append(ximageSrcArgs,
-			fmt.Sprintf("startx=%d", startX),
-			fmt.Sprintf("starty=%d", startY),
-			fmt.Sprintf("endx=%d", endX-1),
-			fmt.Sprintf("endy=%d", endY-1),
-		)
-		dbg("[CAPTURE] cropping ximagesrc to x=%d..%d y=%d..%d", startX, endX-1, startY, endY-1)
+
+	if cfg.X11WindowID != 0 {
+		ximageSrcArgs = append(ximageSrcArgs, fmt.Sprintf("xid=%d", cfg.X11WindowID))
+		dbg("[CAPTURE] capturing X11 window xid=0x%x", cfg.X11WindowID)
+	} else if cfg.X11WindowName != "" {
+		ximageSrcArgs = append(ximageSrcArgs, fmt.Sprintf("xname=%s", cfg.X11WindowName))
+		dbg("[CAPTURE] capturing X11 window name=%q", cfg.X11WindowName)
+	} else {
+		// existing behavior: crop to primary monitor
+		startX, startY, endX, endY := detectPrimaryMonitor(display)
+		if endX > startX && endY > startY {
+			ximageSrcArgs = append(ximageSrcArgs,
+				fmt.Sprintf("startx=%d", startX),
+				fmt.Sprintf("starty=%d", startY),
+				fmt.Sprintf("endx=%d", endX-1),
+				fmt.Sprintf("endy=%d", endY-1),
+			)
+			dbg("[CAPTURE] cropping ximagesrc to x=%d..%d y=%d..%d", startX, endX-1, startY, endY-1)
+		}
 	}
+
+	// display := os.Getenv("DISPLAY")
+	//
+	// encoder := detectGstEncoder(cfg)
+	//
+	// // Detect primary monitor geometry — ximagesrc captures the full X screen
+	// // (all monitors combined). On multi-monitor setups this wastes CPU on pixels
+	// // we don't need, so crop to the primary monitor. The encoded resolution is
+	// // then the primary monitor's native resolution (no rescaling).
+	// startX, startY, endX, endY := detectPrimaryMonitor(display)
+	//
+	// ximageSrcArgs := []string{
+	// 	"ximagesrc", fmt.Sprintf("display-name=%s", display), "use-damage=false",
+	// }
+	// if endX > startX && endY > startY {
+	// 	ximageSrcArgs = append(ximageSrcArgs,
+	// 		fmt.Sprintf("startx=%d", startX),
+	// 		fmt.Sprintf("starty=%d", startY),
+	// 		fmt.Sprintf("endx=%d", endX-1),
+	// 		fmt.Sprintf("endy=%d", endY-1),
+	// 	)
+	// 	dbg("[CAPTURE] cropping ximagesrc to x=%d..%d y=%d..%d", startX, endX-1, startY, endY-1)
+	// }
 
 	gstArgs := []string{"--quiet"}
 	gstArgs = append(gstArgs, ximageSrcArgs...)

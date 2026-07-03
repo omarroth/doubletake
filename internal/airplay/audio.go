@@ -8,11 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
-
+	"golang.org/x/sys/unix"
 	aeadchacha20poly1305 "github.com/aead/chacha20poly1305"
 )
 
@@ -176,46 +177,189 @@ func (ac *AudioCapture) ReadFrame(buf []byte) (int, error) {
 	return n, nil
 }
 
-// DrainStale discards any PCM that buffered in the OS pipe between capture
-// start and the first read. The capture pipeline starts producing audio
-// immediately, but streaming does not begin until the first video frame is
-// sent; during that gap the kernel pipe accumulates a FIFO backlog that would
-// otherwise be read in order forever, leaving every frame permanently stale and
-// audio lagging video. Draining once just before the read loop starts streaming
-// from the freshest sample. It removes whatever backlog actually accumulated —
-// no fixed latency value is assumed.
-func (ac *AudioCapture) DrainStale() {
-	type deadlineReader interface {
-		SetReadDeadline(t time.Time) error
+func bytesAvailable(f *os.File) int {
+	available, err := unix.IoctlGetInt(int(f.Fd()), unix.TIOCINQ)
+	if err != nil {
+		dbg("[AUDIO] TIOCINQ failed: %v", err)
+		return 0
 	}
-	dr, ok := ac.pcmPipe.(deadlineReader)
-	if !ok {
+	return available
+}
+
+func (ac *AudioCapture) DropAudioBacklog(keepFrames int) {
+	f, ok := ac.pcmPipe.(*os.File)
+	if !ok || f == nil {
 		return
 	}
-	buf := make([]byte, 32*1024)
-	var discarded int
-	for {
-		// Re-arm a short idle timeout each read: while a backlog exists, reads
-		// return buffered data immediately; once the pipe is empty the read
-		// blocks and this deadline fires before the next live frame (~8ms)
-		// arrives, ending the drain. This is a poll timeout, not a latency.
-		if err := dr.SetReadDeadline(time.Now().Add(2 * time.Millisecond)); err != nil {
-			break
+
+	const spf = 352
+	const channels = 2
+	const bytesPerSample = 2
+	const frameBytes = spf * channels * bytesPerSample
+
+	keep := keepFrames * frameBytes
+
+	available := bytesAvailable(f) 
+	if available <= 0 {
+		return
+	}
+	// var available int
+	// _, _, errno := syscall.Syscall(
+	// 	syscall.SYS_IOCTL,
+	// 	f.Fd(),
+	// 	uintptr(syscall.FIONREAD),
+	// 	uintptr(unsafe.Pointer(&available)),
+	// )
+	// if errno != 0 || available <= keep {
+	// 	return
+	// }
+
+	drop := available - keep
+	drop -= drop % frameBytes
+	if drop <= 0 {
+		return
+	}
+
+	buf := make([]byte, frameBytes)
+	dropped := 0
+
+	for dropped < drop {
+		want := drop - dropped
+		if want > len(buf) {
+			want = len(buf)
 		}
-		n, err := ac.pcmPipe.Read(buf)
-		discarded += n
-		if err != nil {
+
+		n, err := ac.pcmPipe.Read(buf[:want])
+		dropped += n
+		if err != nil || n == 0 {
 			break
 		}
 	}
-	// Restore blocking reads for steady-state streaming.
-	_ = dr.SetReadDeadline(time.Time{})
-	if discarded > 0 {
-		const bytesPerSecond = 44100 * 2 * 2 // 44.1kHz, stereo, S16LE
-		dbg("[AUDIO] drained %d bytes (~%.0fms) of startup backlog before streaming",
-			discarded, float64(discarded)/bytesPerSecond*1000)
+
+	if dropped > 0 {
+		const bytesPerSecond = 44100 * 2 * 2
+		dbg("[AUDIO] dropped %d stale bytes (~%.0fms), kept %d frames",
+			dropped,
+			float64(dropped)/bytesPerSecond*1000,
+			keepFrames,
+		)
 	}
 }
+
+func (ac *AudioCapture) DrainStale() {
+	f, ok := ac.pcmPipe.(*os.File)
+	if !ok || f == nil {
+		dbg("[AUDIO] DrainStale: pcmPipe is not *os.File")
+		return
+	}
+
+	// var available int
+	// _, _, errno := syscall.Syscall(
+	// 	syscall.SYS_IOCTL,
+	// 	f.Fd(),
+	// 	uintptr(syscall.FIONREAD),
+	// 	uintptr(unsafe.Pointer(&available)),
+	// )
+	// if errno != 0 {
+	// 	dbg("[AUDIO] DrainStale: FIONREAD failed: %v", errno)
+	// 	return
+	// }
+
+	available := bytesAvailable(f) 
+
+	if available <= 0 {
+		dbg("[AUDIO] DrainStale: no startup backlog")
+		return
+	}
+
+	// Keep only a tiny amount so ReadFrame() has something immediate.
+	const spf = 352
+	const channels = 2
+	const bytesPerSample = 2
+	const frameBytes = spf * channels * bytesPerSample // 1408 bytes ~= 8ms
+
+	keep := 2 * frameBytes // keep ~16ms
+	drop := available - keep
+	if drop <= 0 {
+		dbg("[AUDIO] DrainStale: backlog only %d bytes, keeping it", available)
+		return
+	}
+
+	// Keep frame alignment.
+	drop -= drop % frameBytes
+	if drop <= 0 {
+		return
+	}
+
+	buf := make([]byte, frameBytes)
+	dropped := 0
+
+	for dropped < drop {
+		want := drop - dropped
+		if want > len(buf) {
+			want = len(buf)
+		}
+
+		n, err := ac.pcmPipe.Read(buf[:want])
+		dropped += n
+		if err != nil {
+			dbg("[AUDIO] DrainStale: read stopped after %d bytes: %v", dropped, err)
+			break
+		}
+		if n == 0 {
+			break
+		}
+	}
+
+	const bytesPerSecond = 44100 * 2 * 2
+	dbg("[AUDIO] drained %d/%d stale bytes (~%.0fms), kept ~%dms",
+		dropped,
+		available,
+		float64(dropped)/bytesPerSecond*1000,
+		keep*1000/bytesPerSecond,
+	)
+}
+
+// // DrainStale discards any PCM that buffered in the OS pipe between capture
+// // start and the first read. The capture pipeline starts producing audio
+// // immediately, but streaming does not begin until the first video frame is
+// // sent; during that gap the kernel pipe accumulates a FIFO backlog that would
+// // otherwise be read in order forever, leaving every frame permanently stale and
+// // audio lagging video. Draining once just before the read loop starts streaming
+// // from the freshest sample. It removes whatever backlog actually accumulated —
+// // no fixed latency value is assumed.
+// func (ac *AudioCapture) DrainStale() {
+// 	type deadlineReader interface {
+// 		SetReadDeadline(t time.Time) error
+// 	}
+// 	dr, ok := ac.pcmPipe.(deadlineReader)
+// 	if !ok {
+// 		return
+// 	}
+// 	buf := make([]byte, 32*1024)
+// 	var discarded int
+// 	for {
+// 		// Re-arm a short idle timeout each read: while a backlog exists, reads
+// 		// return buffered data immediately; once the pipe is empty the read
+// 		// blocks and this deadline fires before the next live frame (~8ms)
+// 		// arrives, ending the drain. This is a poll timeout, not a latency.
+// 		if err := dr.SetReadDeadline(time.Now().Add(2 * time.Millisecond)); err != nil {
+// 			break
+// 		}
+// 		n, err := ac.pcmPipe.Read(buf)
+// 		discarded += n
+// 		if err != nil {
+// 			break
+// 		}
+// 	}
+// 	// Restore blocking reads for steady-state streaming.
+// 	_ = dr.SetReadDeadline(time.Time{})
+// 	if discarded > 0 {
+// 		const bytesPerSecond = 44100 * 2 * 2 // 44.1kHz, stereo, S16LE
+// 		dbg("[AUDIO] drained %d bytes (~%.0fms) of startup backlog before streaming",
+// 			discarded, float64(discarded)/bytesPerSecond*1000)
+// 	}
+// }
 
 func (ac *AudioCapture) Stop() {
 	if ac.stopped {
@@ -803,6 +947,7 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 		default:
 		}
 
+		// TODO: capture.DropAudioBacklog(2)
 		n, err := capture.ReadFrame(frameBuf)
 		if err != nil {
 			if ctx.Err() != nil {
