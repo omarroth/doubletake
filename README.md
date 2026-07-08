@@ -42,6 +42,18 @@ You can also install from the AUR:
 - [`doubletake-git`](https://aur.archlinux.org/packages/doubletake-git) (latest from git)
 - [`doubletake-bin`](https://aur.archlinux.org/packages/doubletake-bin) (prebuilt binary package)
 
+## Tested Devices
+
+These are devices that have been tested with doubletake. If there are devices not listed here that you have confirmed working or non-functional, please open an issue.
+
+- AppleTV14,1 (4K, 2022 3rd gen) + Homepod (1st gen)
+- Mac17,2 (MacBook Pro, M5 14")
+- Mac16,10 (Mac mini, M4)
+- Roku Streaming Stick 4K (3820R2)
+- Samsung TV TU8300 Series 4K UHD
+- Hisense 55A6QU
+- Xiaomi 4K HDR TV (AFTBR92D74) (currently non-functional #4)
+
 ## Build
 
 ```sh
