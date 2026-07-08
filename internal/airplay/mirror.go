@@ -478,13 +478,13 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		}
 	}
 
-	// Set volume to maximum (0 dB)
-	volumeBody := []byte("volume: 0.000000\r\n")
+	// Set default volume (0 dB is max; see SetAudioMuted)
+	volumeBody := []byte("volume: 20.000000\r\n")
 	_, _, err = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
 	if err != nil {
 		dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)
 	} else {
-		dbg("[SETUP] SET_PARAMETER volume=0 (max) sent")
+		dbg("[SETUP] SET_PARAMETER volume=20 sent")
 	}
 	// Send volume twice (pcap shows real senders do this)
 	_, _, _ = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
