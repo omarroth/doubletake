@@ -52,7 +52,7 @@ These are devices that have been tested with doubletake. If there are devices no
 - Roku Streaming Stick 4K (3820R2)
 - Samsung TV TU8300 Series 4K UHD
 - Hisense 55A6QU
-- Xiaomi 4K HDR TV (AFTBR92D74) (currently non-functional #4)
+- Xiaomi 4K HDR TV (AFTBR92D74) (currently non-functional, see [#4](https://github.com/omarroth/doubletake/issues/4))
 
 ## Build
 
