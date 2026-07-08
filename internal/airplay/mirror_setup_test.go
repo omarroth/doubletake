@@ -132,7 +132,7 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 					return
 				}
 			case "SET_PARAMETER":
-				if string(req.body) != "volume: 0.000000\r\n" {
+				if string(req.body) != "volume: 20.000000\r\n" {
 					serverErr <- fmt.Errorf("unexpected SET_PARAMETER body %q", string(req.body))
 					return
 				}
