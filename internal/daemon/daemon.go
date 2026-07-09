@@ -724,6 +724,7 @@ func (d *Daemon) getOrStartBroadcastLocked(restoreToken, deviceID string) (*airp
 		FPS:          d.cfg.FPS,
 		Bitrate:      d.cfg.Bitrate,
 		HWAccel:      d.cfg.HWAccel,
+		ShowCursor:   true,
 		RestoreToken: restoreToken,
 	}
 	if deviceID != "" {

@@ -24,6 +24,8 @@ type CaptureConfig struct {
 	X11WindowID   uint64
 	X11WindowName string
 
+	ShowCursor bool // show the mouse cursor in the captured video (Wayland and X11)
+
 	RestoreToken     string
 	SaveRestoreToken func(string) error
 }
@@ -73,7 +75,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
 	}
 
-	nodeID, pwFd, dbusConn, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken)
+	nodeID, pwFd, dbusConn, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -180,7 +182,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 		"ximagesrc",
 		fmt.Sprintf("display-name=%s", display),
 		"use-damage=false",
-		"show-pointer=false",
+		fmt.Sprintf("show-pointer=%t", cfg.ShowCursor),
 	}
 
 	if cfg.X11WindowID != 0 {
@@ -634,7 +636,7 @@ func vbvBufferKbit(bitrateKbps, fps int) int {
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
 // the D-Bus connection (which must stay open to keep the screencast session alive),
 // and a fresh restore token when the portal grants persistence.
-func requestScreencast(ctx context.Context, restoreToken string) (uint32, *os.File, *dbus.Conn, string, error) {
+func requestScreencast(ctx context.Context, restoreToken string, showCursor bool) (uint32, *os.File, *dbus.Conn, string, error) {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return 0, nil, nil, "", fmt.Errorf("connect session bus: %w", err)
@@ -674,12 +676,18 @@ func requestScreencast(ctx context.Context, restoreToken string) (uint32, *os.Fi
 		return 0, nil, nil, "", fmt.Errorf("session handle: %w", err)
 	}
 
+	// cursor_mode: HIDDEN=1, EMBEDDED=2 (cursor baked into the stream)
+	cursorMode := uint32(1)
+	if showCursor {
+		cursorMode = 2
+	}
+
 	// Select sources (screen)
 	selectOpts := map[string]dbus.Variant{
 		"handle_token": dbus.MakeVariant(baseToken + "_select"),
 		"types":        dbus.MakeVariant(uint32(1)), // MONITOR=1, WINDOW=2
 		"multiple":     dbus.MakeVariant(false),
-		"cursor_mode":  dbus.MakeVariant(uint32(2)), // EMBEDDED=2 (cursor in stream)
+		"cursor_mode":  dbus.MakeVariant(cursorMode),
 	}
 	if portalVersion >= 4 {
 		selectOpts["persist_mode"] = dbus.MakeVariant(uint32(2))

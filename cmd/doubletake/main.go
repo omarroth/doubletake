@@ -76,6 +76,7 @@ func main() {
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
 	x11WindowID := flag.String("x11-window-id", "", "X11 window id to capture, decimal or 0xhex")
 	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
+	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
 
 	airplay.SetTargetLatency(time.Duration(*targetLatencyMs) * time.Millisecond)
@@ -300,6 +301,7 @@ func main() {
 			HWAccel:       *hwaccel,
 			X11WindowID:   xid,
 			X11WindowName: *x11WindowName,
+			ShowCursor:    !*noCursor,
 		}
 		var err error
 		capture, err = airplay.StartCapture(ctx, captureCfg)
