@@ -19,6 +19,14 @@ import (
 	"doubletake/internal/daemon"
 )
 
+func parseXID(s string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	return strconv.ParseUint(s, 0, 64) // accepts decimal or 0xhex
+}
+
 // parsePortRange parses a "min-max" string into inclusive port bounds.
 // An empty string returns (0, 0, nil) meaning "let the OS pick".
 func parsePortRange(s string) (int, int, error) {
@@ -66,6 +74,9 @@ func main() {
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	daemonize := flag.Bool("daemonize", false, "Run as background daemon with Unix socket control interface")
 	socketPath := flag.String("socket", daemon.DefaultSocketPath(), "Unix socket path for daemon control interface")
+	x11WindowID := flag.String("x11-window-id", "", "X11 window id to capture, decimal or 0xhex")
+	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
+	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
 
 	airplay.SetTargetLatency(time.Duration(*targetLatencyMs) * time.Millisecond)
@@ -73,12 +84,17 @@ func main() {
 	airplay.DebugMode = *debug
 
 	if *daemonize {
-		runDaemon(*socketPath, *credFile, *credBackend, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio)
+		runDaemon(*socketPath, *credFile, *credBackend, *fps, *bitrate, *hwaccel, *debug, *testMode, *noEncrypt, *directKey, *noAudio, *noCursor)
 		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	xid, err := parseXID(*x11WindowID)
+	if err != nil {
+		log.Fatalf("invalid -x11-window-id: %v", err)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -280,9 +296,12 @@ func main() {
 		}
 	} else {
 		captureCfg := airplay.CaptureConfig{
-			FPS:     *fps,
-			Bitrate: *bitrate,
-			HWAccel: *hwaccel,
+			FPS:           *fps,
+			Bitrate:       *bitrate,
+			HWAccel:       *hwaccel,
+			X11WindowID:   xid,
+			X11WindowName: *x11WindowName,
+			ShowCursor:    !*noCursor,
 		}
 		var err error
 		capture, err = airplay.StartCapture(ctx, captureCfg)
@@ -395,7 +414,7 @@ func compareIPs(a, b string) int {
 	return 0
 }
 
-func runDaemon(socketPath, credFile, credBackend string, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio bool) {
+func runDaemon(socketPath, credFile, credBackend string, fps, bitrate int, hwaccel string, debug, testMode, noEncrypt, directKey, noAudio, noCursor bool) {
 	cfg := daemon.Config{
 		SocketPath:  socketPath,
 		CredFile:    credFile,
@@ -408,6 +427,7 @@ func runDaemon(socketPath, credFile, credBackend string, fps, bitrate int, hwacc
 		NoEncrypt:   noEncrypt,
 		DirectKey:   directKey,
 		NoAudio:     noAudio,
+		ShowCursor:  !noCursor,
 	}
 
 	d, err := daemon.New(cfg)

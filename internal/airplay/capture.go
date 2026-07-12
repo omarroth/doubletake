@@ -21,6 +21,11 @@ type CaptureConfig struct {
 	Bitrate int    // Video bitrate in kbps (0 = auto)
 	HWAccel string // "auto", "vaapi", "none"
 
+	X11WindowID   uint64
+	X11WindowName string
+
+	ShowCursor bool // show the mouse cursor in the captured video (Wayland and X11)
+
 	RestoreToken     string
 	SaveRestoreToken func(string) error
 }
@@ -52,6 +57,9 @@ type ScreenCapture struct {
 // capture accordingly. On Wayland it uses xdg-desktop-portal + PipeWire for
 // capture; on X11 it uses ximagesrc. Both use GStreamer for H.264 encoding.
 func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
+	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
+		return startX11Capture(ctx, cfg)
+	}
 	if os.Getenv("WAYLAND_DISPLAY") != "" {
 		return startWaylandCapture(ctx, cfg)
 	}
@@ -67,7 +75,7 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
 	}
 
-	nodeID, pwFd, dbusConn, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken)
+	nodeID, pwFd, dbusConn, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -177,23 +185,34 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 
 	encoder := detectGstEncoder(cfg)
 
-	// Detect primary monitor geometry — ximagesrc captures the full X screen
-	// (all monitors combined). On multi-monitor setups this wastes CPU on pixels
-	// we don't need, so crop to the primary monitor. The encoded resolution is
-	// then the primary monitor's native resolution (no rescaling).
-	startX, startY, endX, endY := detectPrimaryMonitor(display)
-
 	ximageSrcArgs := []string{
-		"ximagesrc", fmt.Sprintf("display-name=%s", display), "use-damage=false",
+		"ximagesrc",
+		fmt.Sprintf("display-name=%s", display),
+		"use-damage=false",
+		fmt.Sprintf("show-pointer=%t", cfg.ShowCursor),
 	}
-	if endX > startX && endY > startY {
-		ximageSrcArgs = append(ximageSrcArgs,
-			fmt.Sprintf("startx=%d", startX),
-			fmt.Sprintf("starty=%d", startY),
-			fmt.Sprintf("endx=%d", endX-1),
-			fmt.Sprintf("endy=%d", endY-1),
-		)
-		dbg("[CAPTURE] cropping ximagesrc to x=%d..%d y=%d..%d", startX, endX-1, startY, endY-1)
+
+	if cfg.X11WindowID != 0 {
+		ximageSrcArgs = append(ximageSrcArgs, fmt.Sprintf("xid=%d", cfg.X11WindowID))
+		dbg("[CAPTURE] capturing X11 window xid=0x%x", cfg.X11WindowID)
+	} else if cfg.X11WindowName != "" {
+		ximageSrcArgs = append(ximageSrcArgs, fmt.Sprintf("xname=%s", cfg.X11WindowName))
+		dbg("[CAPTURE] capturing X11 window name=%q", cfg.X11WindowName)
+	} else {
+		// Detect primary monitor geometry — ximagesrc captures the full X screen
+		// (all monitors combined). On multi-monitor setups this wastes CPU on pixels
+		// we don't need, so crop to the primary monitor. The encoded resolution is
+		// then the primary monitor's native resolution (no rescaling).
+		startX, startY, endX, endY := detectPrimaryMonitor(display)
+		if endX > startX && endY > startY {
+			ximageSrcArgs = append(ximageSrcArgs,
+				fmt.Sprintf("startx=%d", startX),
+				fmt.Sprintf("starty=%d", startY),
+				fmt.Sprintf("endx=%d", endX-1),
+				fmt.Sprintf("endy=%d", endY-1),
+			)
+			dbg("[CAPTURE] cropping ximagesrc to x=%d..%d y=%d..%d", startX, endX-1, startY, endY-1)
+		}
 	}
 
 	gstArgs := []string{"--quiet"}
@@ -625,7 +644,7 @@ func vbvBufferKbit(bitrateKbps, fps int) int {
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
 // the D-Bus connection (which must stay open to keep the screencast session alive),
 // and a fresh restore token when the portal grants persistence.
-func requestScreencast(ctx context.Context, restoreToken string) (uint32, *os.File, *dbus.Conn, string, error) {
+func requestScreencast(ctx context.Context, restoreToken string, showCursor bool) (uint32, *os.File, *dbus.Conn, string, error) {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return 0, nil, nil, "", fmt.Errorf("connect session bus: %w", err)
@@ -665,12 +684,18 @@ func requestScreencast(ctx context.Context, restoreToken string) (uint32, *os.Fi
 		return 0, nil, nil, "", fmt.Errorf("session handle: %w", err)
 	}
 
+	// cursor_mode: HIDDEN=1, EMBEDDED=2 (cursor baked into the stream)
+	cursorMode := uint32(1)
+	if showCursor {
+		cursorMode = 2
+	}
+
 	// Select sources (screen)
 	selectOpts := map[string]dbus.Variant{
 		"handle_token": dbus.MakeVariant(baseToken + "_select"),
 		"types":        dbus.MakeVariant(uint32(1)), // MONITOR=1, WINDOW=2
 		"multiple":     dbus.MakeVariant(false),
-		"cursor_mode":  dbus.MakeVariant(uint32(2)), // EMBEDDED=2 (cursor in stream)
+		"cursor_mode":  dbus.MakeVariant(cursorMode),
 	}
 	if portalVersion >= 4 {
 		selectOpts["persist_mode"] = dbus.MakeVariant(uint32(2))
