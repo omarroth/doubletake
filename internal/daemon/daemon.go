@@ -80,6 +80,7 @@ type Config struct {
 	NoEncrypt   bool
 	DirectKey   bool
 	NoAudio     bool
+	ShowCursor  bool
 }
 
 // DefaultSocketPath returns the default socket path using XDG_RUNTIME_DIR.
@@ -724,7 +725,7 @@ func (d *Daemon) getOrStartBroadcastLocked(restoreToken, deviceID string) (*airp
 		FPS:          d.cfg.FPS,
 		Bitrate:      d.cfg.Bitrate,
 		HWAccel:      d.cfg.HWAccel,
-		ShowCursor:   true,
+		ShowCursor:   d.cfg.ShowCursor,
 		RestoreToken: restoreToken,
 	}
 	if deviceID != "" {
