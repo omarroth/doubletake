@@ -3,7 +3,6 @@ package airplay
 import (
 	"encoding/binary"
 	"fmt"
-	"math/bits"
 )
 
 // fpsapM3Prefix is the invariant 144-byte portion of a version-3 FairPlay
@@ -38,107 +37,6 @@ var fpsapSecondPositionMap = [...]uint8{
 	0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3,
 }
 
-var fpsapMD5Shift = [64]int{
-	7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-	5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
-	4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-	6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-}
-
-var fpsapMD5Constant = [64]uint32{
-	0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
-	0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
-	0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
-	0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
-	0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
-	0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
-	0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-	0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
-	0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
-	0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
-	0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
-	0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
-	0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
-	0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-	0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
-	0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
-}
-
-type fpsapPermutation uint8
-
-const (
-	fpsapSwapPermutation fpsapPermutation = iota
-	fpsapCyclePermutation
-)
-
-// fpsapMD5Compress is MD5's compression function with the one FairPlay
-// modification: after round 31, eight message words are permuted using the
-// low two nibbles of A, B, C and D. Blocks are read in the byte order used by
-// the unobfuscated callers (big endian per word); state words remain native
-// MD5 little-endian words.
-func fpsapMD5Compress(state [4]uint32, block []byte, permutation fpsapPermutation) [4]uint32 {
-	var message [16]uint32
-	for i := range message {
-		message[i] = binary.BigEndian.Uint32(block[i*4:])
-	}
-
-	a, b, c, d := state[0], state[1], state[2], state[3]
-	for round := 0; round < 64; round++ {
-		var f uint32
-		var word int
-		switch {
-		case round < 16:
-			f, word = (b&c)|(^b&d), round
-		case round < 32:
-			f, word = (d&b)|(^d&c), (5*round+1)&15
-		case round < 48:
-			f, word = b^c^d, (3*round+5)&15
-		default:
-			f, word = c^(b|^d), (7*round)&15
-		}
-
-		a, b, c, d = d,
-			b+bits.RotateLeft32(a+f+fpsapMD5Constant[round]+message[word], fpsapMD5Shift[round]),
-			b, c
-
-		if round == 31 {
-			indices := [8]int{
-				int(a & 15), int(b & 15), int(c & 15), int(d & 15),
-				int((a >> 4) & 15), int((b >> 4) & 15),
-				int((c >> 4) & 15), int((d >> 4) & 15),
-			}
-			switch permutation {
-			case fpsapSwapPermutation:
-				for i, j := range indices {
-					message[i], message[j] = message[j], message[i]
-				}
-			case fpsapCyclePermutation:
-				first := message[indices[0]]
-				for i := 0; i < len(indices)-1; i++ {
-					message[indices[i]] = message[indices[i+1]]
-				}
-				message[indices[len(indices)-1]] = first
-			}
-		}
-	}
-
-	return [4]uint32{state[0] + a, state[1] + b, state[2] + c, state[3] + d}
-}
-
-func fpsapWordsFromLittleEndian(in [16]byte) (out [4]uint32) {
-	for i := range out {
-		out[i] = binary.LittleEndian.Uint32(in[i*4:])
-	}
-	return out
-}
-
-func fpsapWordsBigEndian(words [4]uint32) (out [16]byte) {
-	for i, word := range words {
-		binary.BigEndian.PutUint32(out[i*4:], word)
-	}
-	return out
-}
-
 func fpsapDynamicSAP(payload [128]byte) (out [128]byte) {
 	message := make([]byte, 144)
 	message[12] = 3
@@ -166,24 +64,23 @@ func fpsapDescriptor(dynamicSAP [128]byte) (out [20]byte) {
 	padded[len(message)] = 0x80
 	binary.LittleEndian.PutUint64(padded[len(padded)-8:], uint64(len(message))*8)
 
-	state := fpsapWordsFromLittleEndian(initialSessionKey)
+	state := fairplayWordsFromLittleEndian(fairplayInitialSessionKey)
 	var firstFinal [4]uint32
 	for offset := 0; offset < len(padded); offset += 64 {
 		block := padded[offset : offset+64]
-		var add [16]byte
-		sapHash(block, add[:])
+		add := sapHash(block)
 		for i := range state {
 			state[i] += binary.LittleEndian.Uint32(add[i*4:])
 		}
-		state = fpsapMD5Compress(state, block, fpsapCyclePermutation)
+		state = fairplayMD5Compress(state, block, fpsapCycleMutation)
 		if offset == len(padded)-64 {
 			firstFinal = state
-			state = fpsapMD5Compress(state, block, fpsapCyclePermutation)
+			state = fairplayMD5Compress(state, block, fpsapCycleMutation)
 		}
 	}
 
 	binary.BigEndian.PutUint32(out[:4], firstFinal[0])
-	tail := fpsapWordsBigEndian(state)
+	tail := fairplayWordsBigEndian(state)
 	copy(out[4:], tail[:])
 	return out
 }
@@ -201,7 +98,7 @@ func fpsapMasks(seed [20]byte) (masks [9][16]byte) {
 		copy(block[21:36], suffix[:])
 		block[36] = 0x80
 		binary.LittleEndian.PutUint32(block[56:60], 0x320)
-		digest := fpsapWordsBigEndian(fpsapMD5Compress(state, block[:], fpsapSwapPermutation))
+		digest := fairplayWordsBigEndian(fairplayMD5Compress(state, block[:], fpsapSwapMutation))
 		masks[i] = digest
 	}
 	return masks
@@ -214,7 +111,7 @@ func fpsapDigest32(left, right [16]byte) [16]byte {
 	block[32] = 0x80
 	binary.LittleEndian.PutUint32(block[56:60], 0x100)
 	state := [4]uint32{0xb9f3dcdc, 0xfbdc740b, 0x60f77f86, 0x51907216}
-	return fpsapWordsBigEndian(fpsapMD5Compress(state, block[:], fpsapSwapPermutation))
+	return fairplayWordsBigEndian(fairplayMD5Compress(state, block[:], fpsapSwapMutation))
 }
 
 func fpsapFirstNetwork(masks [9][16]byte) [16]byte {
