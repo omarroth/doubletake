@@ -7,11 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-
-	"doubletake/internal/fpemu"
 )
 
-// fairPlayM1 is the fixed m1 blob that matches the snapshot state.
+// fairPlayM1 is the fixed first message in the FairPlay SAP exchange.
 var fairPlayM1 = mustDecodeHexFP("46504c590301010000000004020003bb")
 
 var ErrFairPlayUnsupported = errors.New("receiver does not support FairPlay SAP")
@@ -24,8 +22,7 @@ func mustDecodeHexFP(s string) []byte {
 	return b
 }
 
-// FairPlaySetup performs the complete FairPlay SAP handshake using the
-// standalone ARM64 interpreter.
+// FairPlaySetup performs the complete FairPlay SAP handshake.
 func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	if c.info != nil && !c.info.SupportsFairPlaySAP() {
 		return fmt.Errorf("%w: FPSAP feature bit is not advertised (features=0x%x)", ErrFairPlayUnsupported, c.info.Features)
@@ -54,8 +51,8 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] received m2 (%d bytes)", len(m2))
 	dbg("[FP] m2 first 32: %02x", m2[:min(32, len(m2))])
 
-	// Phase 2: Compute m3 via standalone interpreter, send to server
-	m3raw, err := fpemu.FPSAPExchangeM3(m2)
+	// Phase 2: Compute m3 and send it to the receiver.
+	m3raw, err := fpsapExchangeM3(m2)
 	if err != nil {
 		return fmt.Errorf("FPSAPExchange: %w", err)
 	}
