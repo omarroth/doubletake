@@ -1,19 +1,20 @@
 package airplay
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"testing"
 )
 
-func requirePlayfairHex(t *testing.T, name string, got []byte, want string) {
+func requireFairPlayHex(t *testing.T, name string, got []byte, want string) {
 	t.Helper()
 	if gotHex := hex.EncodeToString(got); gotHex != want {
 		t.Fatalf("%s = %s, want %s", name, gotHex, want)
 	}
 }
 
-func TestPlayfairPrimitiveVectors(t *testing.T) {
+func TestFairPlayPrimitiveVectors(t *testing.T) {
 	var block [64]byte
 	for i := range block {
 		block[i] = byte(i*3 + 1)
@@ -21,18 +22,37 @@ func TestPlayfairPrimitiveVectors(t *testing.T) {
 	key := [16]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 
 	var modified [16]byte
-	words := fairplayMD5Compress(fairplayWordsFromLittleEndian(key), block[:], playfairSwapMutation)
+	words := fairplayMD5Compress(fairplayWordsFromLittleEndian(key), block[:], fairplayKDFMutation)
 	for i, word := range words {
 		binary.LittleEndian.PutUint32(modified[i*4:], word)
 	}
-	requirePlayfairHex(t, "modified MD5", modified[:], "f6f728cb5a4397b675664f9291b859aa")
+	requireFairPlayHex(t, "modified MD5", modified[:], "f6f728cb5a4397b675664f9291b859aa")
 
-	hashed := sapHash(block[:])
-	requirePlayfairHex(t, "SAP hash", hashed[:], "75498a4e218773030e9cdf04f0c49367")
+	hashed := fairplaySAPHash(block[:])
+	requireFairPlayHex(t, "SAP hash", hashed[:], "75498a4e218773030e9cdf04f0c49367")
 
 }
 
-func TestPlayfairMessageVectors(t *testing.T) {
+func TestFairPlaySAPHashCorpus(t *testing.T) {
+	// This aggregate is generated independently by the upstream C reference
+	// implementation and exercises inputs the original single vector missed.
+	corpusHash := sha256.New()
+	var state uint64 = 0x6a09e667f3bcc909
+	for range 64 {
+		var block [64]byte
+		for i := range block {
+			state ^= state << 13
+			state ^= state >> 7
+			state ^= state << 17
+			block[i] = byte(state)
+		}
+		digest := fairplaySAPHash(block[:])
+		_, _ = corpusHash.Write(digest[:])
+	}
+	requireFairPlayHex(t, "SAP hash corpus", corpusHash.Sum(nil), "36ad2a7920076af59452d9f0c91e3b7d1aebc53f9143bd6819e39119d4535c92")
+}
+
+func TestFairPlayMessageVectors(t *testing.T) {
 	tests := []struct {
 		mode      byte
 		decrypted string
@@ -51,20 +71,20 @@ func TestPlayfairMessageVectors(t *testing.T) {
 			message[i] = byte(i*5 + 7)
 		}
 		var decrypted [128]byte
-		decryptMessage(message, decrypted[:])
-		requirePlayfairHex(t, "decrypted message", decrypted[:], tc.decrypted)
+		decryptFairPlayMessage(message, decrypted[:])
+		requireFairPlayHex(t, "decrypted message", decrypted[:], tc.decrypted)
 		if tc.mode == 3 {
 			inPlace := append([]byte(nil), message...)
-			decryptMessage(inPlace, inPlace[16:144])
-			requirePlayfairHex(t, "in-place decrypted message", inPlace[16:144], tc.decrypted)
+			decryptFairPlayMessage(inPlace, inPlace[16:144])
+			requireFairPlayHex(t, "in-place decrypted message", inPlace[16:144], tc.decrypted)
 		}
 
-		aesKey := derivePlayfairAESKey(defaultSAPTail[:], message)
-		requirePlayfairHex(t, "AES key", aesKey[:], tc.aesKey)
+		aesKey := deriveFairPlayWrappingKey(fairplayDefaultSAPTail[:], message)
+		requireFairPlayHex(t, "AES key", aesKey[:], tc.aesKey)
 	}
 }
 
-func TestPlayfairDecryptVector(t *testing.T) {
+func TestFairPlayKeyUnwrapVector(t *testing.T) {
 	m3 := make([]byte, 164)
 	m3[12] = 3
 	for i := 16; i < 144; i++ {
@@ -74,6 +94,6 @@ func TestPlayfairDecryptVector(t *testing.T) {
 	for i := range ekey {
 		ekey[i] = byte(i*7 + 3)
 	}
-	got := playfairDecrypt(m3, ekey[:])
-	requirePlayfairHex(t, "PlayFair key", got[:], "903e5be94732428e9965afb262b193a4")
+	got := unwrapFairPlayKey(m3, ekey[:])
+	requireFairPlayHex(t, "FairPlay key", got[:], "903e5be94732428e9965afb262b193a4")
 }

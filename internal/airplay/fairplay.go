@@ -96,16 +96,16 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	copy(c.fpM3, m3)
 
 	// Build ekey and derive audio encryption key.
-	// Both sender and receiver call playfairDecrypt(m3, ekey) with the same
+	// Both sender and receiver call unwrapFairPlayKey(m3, ekey) with the same
 	// inputs (m3 sent during FP handshake, ekey sent in SETUP body).
 	ekey := buildEkey()
 	c.FpEkey = ekey[:]
 	dbg("[FP] ekey chunk1 [16:32]: %02x", ekey[16:32])
 	dbg("[FP] ekey chunk2 [56:72]: %02x", ekey[56:72])
 
-	fpAesKey := playfairDecrypt(c.fpM3, ekey[:])
+	fpAesKey := unwrapFairPlayKey(c.fpM3, ekey[:])
 	c.fpAesKey = fpAesKey[:]
-	dbg("[FP] playfairDecrypt fpAesKey: %02x", fpAesKey[:])
+	dbg("[FP] unwrapFairPlayKey fpAesKey: %02x", fpAesKey[:])
 	dbg("[FP] m3 first 32 bytes: %02x", c.fpM3[:min(32, len(c.fpM3))])
 
 	// Hash with pair-verify shared secret (ECDH X25519) if available.
@@ -132,7 +132,7 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 }
 
 // buildEkey constructs a 72-byte ekey with the FPLY header format.
-// The chunk data is randomized per session so that playfairDecrypt produces
+// The chunk data is randomized per session so that unwrapFairPlayKey produces
 // a unique AES key for each session. Both sender and receiver compute the
 // same key from the same (m3, ekey) inputs.
 //

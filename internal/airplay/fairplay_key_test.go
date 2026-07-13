@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// TestPlayfairDecryptDeterministic verifies that playfairDecrypt produces a
+// TestFairPlayKeyUnwrapDeterministic verifies that unwrapFairPlayKey produces a
 // consistent, non-zero key from a known m3 and ekey.
-func TestPlayfairDecryptDeterministic(t *testing.T) {
+func TestFairPlayKeyUnwrapDeterministic(t *testing.T) {
 	// Build a fixed m3 with mode=3 and deterministic payload.
 	m3 := make([]byte, 164)
 	copy(m3[0:4], []byte("FPLY"))
@@ -22,11 +22,11 @@ func TestPlayfairDecryptDeterministic(t *testing.T) {
 
 	ekey := buildEkey()
 
-	key1 := playfairDecrypt(m3, ekey[:])
-	key2 := playfairDecrypt(m3, ekey[:])
+	key1 := unwrapFairPlayKey(m3, ekey[:])
+	key2 := unwrapFairPlayKey(m3, ekey[:])
 
 	if key1 != key2 {
-		t.Fatalf("playfairDecrypt is not deterministic:\n  key1=%s\n  key2=%s",
+		t.Fatalf("unwrapFairPlayKey is not deterministic:\n  key1=%s\n  key2=%s",
 			hex.EncodeToString(key1[:]), hex.EncodeToString(key2[:]))
 	}
 
@@ -39,14 +39,14 @@ func TestPlayfairDecryptDeterministic(t *testing.T) {
 		}
 	}
 	if allZero {
-		t.Fatal("playfairDecrypt produced all-zero key")
+		t.Fatal("unwrapFairPlayKey produced all-zero key")
 	}
 
-	t.Logf("playfairDecrypt key: %s", hex.EncodeToString(key1[:]))
+	t.Logf("unwrapFairPlayKey key: %s", hex.EncodeToString(key1[:]))
 }
 
-// TestPlayfairDecryptModes verifies all 4 valid mode bytes produce distinct keys.
-func TestPlayfairDecryptModes(t *testing.T) {
+// TestFairPlayKeyUnwrapModes verifies all 4 valid mode bytes produce distinct keys.
+func TestFairPlayKeyUnwrapModes(t *testing.T) {
 	ekey := buildEkey()
 	keys := make(map[string]byte)
 
@@ -63,7 +63,7 @@ func TestPlayfairDecryptModes(t *testing.T) {
 			m3[i] = byte(i)
 		}
 
-		key := playfairDecrypt(m3, ekey[:])
+		key := unwrapFairPlayKey(m3, ekey[:])
 		hexKey := hex.EncodeToString(key[:])
 		t.Logf("mode=%d key=%s", mode, hexKey)
 
@@ -73,4 +73,3 @@ func TestPlayfairDecryptModes(t *testing.T) {
 		keys[hexKey] = mode
 	}
 }
-

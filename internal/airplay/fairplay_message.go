@@ -3,7 +3,7 @@ package airplay
 // FairPlay message encryption uses the standard inverse AES round operations,
 // but its four modes have custom middle round keys rather than AES key
 // schedules. crypto/aes therefore cannot represent this block transform.
-func decryptMessage(message, plaintext []byte) {
+func decryptFairPlayMessage(message, plaintext []byte) {
 	mode := message[12]
 	for step := 0; step < 8; step++ {
 		block := step
@@ -15,9 +15,9 @@ func decryptMessage(message, plaintext []byte) {
 		start := 16 + block*16
 		var state [16]byte
 		copy(state[:], message[start:start+16])
-		decryptPlayfairMessageBlock(&state, mode)
+		decryptFairPlayMessageBlock(&state, mode)
 
-		chain := playfairMessageIV[mode][:]
+		chain := fairplayMessageIV[mode][:]
 		if block > 0 {
 			chain = message[start-16 : start]
 		}
@@ -27,24 +27,24 @@ func decryptMessage(message, plaintext []byte) {
 	}
 }
 
-func decryptPlayfairMessageBlock(state *[16]byte, mode byte) {
-	xorPlayfairRoundKey(state, &playfairMessageRoundKey10)
+func decryptFairPlayMessageBlock(state *[16]byte, mode byte) {
+	xorAESRoundKey(state, &fairplayMessageRoundKey10)
 	for round := 9; round > 0; round-- {
 		inverseAESShiftRows(state)
 		for i := range state {
 			state[i] = inverseAESSBox[state[i]]
 		}
-		xorPlayfairRoundKey(state, &playfairMessageMiddleKeys[mode][round-1])
+		xorAESRoundKey(state, &fairplayMessageMiddleKeys[mode][round-1])
 		inverseAESMixColumns(state)
 	}
 	inverseAESShiftRows(state)
 	for i := range state {
 		state[i] = inverseAESSBox[state[i]]
 	}
-	xorPlayfairRoundKey(state, &playfairMessageRoundKey0)
+	xorAESRoundKey(state, &fairplayMessageRoundKey0)
 }
 
-func xorPlayfairRoundKey(state, key *[16]byte) {
+func xorAESRoundKey(state, key *[16]byte) {
 	for i := range state {
 		state[i] ^= key[i]
 	}
@@ -86,22 +86,22 @@ func aesGFMultiply(a, b byte) byte {
 	return product
 }
 
-var playfairMessageIV = [4][16]byte{
+var fairplayMessageIV = [4][16]byte{
 	{0x57, 0x52, 0xf1, 0xb7, 0x54, 0x9d, 0x8f, 0x87, 0x0c, 0x10, 0x48, 0x5a, 0x60, 0x88, 0xca, 0xdb},
 	{0xdf, 0x7b, 0x15, 0x63, 0xf0, 0x05, 0x58, 0x77, 0x52, 0xa9, 0x04, 0x02, 0xb9, 0xa3, 0x92, 0x95},
 	{0x68, 0xb5, 0x46, 0x11, 0xfb, 0x04, 0xde, 0x67, 0x6c, 0x96, 0x8e, 0xfb, 0x8c, 0x9d, 0xb0, 0xc9},
 	{0x27, 0x07, 0x8b, 0x21, 0x23, 0x36, 0x1e, 0x7a, 0xdc, 0x9d, 0x0b, 0x11, 0x53, 0x54, 0x69, 0x0d},
 }
 
-var playfairMessageRoundKey0 = [16]byte{
+var fairplayMessageRoundKey0 = [16]byte{
 	0xd3, 0x0d, 0xfd, 0xb5, 0x63, 0xde, 0xf7, 0x2b, 0x01, 0x2e, 0xad, 0x72, 0x88, 0x4d, 0xca, 0x25,
 }
 
-var playfairMessageRoundKey10 = [16]byte{
+var fairplayMessageRoundKey10 = [16]byte{
 	0xcd, 0x5e, 0xcf, 0x47, 0xe9, 0xaf, 0x28, 0x9b, 0x51, 0x18, 0x8f, 0x68, 0xd0, 0x85, 0xeb, 0x69,
 }
 
-var playfairMessageMiddleKeys = [4][9][16]byte{
+var fairplayMessageMiddleKeys = [4][9][16]byte{
 	{ // Mode 0.
 		{0x6a, 0xf0, 0x08, 0xa6, 0xae, 0x51, 0x18, 0x26, 0x8a, 0xcc, 0xcb, 0x43, 0x57, 0xd1, 0xe7, 0x11},
 		{0xc6, 0xb5, 0x79, 0xe0, 0xdf, 0xce, 0x81, 0x14, 0xd4, 0x1d, 0x91, 0xc8, 0x68, 0x51, 0x3b, 0xe3},

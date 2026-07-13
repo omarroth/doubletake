@@ -41,17 +41,17 @@ func fpsapDynamicSAP(payload [128]byte) (out [128]byte) {
 	message := make([]byte, 144)
 	message[12] = 3
 	copy(message[16:], payload[:])
-	decryptMessage(message, out[:])
+	decryptFairPlayMessage(message, out[:])
 	return out
 }
 
 // fpsapDescriptor derives the 20 bytes used to key the two table networks.
 // It is a five-block streaming hash over the two decrypted SAP values. Each
-// block first contributes the existing sapHash, then uses the cycle variant
+// block first contributes the FairPlay SAP hash, then uses the cycle variant
 // of the MD5-shaped compressor. The final padded block is compressed twice.
 func fpsapDescriptor(dynamicSAP [128]byte) (out [20]byte) {
 	var decryptedPrefix [128]byte
-	decryptMessage(fpsapM3Prefix, decryptedPrefix[:])
+	decryptFairPlayMessage(fpsapM3Prefix, decryptedPrefix[:])
 
 	message := make([]byte, 290)
 	offset := copy(message, fpsapDescriptorPrefix[:])
@@ -68,7 +68,7 @@ func fpsapDescriptor(dynamicSAP [128]byte) (out [20]byte) {
 	var firstFinal [4]uint32
 	for offset := 0; offset < len(padded); offset += 64 {
 		block := padded[offset : offset+64]
-		add := sapHash(block)
+		add := fairplaySAPHash(block)
 		for i := range state {
 			state[i] += binary.LittleEndian.Uint32(add[i*4:])
 		}

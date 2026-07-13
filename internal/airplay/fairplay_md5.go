@@ -13,7 +13,7 @@ type fairplayMD5Mutation uint8
 const (
 	fpsapSwapMutation fairplayMD5Mutation = iota
 	fpsapCycleMutation
-	playfairSwapMutation
+	fairplayKDFMutation
 )
 
 var fairplayMD5Shift = [64]int{
@@ -96,7 +96,7 @@ func mutateFairplayMD5Message(message *[16]uint32, a, b, c, d uint32, mutation f
 			message[indices[i]] = message[indices[i+1]]
 		}
 		message[indices[len(indices)-1]] = first
-	case playfairSwapMutation:
+	case fairplayKDFMutation:
 		swap(int(a&15), int(b&15))
 		swap(int(c&15), int(d&15))
 		for shift := 4; shift <= 12; shift += 4 {
