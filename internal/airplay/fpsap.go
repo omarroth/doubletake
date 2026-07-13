@@ -30,6 +30,14 @@ var fpsapFixedBlock = [16]byte{
 	0xfe, 0x67, 0xac, 0x5e, 0xbe, 0xf6, 0xfb, 0xcb,
 }
 
+var fpsapFirstPositionMap = [...]uint8{
+	0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11,
+}
+
+var fpsapSecondPositionMap = [...]uint8{
+	0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3,
+}
+
 var fpsapMD5Shift = [64]int{
 	7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
 	5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
@@ -210,56 +218,53 @@ func fpsapDigest32(left, right [16]byte) [16]byte {
 }
 
 func fpsapFirstNetwork(masks [9][16]byte) [16]byte {
-	state := [16]byte{
-		0x0f, 0x54, 0x5e, 0x5a, 0xb7, 0x7e, 0x16, 0x80,
-		0x1a, 0xed, 0xd5, 0x81, 0xd0, 0x87, 0x26, 0xdc,
+	state := fpsapFixedBlock
+	for i := range state {
+		state[i] ^= fpsapFirstInputMask[i]
 	}
-	forward := [...]int{0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11}
 	for bank := 0; bank < 9; bank++ {
 		var substituted [16]byte
-		for output, input := range forward {
-			substituted[output] = fpsapRoundS(0, bank, input, state[input])
+		for output, input := range fpsapFirstPositionMap {
+			substituted[output] = fpsapFirstTables.roundSubstitution[bank][input].substitute(state[input])
 		}
-		fpsapMix(0, &state, substituted)
+		fpsapMix(&fpsapFirstTables, &state, substituted)
 		for i := range state {
 			state[i] ^= masks[bank][i]
 		}
 	}
 	var out [16]byte
-	for output, input := range forward {
-		out[output] = fpsapFinalS(0, input, state[input])
+	for output, input := range fpsapFirstPositionMap {
+		out[output] = fpsapFirstTables.finalSubstitution[input].substitute(state[input])
 	}
 	return out
 }
 
 func fpsapSecondNetwork(state [16]byte, masks [9][16]byte) [16]byte {
-	inverse := [...]int{0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3}
 	for bank := 8; bank >= 0; bank-- {
 		var substituted [16]byte
-		for output, input := range inverse {
-			substituted[output] = fpsapRoundS(1, bank, output, state[input]) ^ masks[bank][output]
+		for output, input := range fpsapSecondPositionMap {
+			substituted[output] = fpsapSecondTables.roundSubstitution[bank][output].substitute(state[input]) ^ masks[bank][output]
 		}
-		fpsapMix(1, &state, substituted)
-	}
-	finalMask := [...]byte{
-		0x67, 0xbc, 0x54, 0xc0, 0x8e, 0x32, 0x85, 0x1b,
-		0x50, 0xd2, 0x12, 0x5f, 0x68, 0xb7, 0x40, 0xa5,
+		fpsapMix(&fpsapSecondTables, &state, substituted)
 	}
 	var out [16]byte
-	for output, input := range inverse {
-		out[output] = fpsapFinalS(1, output, state[input]) ^ finalMask[output]
+	for output, input := range fpsapSecondPositionMap {
+		out[output] = fpsapSecondTables.finalSubstitution[output].substitute(state[input]) ^ fpsapSecondOutputMask[output]
 	}
 	return out
 }
 
-func fpsapMix(network int, state *[16]byte, substituted [16]byte) {
+func fpsapMix(tables *fpsapNetworkTables, state *[16]byte, substituted [16]byte) {
 	for word := 0; word < 4; word++ {
 		offset := word * 4
-		mixed := fpsapMixT(network, 0, substituted[offset]) ^
-			fpsapMixT(network, 1, substituted[offset+1]) ^
-			fpsapMixT(network, 2, substituted[offset+2]) ^
-			fpsapMixT(network, 3, substituted[offset+3])
-		binary.LittleEndian.PutUint32(state[offset:], mixed)
+		for outputByte := 0; outputByte < 4; outputByte++ {
+			var mixed byte
+			for inputByte := 0; inputByte < 4; inputByte++ {
+				mixed ^=
+					tables.mixColumns[inputByte][outputByte].mix(substituted[offset+inputByte])
+			}
+			state[offset+outputByte] = mixed
+		}
 	}
 }
 

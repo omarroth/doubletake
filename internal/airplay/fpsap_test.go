@@ -8,11 +8,44 @@ import (
 
 func TestFPSAPTableData(t *testing.T) {
 	const want = "28d0986abebe30458348dfa2957aa1d52d6f3ad5a9468c5d8a9c4139b7ca2b43"
-	if len(fpsapTableData) != 90128 {
-		t.Fatalf("table length = %d, want 90128", len(fpsapTableData))
+	hash := sha256.New()
+	written := 0
+	write := func(data []byte) {
+		_, _ = hash.Write(data)
+		written += len(data)
 	}
-	got := sha256.Sum256(fpsapTableData[:])
-	if gotHex := hex.EncodeToString(got[:]); gotHex != want {
+	write(fpsapFirstInputMask[:])
+	for _, tables := range []*fpsapNetworkTables{&fpsapFirstTables, &fpsapSecondTables} {
+		for _, round := range tables.roundSubstitution {
+			for _, ref := range round {
+				var expanded [256]byte
+				for value := range expanded {
+					expanded[value] = ref.substitute(byte(value))
+				}
+				write(expanded[:])
+			}
+		}
+		for _, inputTable := range tables.mixColumns {
+			var expanded [256 * 4]byte
+			for value := 0; value < 256; value++ {
+				for outputByte, ref := range inputTable {
+					expanded[value*4+outputByte] = ref.mix(byte(value))
+				}
+			}
+			write(expanded[:])
+		}
+		for _, ref := range tables.finalSubstitution {
+			var expanded [256]byte
+			for value := range expanded {
+				expanded[value] = ref.substitute(byte(value))
+			}
+			write(expanded[:])
+		}
+	}
+	if written != 90128 {
+		t.Fatalf("expanded table length = %d, want 90128", written)
+	}
+	if gotHex := hex.EncodeToString(hash.Sum(nil)); gotHex != want {
 		t.Fatalf("table checksum = %s, want %s", gotHex, want)
 	}
 }
