@@ -4,35 +4,18 @@ package airplay
 
 import "math/bits"
 
-func rotateLeft8(input byte, count int) byte {
-	return bits.RotateLeft8(input, count)
-}
-
-// rotateLeft8Wide deliberately preserves bits shifted above bit 7. The
-// original C promotes the byte before shifting, so this is not an 8-bit rotate.
-func rotateLeft8Wide(input byte, count int) uint32 {
-	return uint32(input)<<count | uint32(input)>>(8-count)
-}
-
-func garbleRotateRight8(input byte, count int) uint32 {
-	if count == 0 {
-		return 0
-	}
-	return uint32(bits.RotateLeft8(input, -count))
-}
-
-func garbleRotateLeft8(input byte, count int) uint32 {
+func rotate8OrZero(input byte, count int) uint32 {
 	if count == 0 {
 		return 0
 	}
 	return uint32(bits.RotateLeft8(input, count))
 }
 
-func garbleRotateLeftWide(input byte, count uint32) uint32 {
+func rotateWideOrZero(input byte, count uint32) uint32 {
 	if count == 0 {
 		return 0
 	}
-	return uint32(input)<<count ^ uint32(input)>>(8-count)
+	return uint32(input)<<count | uint32(input)>>(8-count)
 }
 
 func xorFold16(out *[16]byte, in []byte) {
@@ -41,411 +24,203 @@ func xorFold16(out *[16]byte, in []byte) {
 	}
 }
 
-// wrappedUint32Index preserves the original circuit's unsigned 32-bit
-// underflow before reduction; ordinary negative modulo is not equivalent.
-func wrappedUint32Index(value, lag, size int) int {
-	return int(uint32(value-lag) % uint32(size))
-}
+func majority(a, b, c uint32) uint32                { return (a & b) | ((a | b) & c) }
+func selectBits(mask, ifSet, ifClear uint32) uint32 { return ifClear ^ ((ifSet ^ ifClear) & mask) }
+func square(value uint32) uint32                    { return value * value }
+func cube(value uint32) uint32                      { return value * value * value }
 
-func bitMajority(a, b, c uint32) uint32 {
-	return (a & b) | ((a | b) & c)
-}
-
-func selectBits(mask, ifSet, ifClear uint32) uint32 {
-	return (ifSet & mask) | (ifClear & ^mask)
-}
-
-var fairplaySAPInitialState = [20]byte{
+var sapInitialHash = [20]byte{
 	0x96, 0x5f, 0xc6, 0x53, 0xf8, 0x46, 0xcc, 0x18, 0xdf, 0xbe,
-	0xb2, 0xf8, 0x38, 0xd7, 0xec, 0x22, 0x03, 0xd1, 0x20, 0x8f,
+	0xb2, 0xf8, 0x38, 0x62, 0xec, 0x22, 0x93, 0xd1, 0x20, 0x8f,
 }
 
-var fairplaySAPInitialMatrix = [35]byte{
+var sapInitialMatrix = [35]byte{
 	0x43, 0x54, 0x62, 0x7a, 0x18, 0xc3, 0xd6, 0xb3, 0x9a, 0x56,
 	0xf6, 0x1c, 0x14, 0x3f, 0x0c, 0x1d, 0x3b, 0x36, 0x83, 0xb1,
 	0x39, 0x51, 0x4a, 0xaa, 0x09, 0x3e, 0xfe, 0x44, 0xaf, 0xde,
-	0xc3, 0x20, 0x9d, 0x42, 0x3a,
+	0xc3, 0x20, 0x9d, 0x42, 0xb8,
 }
 
-var fairplaySAPSeed = [21]byte{
+var sapSeed = [21]byte{
 	0xed, 0x25, 0xd1, 0xbb, 0xbc, 0x27, 0x9f, 0x02, 0xa2, 0xa9, 0x11,
 	0x00, 0x0c, 0xb3, 0x52, 0xc0, 0xbd, 0xe3, 0x1b, 0x49, 0xc7,
 }
 
-type fairplaySAPState struct {
-	state   [20]byte
-	work    [210]byte
-	matrix  [35]byte
-	scratch [23]byte
+type sapState struct {
+	hash   [20]byte
+	matrix [35]byte
+	aux    [10]byte
+	work   [210]byte
 }
 
-func fairplaySAPHash(blockIn []byte) (keyOut [16]byte) {
-	state := fairplaySAPState{
-		state:  fairplaySAPInitialState,
-		matrix: fairplaySAPInitialMatrix,
-	}
-	scratchOutput := [11]int{14, 18, 19, 0, 5, 15, 22, 21, 10, 17, 20}
+type sapBytes []byte
 
+func (values sapBytes) at(index byte) uint32     { return uint32(values[index%byte(len(values))]) }
+func (values sapBytes) at32(index uint32) uint32 { return uint32(values[index%uint32(len(values))]) }
+
+func (state *sapState) buffers() (sapBytes, sapBytes, sapBytes, sapBytes, *[10]byte) {
+	return state.hash[:], state.work[:], state.matrix[:], sapSeed[:], &state.aux
+}
+
+func fairplaySAPHash(input []byte) (out [16]byte) {
+	var state sapState
+	state.hash = sapInitialHash
+	state.matrix = sapInitialMatrix
+	work := &state.work
 	// Load input into the working state in reversed four-byte groups.
-	for i := 0; i < 210; i++ {
-		state.work[i] = blockIn[(i&63)^3]
+	for i := range work {
+		work[i] = (*[64]byte)(input)[(i&63)^3]
 	}
 
-	// Scramble four complete passes over the 210-byte working state.
-	for i := 0; i < 840; i++ {
-		x := state.work[wrappedUint32Index(i, 155, len(state.work))]
-		y := state.work[wrappedUint32Index(i, 57, len(state.work))]
-		z := state.work[wrappedUint32Index(i, 13, len(state.work))]
-		w := state.work[i%len(state.work)]
-		state.work[i%len(state.work)] = byte(uint32(rotateLeft8(y, 5)) + (uint32(rotateLeft8(z, 3)) ^ uint32(w)) - uint32(rotateLeft8(x, 7)))
+	// Scramble four complete passes. Converting before modulo preserves the
+	// circuit's unsigned underflow during the first pass.
+	for i := uint32(0); i < 840; i++ {
+		x, y, z, w := work[(i-155)%210], work[(i-57)%210], work[(i-13)%210], work[i%210]
+		work[i%210] = bits.RotateLeft8(y, 5) + (bits.RotateLeft8(z, 3) ^ w) - bits.RotateLeft8(x, 7)
 	}
 
-	state.garble()
-
-	// Fill output with 0xE1
-	for i := 0; i < 16; i++ {
-		keyOut[i] = 0xE1
+	state.nonlinearPrepare()
+	state.nonlinearFinish()
+	// Include terminal work XORs directly in their folded output lanes.
+	copy(out[:3], state.aux[:3])
+	copy(out[4:11], state.aux[3:])
+	for i := range out {
+		out[i] += 0xe1
 	}
+	out[3], out[11] = 0x3d, 0x3c
+	out[10] ^= state.aux[3] ^ 133
 
-	// Apply scratch
-	for i := 0; i < 11; i++ {
-		if i == 3 {
-			keyOut[i] = 0x3d
-		} else {
-			keyOut[i] += state.scratch[scratchOutput[i]]
-		}
-	}
-
-	xorFold16(&keyOut, state.state[:])
-	xorFold16(&keyOut, state.matrix[:])
-	xorFold16(&keyOut, state.work[:])
+	xorFold16(&out, state.hash[:])
+	xorFold16(&out, state.matrix[:])
+	xorFold16(&out, work[:])
 
 	// Reverse scramble
-	for j := 0; j < 16; j++ {
-		for i := 0; i < 16; i++ {
-			x := keyOut[(i-7)&15]
-			y := keyOut[i]
-			z := keyOut[(i-5)&15]
-			w := keyOut[(i-1)&15]
-			keyOut[i] = rotateLeft8(x, 1) ^ y ^ rotateLeft8(z, 6) ^ rotateLeft8(w, 5)
-		}
+	for i := range 256 {
+		out[i&15] ^= bits.RotateLeft8(out[(i-7)&15], 1) ^
+			bits.RotateLeft8(out[(i-5)&15], 6) ^
+			bits.RotateLeft8(out[(i-1)&15], 5)
 	}
-	return keyOut
+	return
 }
 
-// garble applies the fixed proprietary arithmetic circuit at the center of
-// the SAP hash. Its operations intentionally use uint32 wrapping followed by
-// byte truncation; it is not a standard cryptographic primitive.
-func (state *fairplaySAPState) garble() {
-	tmp, tmp2 := state.garbleInitialize()
-	state.garbleExpand(tmp, tmp2)
-	state.garbleMix()
-	state.garbleFinalize()
-}
-
-func (state *fairplaySAPState) garbleInitialize() (tmp, tmp2 uint32) {
-	state20 := &state.state
-	work := &state.work
-	state35 := &state.matrix
-	scratch := &state.scratch
-	stateByte := func(i int) uint32 { return uint32(state20[i]) }
-	workByte := func(i int) uint32 { return uint32(work[i]) }
-	matrixByte := func(i int) uint32 { return uint32(state35[i]) }
-	seedByte := func(i int) uint32 { return uint32(fairplaySAPSeed[i]) }
-
-	state35[12] = byte(0x14 + (((workByte(64) & 92) | ((workByte(99) / 3) & 35)) & seedByte(int(rotateLeft8Wide(fairplaySAPSeed[workByte(206)%21], 4)%21))))
-	work[4] = byte((workByte(99) / 5) * (workByte(99) / 5) * 2)
-	state35[34] = 0xb8
-	matrixValue := matrixByte(int(workByte(203) % 35))
-	work[153] ^= byte(matrixValue * matrixValue * workByte(190))
-	state20[3] -= byte(((seedByte(int(workByte(205)%21)) >> 1) & 80) | 0x40)
-	state20[16] = 0x93
-	state20[13] = 0x62
-	work[33] -= byte(seedByte(int(workByte(36)%21)) & 0xf6)
-
-	tmp2 = matrixByte(int(workByte(67) % 35))
-	state35[12] = 0x07
-
-	tmp = stateByte(int(workByte(181) % 20))
+// The nonlinear circuit's uint32 wrapping and byte truncation are intentional.
+func (state *sapState) nonlinearPrepare() {
+	hash, work, matrix, seed, aux := state.buffers()
+	seedAtWork92, seedAtWork206, workAt99 := seed.at(work[92]), seed.at(work[206]), work.at(99)
+	matrix[12] = byte(0x14 + (((work.at(64) & 92) | ((workAt99 / 3) & 35)) & seed.at32(seedAtWork206<<4|seedAtWork206>>4)))
+	work[4] = byte(2 * square(workAt99/5))
+	work[153] ^= byte(square(matrix.at(work[203])) * work.at(190))
+	hash[3] = 0x13 ^ byte(seed.at(work[205])&0x20)>>1
+	work[33] -= byte(seed.at(work[36]) &^ 9)
+	previousMatrix, previousHash := matrix.at(work[67]), hash.at(work[181])
+	matrix[12] = 0x07
 	work[2] -= 64
-
-	state20[19] = byte(seedByte(int(workByte(58) % 21)))
-
-	scratch[0] = byte(92 - matrixByte(int(workByte(32)%35)))
-	scratch[1] = byte(matrixByte(int(workByte(15)%35)) + 0x9e)
-	work[34] += byte(seedByte(int((matrixByte(int(workByte(15)%35))+0x9e)&0xff)%21) / 5)
-	state20[19] += byte(uint32(0xe6) - ((stateByte(int(uint32(scratch[1])%20)) >> 1) & 102))
-
-	rotationSeed := seedByte(int(workByte(190) % 21))
-	shiftAmt := rotationSeed & 7
-	shifted := (workByte(72) >> shiftAmt) ^ (workByte(72) << ((7 - (rotationSeed - 1)) & 7))
-	work[15] = byte((3 * (shifted - (3 * seedByte(int(workByte(126)%21))))) ^ workByte(15))
-
-	matrixValue = matrixByte(int(workByte(181) % 35))
-	state20[15] ^= byte(matrixValue * matrixValue * matrixValue)
-	state35[4] ^= byte(workByte(202) / 3)
-
-	cubeBase := bitMajority(92-stateByte(int(uint32(scratch[0])%20)), ^workByte(105), 0xc6)
-	state35[1] += byte(cubeBase * cubeBase * cubeBase)
-
-	state20[19] ^= byte(((224 | (seedByte(int(workByte(92)%21)) & 27)) * matrixByte(int(workByte(41)%35))) / 3)
-	work[140] += byte(garbleRotateRight8(92, int(workByte(5)&7)))
-
-	garbleValue := ^workByte(4) ^ matrixByte(int(workByte(12)%35))
-	state35[12] += byte(bitMajority(garbleValue, workByte(182), 192))
+	aux[5] = byte((previousMatrix&^2 | 1 | (previousHash&0x80)>>6 | (hash.at(3) & 0x10)) - 15)
+	hash[19] = byte(seed.at(work[58]))
+	aux[4] = byte(92 - matrix.at(work[32]))
+	aux[9] = byte(matrix.at(work[15])) + 0x9e
+	work[34] += byte(seed.at(aux[9]) / 5)
+	hash[19] += 0xe6 - byte((hash.at(aux[9])>>1)&102)
+	work[15] = byte((3 * (rotate8OrZero(work[72], -int(seed.at(work[190])&7)) - (3 * seed.at(work[126])))) ^ work.at(15))
+	hash[15] ^= byte(cube(matrix.at(work[181])))
+	matrix[4] ^= byte(work.at(202) / 3)
+	matrix[1] += byte(cube(majority(92-hash.at(aux[4]), ^work.at(105), 0xc6)))
+	hash[19] ^= byte(((224 | (seedAtWork92 & 27)) * matrix.at(work[41])) / 3)
+	work[140] += byte(rotate8OrZero(92, -int(work.at(5)&7)))
+	matrix[12] += byte(majority(^work.at(4)^matrix.at(work[12]), work.at(182), 192))
 	work[36] += 125
-
-	mixed := bitMajority(74, workByte(138), stateByte(15))
-	mixed = bitMajority(mixed, stateByte(int(workByte(43)%20)), 95)
-	work[124] = byte(rotateLeft8Wide(byte(mixed), 4))
-
-	scratch[2] = byte((((stateByte(int(uint32(scratch[1])%20)) & 95) & ((seedByte(int(workByte(68)%21)) & 46) << 1)) | 16) ^ 92)
-
-	sum := workByte(177) + seedByte(int(workByte(79)%21))
-	scratchMix := bitMajority(sum>>1, (3*workByte(148))/5, matrixByte(1))
-	scratch[3] = byte(uint32(222) - scratchMix)
-
-	leftShift := matrixByte(22) & 7
-	rotated := (workByte(33) >> ((8 - leftShift) & 7)) ^ (workByte(33) << leftShift)
-	state35[16] += byte(((matrixByte(int(uint32(scratch[0])%35)) & 159) | stateByte(int(uint32(scratch[1])%20)) | 8) - (rotated | 128))
-
-	state20[14] ^= byte(matrixByte(int(uint32(scratch[3]) % 35)))
-	return tmp, tmp2
-}
-
-func (state *fairplaySAPState) garbleExpand(tmp, tmp2 uint32) {
-	state20 := &state.state
-	work := &state.work
-	state35 := &state.matrix
-	scratch := &state.scratch
-	stateByte := func(i int) uint32 { return uint32(state20[i]) }
-	workByte := func(i int) uint32 { return uint32(work[i]) }
-	matrixByte := func(i int) uint32 { return uint32(state35[i]) }
-	seedByte := func(i int) uint32 { return uint32(fairplaySAPSeed[i]) }
-
-	// Continue the fixed arithmetic circuit.
-	rotated := garbleRotateLeft8(fairplaySAPSeed[stateByte(int(workByte(201)%20))%21], int((matrixByte(int(workByte(112)%35))<<1)&7))
-	mask := (stateByte(int(workByte(208)%20)) & 131) | (stateByte(int(workByte(164)%20)) & 124)
-	work[19] += byte(bitMajority(rotated, mask/5, 37))
-
-	garbleValue := seedByte(int(workByte(45)%21)) + 92
-	state35[8] = byte(garbleRotateRight8(140, int((garbleValue*garbleValue)&7))) ^ scratch[0]
+	work[124] = bits.RotateLeft8(byte(majority(majority(work.at(138), hash.at(15), 74), hash.at(work[43]), 95)), 4)
+	hashAtAux9 := hash.at(aux[9])
+	aux[1] = byte(^(hashAtAux9 & (seed.at(work[68]) << 1)) & 0x4c)
+	aux[2] = 222 - byte(majority((work.at(177)+seed.at(work[79]))>>1, (3*work.at(148))/5, matrix.at(1)))
+	matrix[16] += byte(((matrix.at(aux[4]) &^ 0x68) | hashAtAux9 | 8) - (uint32(bits.RotateLeft8(work[33], 2)) | 128))
+	hash[14] ^= byte(matrix.at(aux[2]))
+	work[19] += byte(majority(rotate8OrZero(seed[byte(hash.at(work[201]))%21], int((matrix.at(work[112])<<1)&7)),
+		((hash.at(work[208])&^0x7c)|(hash.at(work[164])&0x7c))/5, 37))
+	matrix[8] = byte(rotate8OrZero(140, -int(square(seed.at(work[45]))&7))) ^ aux[4]
 	work[190] = 56
-
-	work[53] = byte(^((stateByte(int(workByte(83)%20)) | 204) / 5))
-	state20[13] += byte(stateByte(int(workByte(41) % 20)))
-	state20[10] = byte(bitMajority(matrixByte(int(uint32(scratch[0])%35)), workByte(2), uint32(scratch[3])) / 15)
-
-	squareBase := bitMajority(56|(seedByte(int(workByte(2)%21))&68), matrixByte(int(uint32(scratch[2])%35)), 42)
-	scratch[4] = byte(squareBase*squareBase + 110)
-	scratch[5] = byte(202 - uint32(scratch[4]))
-	scratch[6] = work[151]
-	state35[13] ^= byte(seedByte(int(uint32(scratch[0]) % 21)))
-
-	squareBase = bitMajority(matrixByte(int(workByte(179)%35))-38, uint32(scratch[3]), 177)
-	scratch[7] = byte(30 + squareBase*squareBase)
-	scratch[8] = byte(uint32(scratch[7]) + 62)
-
-	// Expand the scratch state.
-	garbleValue = uint32(scratch[5]) + (uint32(scratch[0]) & 74)
-	tmp3 := bitMajority(garbleValue, ^seedByte(int(uint32(scratch[0])%21)), 121)
-	foldBit := bitMajority(tmp3^0xa6, uint32(scratch[0]), 4)
-	work[47] = byte((matrixByte(int(workByte(89)%35)) + foldBit) ^ workByte(47))
-
-	scratch[9] = byte(selectBits(stateByte(3), uint32(rotateLeft8(byte((tmp&179)+68), 2)), tmp2) - 15)
-	work[123] ^= 221
-
-	difference := (seedByte(int(uint32(scratch[0])%21)) / 3) - matrixByte(int(uint32(scratch[1])%35))
-	garbleMask := (((uint32(scratch[0]) & 163) + 92) & 246) | (uint32(scratch[0]) & 92)
-	scratch[10] = byte(difference - bitMajority(garbleMask, uint32(scratch[6]), 54))
-
-	scratch[11] = byte(tmp3 ^ 81 ^ (((uint32(scratch[0]) >> 1) & 101) + 26))
-
-	// Fold the expanded state back into the working buffers.
-	mixed := bitMajority(uint32(scratch[10]), uint32(scratch[6]), 177)
-	seed := seedByte(int(uint32(scratch[0]) % 21))
-	leftSeed := (seedByte(int(uint32(scratch[0])%20)) & 177) | 176 | (seed &^ 3)
-	rightSeed := ((seed & 1) + 176) | (seed &^ 3)
-	combined := (mixed & leftSeed) | (mixed & 199) | (rightSeed & 199)
-	scratch[12] = byte(uint32(scratch[1]) + ((combined &^ 27) | (matrixByte(int(uint32(scratch[1])%35)) & 27)))
-
-	state35[33] ^= work[26]
-	work[106] ^= byte(uint32(scratch[5]) ^ 133)
-
-	state35[30] = byte(((uint32(scratch[12]) / 3) - (275 | (uint32(scratch[0]) & 247))) ^ stateByte(int(workByte(122)%20)))
-	work[22] = byte((matrixByte(int(workByte(90)%35)) & 95) | 68)
-
-	cubeBase := selectBits(184, seedByte(int(uint32(scratch[9])%21)), matrixByte(int(uint32(scratch[11])%35)))
-	state35[18] += byte((cubeBase * cubeBase * cubeBase) >> 1)
-
-	state35[5] -= byte(seedByte(int(workByte(92) % 21)))
-
-	leftFactor := (selectBits(24, matrixByte(int(workByte(183)%35)), workByte(41)) & (uint32(scratch[4]) + 53)) | (uint32(scratch[5]) & matrixByte(int(uint32(scratch[5])%35)))
-	rightFactor := selectBits(uint32(scratch[11]), stateByte(int(workByte(59)%20)), workByte(17))
-	state35[18] ^= byte(leftFactor * rightFactor)
-
-	rotation := garbleRotateRight8(work[11], int(matrixByte(int(workByte(28)%35))&7)) & 7
-	garbleValue = selectBits(stateByte(14), 150, stateByte(int(workByte(93)%20)))
-	selector := selectBits(28, workByte(7), garbleValue)
-	garbleValue = garbleRotateLeft8(state35[uint32(scratch[0])%35], int(rotation))
-	state35[22] = byte(bitMajority(selector, garbleValue, matrixByte(33)) + 74)
-
-	seedMask := seedByte(int((stateByte(int(workByte(39)%20)) ^ 217) % 21))
-	garbleValue = bitMajority(uint32(scratch[5]), uint32(scratch[0]), 214)
-	state20[15] -= byte(bitMajority(garbleValue, seedMask, uint32(scratch[8])))
+	work[53] = ^byte((hash.at(work[83]) | 204) / 5)
+	hash[13] += byte(hash.at(work[41]))
+	hash[10] = byte(majority(matrix.at(aux[4]), work.at(2), uint32(aux[2])) / 15)
+	aux[3] = byte(92 - square(0x28|(matrix.at(aux[1])&(0x12|(seed.at(work[2])&4)))))
+	seedBits := seed.at(aux[4])
+	matrix[13] ^= byte(seedBits)
+	aux[6] = byte(92 + square(majority(matrix.at(work[179])-38, uint32(aux[2]), 177)))
+	value := uint32(aux[3]) + (uint32(aux[4]) & 74)
+	expansionBits := majority(value, ^seedBits, 121)
+	work[47] = byte((matrix.at(work[89]) + majority(expansionBits^0xa6, uint32(aux[4]), 4)) ^ work.at(47))
+	workAt151, matrixAtAux9 := work.at(151), matrix.at(aux[9])
+	aux[7] = byte((seedBits / 3) - matrixAtAux9 - (0x14 | (workAt151 & 0x62) | (uint32(aux[4]) & (0x22 | (workAt151 &^ 0x77)))))
+	expandedSelector := byte(expansionBits ^ ((uint32(aux[4]) >> 1) & 101) ^ 75)
+	aux[9] += byte(0x80 | ((uint32(aux[7]) | workAt151) & 0x20) | ((uint32(aux[7])&workAt151 | seedBits) & 0x44) | (matrixAtAux9 & 0x1b))
+	matrix[33] ^= work[26]
+	matrix[30] = byte(((uint32(aux[9]) / 3) - ((uint32(aux[4]) &^ 8) | 0x13)) ^ hash.at(work[122]))
+	work[22] = byte((matrix.at(work[90]) & 0x1b) | 0x44)
+	matrix[18] += byte(cube(selectBits(71, matrix.at(expandedSelector), seed.at(aux[5]))) >> 1)
+	matrix[5] -= byte(seedAtWork92)
+	matrix[18] ^= byte(selectBits(uint32(aux[3]), matrix.at(aux[3]), selectBits(16, matrix.at(work[183]), work.at(41))) *
+		selectBits(uint32(expandedSelector), hash.at(work[59]), work.at(17)))
+	matrix[22] = byte(majority(selectBits(hash.at(14)|28, (work.at(7)&28)|0x82, hash.at(work[93])),
+		rotate8OrZero(byte(matrix.at(aux[4])), int(rotate8OrZero(work[11], -int(matrix.at(work[28])&7))&7)), matrix.at(33)) + 74)
+	hash[15] -= byte(majority(majority(uint32(aux[3]), uint32(aux[4]), 214), seed.at(byte(hash.at(work[39]))^217), uint32(aux[6])))
 }
 
-func (state *fairplaySAPState) garbleMix() {
-	var A, B, C, D, E, M, J, G, F, R, S, T, U, V, W, X, Y, Z uint32
-
-	state20 := &state.state
-	work := &state.work
-	state35 := &state.matrix
-	scratch := &state.scratch
-	stateByte := func(i int) uint32 { return uint32(state20[i]) }
-	workByte := func(i int) uint32 { return uint32(work[i]) }
-	matrixByte := func(i int) uint32 { return uint32(state35[i]) }
-	seedByte := func(i int) uint32 { return uint32(fairplaySAPSeed[i]) }
-	var garbleValue uint32
-
-	// Preserve this intermediate for the next circuit stage.
-	garbleValue = bitMajority(matrixByte(int(workByte(57)%35)), stateByte(int(uint32(scratch[12])%20)), 95)
-	garbleMask := (uint32(scratch[12]) & 45) | 82
-	garbleValue = bitMajority(garbleValue, garbleMask, 32)
-	D = ((uint32(scratch[0]) / 3) - (uint32(scratch[12]) | workByte(22))) ^ (uint32(scratch[7]) + 62) ^ garbleValue
-	T = stateByte(int((D & 0xff) % 20))
-
-	garbleValue = stateByte(int(workByte(99) % 20))
-	scratch[13] = byte((garbleValue * garbleValue * garbleValue * garbleValue) | matrixByte(int(uint32(scratch[12])%35)))
-
-	U = stateByte(int(workByte(50) % 20))
-	W = matrixByte(int(workByte(138) % 35))
-	X = seedByte(int(workByte(39) % 21))
-	Y = stateByte(int(workByte(4) % 20))
-	Z = seedByte(int(workByte(202) % 21))
-	V = stateByte(int(workByte(151) % 20))
-	S = matrixByte(int(workByte(14) % 35))
-	R = stateByte(int(workByte(145) % 20))
-
-	A = bitMajority(matrixByte(int(uint32(scratch[13])%35)), stateByte(int(workByte(209)%20)), 24)
-	B = garbleRotateLeft8(fairplaySAPSeed[workByte(127)%21], int(matrixByte(int(uint32(scratch[13])%35))&7))
-	C = selectBits(stateByte(10), A, B)
-	D = 7 ^ (seedByte(int(matrixByte(int(uint32(scratch[9])%35))%21)) << 1)
-	scratch[14] = byte(selectBits(71, C, D))
-
-	left := selectBits(159, stateByte(int(uint32(scratch[5])%20))<<1, seedByte(int(workByte(190)%21)))
-	right := selectBits(110, seedByte(int(uint32(scratch[12])%21)), stateByte(int(workByte(25)%20)))
-	right = selectBits(150, workByte(25), right)
-	state35[2] += byte(left & right)
-	garbleValue = matrixByte(int(uint32(scratch[5])%35)) & (uint32(scratch[14]) ^ matrixByte(int(workByte(100)%35)))
-	state35[14] -= byte(selectBits(34, workByte(97), garbleValue))
-	state20[17] = 115
-
-	garbleValue = bitMajority(seedByte(int(workByte(17)%21)), stateByte(int(uint32(scratch[5])%20)), uint32(scratch[14]))
-	work[23] ^= byte(bitMajority(garbleValue, workByte(50)/3, 246) << 1)
-
-	garbleValue = bitMajority(stateByte(int(uint32(scratch[10])%20)), workByte(10), 82)
-	state20[13] = byte(((garbleValue & 209) | ((stateByte(int(workByte(39)%20)) << 1) & 46)) >> 1)
-
-	state35[33] -= byte(workByte(113) & 9)
-	state35[28] -= byte(selectBits(223, uint32(scratch[5]), (2|(workByte(110)&222))>>1))
-
-	J = garbleRotateLeft8(byte(V|Z), int(U&7))
-	A = selectBits(matrixByte(16), T, W)
-	B = selectBits(17, workByte(33), X)
-	E = bitMajority(Y, (A+B)/5, 147)
-	M = bitMajority(uint32(scratch[10]), seedByte(int((uint32(scratch[2])+J+E)&0xff)%21), matrixByte(23))
-
-	garbleValue = bitMajority(seedByte(int(uint32(scratch[5])%21))-48, 189, ^workByte(184))
-	state20[15] = byte(garbleValue & (M * M * M))
-
-	state35[22] += work[183]
-	scratch[15] = byte((3 * seedByte(int(workByte(1)%21))) ^ uint32(scratch[0]))
-
-	A = matrixByte(int((uint32(scratch[2]) + (J + E)) & 0xff % 35))
-	F = (bitMajority(seedByte(int(workByte(178)%21)), A, 209) * stateByte(int(workByte(13)%20))) * (seedByte(int(workByte(26)%21)) >> 1)
-	G = (F+0x733ffff9)*198 - (((F+0x733ffff9)*396 + 212) & 212) + 85
-	scratch[16] = byte(uint32(scratch[9]) + (G ^ 148) + ((G ^ 107) << 1) - 127)
-
-	scratch[17] = byte(selectBits(245, matrixByte(int(uint32(scratch[12])%35)), matrixByte(int(uint32(scratch[5])%35))))
-
-	A = stateByte(int(uint32(scratch[13])%20)) | 81
-	state35[18] -= byte(selectBits(uint32(state20[15]), uint32(scratch[16])/15, A*A*A))
-
-	scratch[18] = byte(uint32(scratch[2]) + J + E - stateByte(int(workByte(160)%20)) + (seedByte(int(stateByte(int((uint32(scratch[2])+J+E)&255)%20))%21) / 3))
-
-	B = selectBits(198, S*S, R^uint32(scratch[14]))
-	F = bitMajority(seedByte(int(workByte(69)%21)), workByte(172), (uint32(scratch[3])-B)+77)
-	state20[16] = byte(147 - ((uint32(scratch[14]) & ((F & 251) | 1)) | (((F & 250) | uint32(scratch[14])) & 198)))
-
-	C = (seedByte(int(workByte(168)%21)) & stateByte(int(workByte(29)%20)) & 7) | ((seedByte(int(workByte(168)%21)) | stateByte(int(workByte(29)%20))) & 6)
-	F = bitMajority(seedByte(int(workByte(155)%21)), workByte(105), 141)
-	state20[3] -= byte(seedByte(int(garbleRotateLeftWide(byte(F), C) % 21)))
-
-	work[5] = byte(garbleRotateRight8(state20[12], int((stateByte(int(workByte(61)%20))/5)&7)) ^ (^matrixByte(int(uint32(scratch[17])%35)) / 5))
-}
-
-func (state *fairplaySAPState) garbleFinalize() {
-	var A, B, C, D, F, G, H, K uint32
-
-	state20 := &state.state
-	work := &state.work
-	state35 := &state.matrix
-	scratch := &state.scratch
-	stateByte := func(i int) uint32 { return uint32(state20[i]) }
-	workByte := func(i int) uint32 { return uint32(work[i]) }
-	matrixByte := func(i int) uint32 { return uint32(state35[i]) }
-	seedByte := func(i int) uint32 { return uint32(fairplaySAPSeed[i]) }
-	var garbleValue uint32
-
+func (state *sapState) nonlinearFinish() {
+	hash, work, matrix, seed, aux := state.buffers()
+	seedAtWork202, matrixAtWork57, hashAtAux9 := seed.at(work[202]), matrix.at(work[57]), hash.at(aux[9])
+	workAt172, workAt184 := work.at(172), work.at(184)
+	indexedHash := hash.at(byte(((uint32(aux[4]) / 3) - (uint32(aux[9]) | work.at(22))) ^ uint32(aux[6]) ^
+		(((matrixAtWork57 | hashAtAux9) & (0x52 | (uint32(aux[9]) & 0x0d))) | ((matrixAtWork57&hashAtAux9 | uint32(aux[9])) & 0x20))))
+	aux[6] = byte(square(square(hash.at(work[99]))) | matrix.at(aux[9]))
+	mixIndex := uint32(byte(uint32(aux[1]) + rotate8OrZero(byte(hash.at(work[151])|seedAtWork202), int(hash.at(work[50])&7)) +
+		majority(hash.at(work[4]), (selectBits(matrix.at(16), indexedHash, matrix.at(work[138]))+selectBits(17, work.at(33), seed.at(work[39])))/5, 147)))
+	selectorMatrix := matrix.at(aux[6])
+	aux[0] = byte(selectBits(hash.at(10)&7, selectorMatrix&hash.at(work[209]),
+		selectBits(0x47, rotate8OrZero(seed[work.at(127)%21], int(selectorMatrix&7)), seed.at(byte(matrix.at(aux[5])))<<1)))
+	selectedSquare := selectBits(198, square(matrix.at(work[14])), hash.at(work[145])^uint32(aux[0]))
+	seedAtAux9, hashAtAux3 := seed.at(aux[9]), hash.at(aux[3])
+	matrix[2] += byte(((hashAtAux3 << 1) & ((work.at(25) & 0x96) | (seedAtAux9 & 8))) | (seedAtAux9 & 0x40))
+	matrix[14] -= byte(selectBits(34, work.at(97), matrix.at(aux[3])&(uint32(aux[0])^matrix.at(work[100]))))
+	hash[17] = 115
+	work[23] ^= byte(majority(majority(seed.at(work[17]), hashAtAux3, uint32(aux[0])), work.at(50)/3, 0x76) << 1)
+	hash[13] = byte(((majority(hash.at(aux[7]), work.at(10), 82) >> 1) & 0x68) | (hash.at(work[39]) & 0x17))
+	matrix[33] -= byte(work.at(113) & 9)
+	matrix[28] -= aux[3]&^0x20 | (work[110]&0x40)>>1
+	work[95] = byte(seed.at(aux[3]))
+	hash[15] = byte(majority(uint32(work[95])-48, ^workAt184, 189) & cube(majority(uint32(aux[7]), seed.at32(mixIndex), 0xaa)))
+	matrix[22] += work[183]
+	aux[4] ^= byte(3 * seed.at(work[1]))
+	aux[5] += 198 * byte((majority(seed.at(work[178]), matrix.at32(mixIndex), 209)*hash.at(work[13]))*(seed.at(work[26])>>1))
+	aux[8] = byte(selectBits(10, matrix.at(aux[3]), matrix.at(aux[9])))
+	matrix[18] -= byte(selectBits(uint32(hash[15]), uint32(aux[5])/15, cube(hash.at(aux[6])|81)))
+	aux[1] = byte(mixIndex - hash.at(work[160]) + seed.at(byte(hash.at(byte(mixIndex))))/3)
+	hash[16] = 147 - byte((uint32(aux[0])&^0x38)|
+		(majority(seed.at(work[69]), workAt172, (uint32(aux[2])-selectedSquare)+77)&(uint32(aux[0])|0xc2)&^5))
+	rotationSeed, rotationHash := seed.at(work[168]), hash.at(work[29])
+	rotationCount := majority(rotationSeed, rotationHash, 6) & 7
+	hash[3] -= byte(seed.at32(rotateWideOrZero(byte(majority(seed.at(work[155]), work.at(105), 141)), rotationCount)))
+	work[5] = byte(rotate8OrZero(0x38, -int((hash.at(work[61])/5)&7)) ^ (51 - (matrix.at(aux[8])+4)/5))
 	work[198] += work[3]
-
-	A = 162 | matrixByte(int(uint32(scratch[12])%35))
-	work[164] += byte((A * A) / 5)
-
-	G = garbleRotateRight8(139, int(uint32(scratch[16])&7))
-	garbleValue = seedByte(int(uint32(scratch[12]) % 21))
-	C = selectBits(95, garbleValue*garbleValue*garbleValue, stateByte(int(uint32(scratch[10])%20)))
-	scratch[19] = byte(bitMajority(G, stateByte(int(uint32(scratch[5])%20)), 12) | C)
-
-	state35[12] += byte(((workByte(103) & 32) | (uint32(scratch[19]) & (workByte(103) | 60)) | 16) / 3)
-	A = selectBits(uint32(state35[8]), workByte(35), uint32(scratch[10]))
-	B = selectBits(uint32(scratch[12]), A, uint32(scratch[17])/3)
-	mask := uint32(86) | ((workByte(172) & 64) >> 1)
-	work[143] -= byte(bitMajority(B, mask, 27))
-
-	state35[29] = 162
-
-	A = selectBits(160, seedByte(int(uint32(scratch[18])%21)), stateByte(int(workByte(125)%20))) >> 1
-	B = matrixByte(int(workByte(149)%35)) ^ (workByte(43) * workByte(43))
-	state20[15] += byte(bitMajority(B, A, 115))
-
-	scratch[20] = byte(uint32(scratch[12]) - stateByte(int(uint32(scratch[10])%20)))
-	work[95] = byte(seedByte(int(uint32(scratch[5]) % 21)))
-
-	A = garbleRotateRight8(state35[uint32(scratch[16])%35], int((matrixByte(int(workByte(17)%35))*matrixByte(int(workByte(17)%35))*matrixByte(int(workByte(17)%35)))&7))
-	state20[7] -= byte(A * A)
-
-	state35[8] = byte(uint32(state35[8]) - workByte(184) + (seedByte(int(workByte(202)%21)) * seedByte(int(workByte(202)%21)) * seedByte(int(workByte(202)%21))))
-	state20[16] = byte((matrixByte(int(workByte(102)%35)) << 1) & 132)
-
-	scratch[21] = byte((seedByte(int(uint32(scratch[10])%21)) >> 1) ^ uint32(scratch[13]))
-
-	garbleValue = selectBits(177, seedByte(int(seedByte(int(uint32(scratch[18])%21))%21)), seedByte(int(workByte(80)%21))<<1)
-	state20[7] -= byte(stateByte(int(workByte(191)%20)) - garbleValue)
-	state20[6] = byte(stateByte(int(workByte(119) % 20)))
-
-	A = selectBits(209, workByte(118), seedByte(int(workByte(190)%21)))
-	B = stateByte(int(uint32(scratch[20])%20)) * stateByte(int(uint32(scratch[20])%20))
-	state20[12] = byte((stateByte(int(uint32(scratch[17])%20)) ^ (matrixByte(int(workByte(71)%35)) + matrixByte(int(workByte(15)%35)))) & bitMajority(A, B, 27))
-
-	B = bitMajority(workByte(32), matrixByte(int(uint32(scratch[18])%35)), 23)
-	D = (((seedByte(int(workByte(57)%21)) * 231) & 169) | (B & 86))
-	F = selectBits(190, selectBits(29, seedByte(int(uint32(scratch[21])%21)), stateByte(int(workByte(82)%20))), seedByte(int(D/5)%21))
-	H = stateByte(int(uint32(scratch[10])%20)) * stateByte(int(uint32(scratch[10])%20)) * stateByte(int(uint32(scratch[10])%20))
-	K = bitMajority(H, workByte(82), 92)
-	scratch[22] = byte(bitMajority(F, K, 192) ^ (D / 5))
-
-	state35[25] ^= byte(((stateByte(int(uint32(scratch[20])%20)) << 1) * workByte(5)) - (garbleRotateLeft8(byte(uint32(scratch[15])), int(seedByte(int(uint32(scratch[21])%21))&7)) & (uint32(scratch[5]) + 110)))
-
+	work[164] += byte(square(162|matrix.at(aux[9])) / 5)
+	aux[2] = byte(majority(rotate8OrZero(139, -int(uint32(aux[5])&7)), hash.at(aux[3]), 12) |
+		selectBits(95, cube(seedAtAux9), hash.at(aux[7])))
+	matrix[12] += byte(((work.at(103) & 32) | (uint32(aux[2]) & (work.at(103) | 60)) | 16) / 3)
+	selected := selectBits(uint32(aux[9]), selectBits(uint32(matrix[8]), work.at(35), uint32(aux[7])), uint32(aux[8])/3)
+	work[143] -= byte(0x12 | (selected & (0x4d | ((workAt172 & 0x40) >> 1))))
+	matrix[29] = 162
+	hash[15] += byte(majority(matrix.at(work[149])^square(work.at(43)), selectBits(95, hash.at(work[125]), seed.at(aux[1]))>>1, 115))
+	aux[9] -= byte(hash.at(aux[7]))
+	hash[7] -= byte(square(rotate8OrZero(byte(matrix.at(aux[5])), -int(matrix.at(work[17])*(matrix.at(work[17])&1)))))
+	matrix[8] += byte(cube(seedAtWork202) - workAt184)
+	hash[16] = byte(matrix.at(work[102])<<1) & 0x84
+	aux[6] ^= byte(seed.at(aux[7]) >> 1)
+	hash[7] -= byte(hash.at(work[191]) - selectBits(177, seed.at(byte(seed.at(aux[1]))), seed.at(work[80])<<1))
+	hash[6] = byte(hash.at(work[119]))
+	hash[12] = byte((hash.at(aux[8]) ^ (matrix.at(work[71]) + matrix.at(work[15]))) &
+		majority((work.at(118)&^0x2e)|2, square(hash.at(aux[9])), 27))
+	digestIndex := byte(selectBits(0xa9, seed.at(work[57])*231, majority(work.at(32), matrix.at(aux[1]), 23)) / 5)
+	seedSample := seed.at(aux[6])
+	selected = (seedSample & 0x1c) | (hash.at(work[82]) &^ 0x5d) | (seed.at(digestIndex) & 0x41)
+	aux[5] = byte(majority(selected, majority(cube(hash.at(aux[7])), work.at(82), 92), 192)) ^ digestIndex
+	matrix[25] ^= byte(((hash.at(aux[9]) << 1) * work.at(5)) - (rotate8OrZero(aux[4], int(seedSample&7)) & (uint32(aux[3]) + 110)))
 }
