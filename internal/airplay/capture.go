@@ -69,6 +69,10 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 	return nil, fmt.Errorf("no display server detected (neither WAYLAND_DISPLAY nor DISPLAY is set)")
 }
 
+func hasGstElement(name string) bool {
+	return exec.Command("gst-inspect-1.0", name).Run() == nil
+}
+
 func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error) {
 	// Check dependencies
 	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
@@ -97,8 +101,8 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 
 	// Single GStreamer pipeline: capture from the PipeWire portal and encode to
 	// H.264.
-	//   - vapostproc imports the portal's DMA-BUF via VA-API (plain videoconvert
-	//     fails to negotiate DMA-BUF on many drivers, giving a black screen).
+	//   - vapostproc imports the portal's DMA-BUF via VA-API when available
+	//     Systems without VA-API (such as Asahi Linux) fall back to videoconvert.
 	//   - format=I420 forces 4:2:0 — RGB screens otherwise make x264enc emit
 	//     "High 4:4:4 Predictive", which most receiver decoders reject (black).
 	//   - videorate re-stamps buffers onto a regular fps timeline: the portal can
@@ -112,13 +116,23 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	gstArgs := []string{
 		"--quiet",
 		"pipewiresrc", fmt.Sprintf("fd=%d", pwFdNum), fmt.Sprintf("path=%d", nodeID), "do-timestamp=true",
-		"!", "vapostproc",
-		"!", "video/x-raw,format=I420",
-		"!", "videoconvert",
-		"!", "videorate", "drop-only=true", "skip-to-first=true",
-		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
-		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 	}
+
+	if hasGstElement("vapostproc") {
+		gstArgs = append(gstArgs,
+			"!", "vapostproc",
+		)
+	} else {
+		log.Printf("[CAPTURE] vapostproc unavailable, using software conversion")
+	}
+
+	gstArgs = append(gstArgs,
+	"!", "videoconvert",
+	"!", "video/x-raw,format=I420",
+	"!", "videorate", "drop-only=true", "skip-to-first=true",
+	"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
+	"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+	)
 	if encoderParts.needsVulkan {
 		gstArgs = append(gstArgs, "!", "vulkanupload")
 	}
