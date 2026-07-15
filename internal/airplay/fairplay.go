@@ -7,11 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-
-	"doubletake/internal/fpemu"
 )
 
-// fairPlayM1 is the fixed m1 blob that matches the snapshot state.
+// fairPlayM1 is the fixed first message in the FairPlay SAP exchange.
 var fairPlayM1 = mustDecodeHexFP("46504c590301010000000004020003bb")
 
 var ErrFairPlayUnsupported = errors.New("receiver does not support FairPlay SAP")
@@ -24,8 +22,7 @@ func mustDecodeHexFP(s string) []byte {
 	return b
 }
 
-// FairPlaySetup performs the complete FairPlay SAP handshake using the
-// standalone ARM64 interpreter.
+// FairPlaySetup performs the complete FairPlay SAP handshake.
 func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	if c.info != nil && !c.info.SupportsFairPlaySAP() {
 		return fmt.Errorf("%w: FPSAP feature bit is not advertised (features=0x%x)", ErrFairPlayUnsupported, c.info.Features)
@@ -54,16 +51,10 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] received m2 (%d bytes)", len(m2))
 	dbg("[FP] m2 first 32: %02x", m2[:min(32, len(m2))])
 
-	// Phase 2: Compute m3 via standalone interpreter, send to server
-	m3raw, err := fpemu.FPSAPExchangeM3(m2)
+	// Phase 2: Compute m3 and send it to the receiver.
+	m3, err := fpsapExchangeM3(m2)
 	if err != nil {
 		return fmt.Errorf("FPSAPExchange: %w", err)
-	}
-
-	// Ensure FPLY framing
-	m3 := m3raw
-	if len(m3) < 4 || string(m3[:4]) != "FPLY" {
-		m3 = fplyWrap(m3raw, 0x03)
 	}
 
 	dbg("[FP] m3 (%d bytes) first 32: %02x", len(m3), m3[:min(32, len(m3))])
@@ -99,16 +90,16 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	copy(c.fpM3, m3)
 
 	// Build ekey and derive audio encryption key.
-	// Both sender and receiver call playfairDecrypt(m3, ekey) with the same
+	// Both sender and receiver call unwrapFairPlayKey(m3, ekey) with the same
 	// inputs (m3 sent during FP handshake, ekey sent in SETUP body).
 	ekey := buildEkey()
 	c.FpEkey = ekey[:]
 	dbg("[FP] ekey chunk1 [16:32]: %02x", ekey[16:32])
 	dbg("[FP] ekey chunk2 [56:72]: %02x", ekey[56:72])
 
-	fpAesKey := playfairDecrypt(c.fpM3, ekey[:])
+	fpAesKey := unwrapFairPlayKey(c.fpM3, ekey[:])
 	c.fpAesKey = fpAesKey[:]
-	dbg("[FP] playfairDecrypt fpAesKey: %02x", fpAesKey[:])
+	dbg("[FP] unwrapFairPlayKey fpAesKey: %02x", fpAesKey[:])
 	dbg("[FP] m3 first 32 bytes: %02x", c.fpM3[:min(32, len(c.fpM3))])
 
 	// Hash with pair-verify shared secret (ECDH X25519) if available.
@@ -135,7 +126,7 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 }
 
 // buildEkey constructs a 72-byte ekey with the FPLY header format.
-// The chunk data is randomized per session so that playfairDecrypt produces
+// The chunk data is randomized per session so that unwrapFairPlayKey produces
 // a unique AES key for each session. Both sender and receiver compute the
 // same key from the same (m3, ekey) inputs.
 //
@@ -163,26 +154,6 @@ func buildEkey() [72]byte {
 	rand.Read(ekey[16:32])
 	rand.Read(ekey[56:72])
 	return ekey
-}
-
-// fplyWrap adds FPLY framing header to raw SAP data.
-// If the data already starts with "FPLY", it's returned as-is.
-func fplyWrap(data []byte, msgType byte) []byte {
-	if len(data) >= 4 && string(data[:4]) == "FPLY" {
-		return data
-	}
-	header := make([]byte, 12+len(data))
-	copy(header[0:4], []byte("FPLY"))
-	header[4] = 0x03
-	header[5] = 0x01
-	header[6] = msgType
-	header[7] = 0x00
-	header[8] = byte(len(data) >> 24)
-	header[9] = byte(len(data) >> 16)
-	header[10] = byte(len(data) >> 8)
-	header[11] = byte(len(data))
-	copy(header[12:], data)
-	return header
 }
 
 // fplyUnwrap strips the FPLY framing header and returns the payload.

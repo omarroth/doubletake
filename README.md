@@ -5,7 +5,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 ## Features
 
 - Full AirPlay 2 mirroring protocol (RTSP/HTTP + encrypted video stream)
-- FairPlay SAP authentication (snapshot-backed Go ARM64 execution)
+- FairPlay SAP authentication (clean Go implementation)
 - SRP-6a pairing with PIN and persistent credential storage
 - Wayland (PipeWire/xdg-desktop-portal) and X11 screen capture
 - Hardware-accelerated H.264 encoding (NVENC, VA-API) with software fallback
