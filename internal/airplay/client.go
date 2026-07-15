@@ -105,7 +105,7 @@ type AirPlayClient struct {
 	fpIV     []byte
 	FpEkey   []byte // 72-byte wrapped key for SETUP
 	fpM3     []byte // 164-byte FPLY-wrapped m3 (needed for ekey construction)
-	fpAesKey []byte // 16-byte raw aesKey from playfair_decrypt (IKM for HKDF)
+	fpAesKey []byte // 16-byte raw aesKey from FairPlay key unwrap (IKM for HKDF)
 
 	// Stream encryption key (from FP or pair-verify)
 	streamKey []byte
