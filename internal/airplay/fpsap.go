@@ -14,9 +14,15 @@ var fpsapM3Prefix = mustDecodeHexFP(
 		"7a66cd302d04aac3c1251714019bd5f2d49b543e11eed1646291ec8efd96b691" +
 		"01b849fd93a02860d1a0dff5cd4414aa")
 
-var fpsapDescriptorPrefix = [...]byte{
-	0xa0, 0x44, 0x9c, 0x4d, 0x09, 0xe4, 0xbd, 0x7f, 0x6e,
-	0xc5, 0xd0, 0xcc, 0x35, 0x9d, 0xa7, 0x46, 0x7a,
+// The descriptor's first two blocks are fixed. This is the compressor state
+// after those blocks and the 17 fixed bytes beginning the remaining input.
+var fpsapDescriptorInitialState = [4]uint32{
+	0xd30fe3ad, 0x8670fb82, 0xc1ebdda2, 0x3fb07aa8,
+}
+
+var fpsapDescriptorRemainderPrefix = [...]byte{
+	0x9f, 0xa7, 0xc5, 0x13, 0x20, 0xae, 0xa6, 0x2d, 0x29,
+	0x49, 0x78, 0x6c, 0x87, 0x64, 0x2e, 0x34, 0xba,
 }
 
 var fpsapDescriptorSuffix = [...]byte{
@@ -46,25 +52,17 @@ func fpsapDynamicSAP(payload [128]byte) (out [128]byte) {
 }
 
 // fpsapDescriptor derives the 20 bytes used to key the two table networks.
-// It is a five-block streaming hash over the two decrypted SAP values. Each
-// block first contributes the FairPlay SAP hash, then uses the cycle variant
+// Each remaining block contributes the SAP hash, then uses the cycle variant
 // of the MD5-shaped compressor. The final padded block is compressed twice.
 func fpsapDescriptor(dynamicSAP [128]byte) (out [20]byte) {
-	var decryptedPrefix [128]byte
-	decryptFairPlayMessage(fpsapM3Prefix, decryptedPrefix[:])
+	var padded [192]byte
+	offset := copy(padded[:], fpsapDescriptorRemainderPrefix[:])
+	offset += copy(padded[offset:], dynamicSAP[:])
+	offset += copy(padded[offset:], fpsapDescriptorSuffix[:])
+	padded[offset] = 0x80
+	binary.LittleEndian.PutUint64(padded[len(padded)-8:], 290*8)
 
-	message := make([]byte, 290)
-	offset := copy(message, fpsapDescriptorPrefix[:])
-	offset += copy(message[offset:], decryptedPrefix[:])
-	offset += copy(message[offset:], dynamicSAP[:])
-	copy(message[offset:], fpsapDescriptorSuffix[:])
-
-	padded := make([]byte, 320)
-	copy(padded, message)
-	padded[len(message)] = 0x80
-	binary.LittleEndian.PutUint64(padded[len(padded)-8:], uint64(len(message))*8)
-
-	state := fairplayWordsFromLittleEndian(fairplayInitialSessionKey)
+	state := fpsapDescriptorInitialState
 	var firstFinal [4]uint32
 	for offset := 0; offset < len(padded); offset += 64 {
 		block := padded[offset : offset+64]

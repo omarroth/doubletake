@@ -52,15 +52,9 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] m2 first 32: %02x", m2[:min(32, len(m2))])
 
 	// Phase 2: Compute m3 and send it to the receiver.
-	m3raw, err := fpsapExchangeM3(m2)
+	m3, err := fpsapExchangeM3(m2)
 	if err != nil {
 		return fmt.Errorf("FPSAPExchange: %w", err)
-	}
-
-	// Ensure FPLY framing
-	m3 := m3raw
-	if len(m3) < 4 || string(m3[:4]) != "FPLY" {
-		m3 = fplyWrap(m3raw, 0x03)
 	}
 
 	dbg("[FP] m3 (%d bytes) first 32: %02x", len(m3), m3[:min(32, len(m3))])
@@ -160,26 +154,6 @@ func buildEkey() [72]byte {
 	rand.Read(ekey[16:32])
 	rand.Read(ekey[56:72])
 	return ekey
-}
-
-// fplyWrap adds FPLY framing header to raw SAP data.
-// If the data already starts with "FPLY", it's returned as-is.
-func fplyWrap(data []byte, msgType byte) []byte {
-	if len(data) >= 4 && string(data[:4]) == "FPLY" {
-		return data
-	}
-	header := make([]byte, 12+len(data))
-	copy(header[0:4], []byte("FPLY"))
-	header[4] = 0x03
-	header[5] = 0x01
-	header[6] = msgType
-	header[7] = 0x00
-	header[8] = byte(len(data) >> 24)
-	header[9] = byte(len(data) >> 16)
-	header[10] = byte(len(data) >> 8)
-	header[11] = byte(len(data))
-	copy(header[12:], data)
-	return header
 }
 
 // fplyUnwrap strips the FPLY framing header and returns the payload.
