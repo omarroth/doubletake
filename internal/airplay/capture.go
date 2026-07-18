@@ -730,11 +730,11 @@ func requestScreencast(ctx context.Context, restoreToken string) (uint32, *os.Fi
 	}
 
 	var nodeID uint32
-	streamList, ok := streams.Value().([][]interface{})
+	streamList, ok := streams.Value().([][]any)
 	if !ok {
 		// Try alternate format
-		if v, ok2 := streams.Value().([]interface{}); ok2 && len(v) > 0 {
-			if tuple, ok3 := v[0].([]interface{}); ok3 && len(tuple) > 0 {
+		if v, ok2 := streams.Value().([]any); ok2 && len(v) > 0 {
+			if tuple, ok3 := v[0].([]any); ok3 && len(tuple) > 0 {
 				if nid, ok4 := tuple[0].(uint32); ok4 {
 					nodeID = nid
 				} else {

@@ -6,7 +6,7 @@ import "log"
 var DebugMode bool
 
 // dbg logs a message only when debug mode is enabled.
-func dbg(format string, args ...interface{}) {
+func dbg(format string, args ...any) {
 	if DebugMode {
 		log.Printf(format, args...)
 	}

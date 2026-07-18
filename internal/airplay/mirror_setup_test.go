@@ -69,17 +69,17 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 
 			switch req.method {
 			case "SETUP":
-				var setup map[string]interface{}
+				var setup map[string]any
 				if _, err := plist.Unmarshal(req.body, &setup); err != nil {
 					serverErr <- fmt.Errorf("decode setup plist: %w", err)
 					return
 				}
-				streams, _ := setup["streams"].([]interface{})
+				streams, _ := setup["streams"].([]any)
 				if len(streams) != 1 {
 					serverErr <- fmt.Errorf("expected one stream in setup, got %d", len(streams))
 					return
 				}
-				stream, _ := streams[0].(map[string]interface{})
+				stream, _ := streams[0].(map[string]any)
 				streamType := plistInt(stream["type"])
 				var respBody []byte
 				switch streamType {
@@ -96,9 +96,9 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 						serverErr <- fmt.Errorf("expected positive controlPort in audio setup, got %d", got)
 						return
 					}
-					respBody, err = plist.Marshal(map[string]interface{}{
-						"streams": []interface{}{
-							map[string]interface{}{
+					respBody, err = plist.Marshal(map[string]any{
+						"streams": []any{
+							map[string]any{
 								"type":        int64(96),
 								"dataPort":    int64(6100),
 								"controlPort": int64(6101),
@@ -106,9 +106,9 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 						},
 					}, plist.BinaryFormat)
 				case 110:
-					respBody, err = plist.Marshal(map[string]interface{}{
-						"streams": []interface{}{
-							map[string]interface{}{
+					respBody, err = plist.Marshal(map[string]any{
+						"streams": []any{
+							map[string]any{
 								"type":     int64(110),
 								"dataPort": int64(dataListener.Addr().(*net.TCPAddr).Port),
 							},
@@ -132,7 +132,7 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 					return
 				}
 			case "SET_PARAMETER":
-				if string(req.body) != "volume: 0.000000\r\n" {
+				if string(req.body) != "volume: 20.000000\r\n" {
 					serverErr <- fmt.Errorf("unexpected SET_PARAMETER body %q", string(req.body))
 					return
 				}

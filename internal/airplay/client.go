@@ -152,7 +152,7 @@ func (c *AirPlayClient) GetInfo() (*ReceiverInfo, error) {
 	}
 
 	// Log the full /info response for debugging audio format support
-	var fullInfo map[string]interface{}
+	var fullInfo map[string]any
 	if _, err2 := plist.Unmarshal(resp, &fullInfo); err2 == nil {
 		dbg("[INFO] full /info response keys: %v", func() []string {
 			keys := make([]string, 0, len(fullInfo))

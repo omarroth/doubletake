@@ -99,11 +99,11 @@ func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) erro
 	// Try raw binary pair-setup first (UxPlay / legacy AirPlay protocol).
 	// Send 32-byte Ed25519 public key, expect 32-byte server public key back.
 	dbg("[PAIR] trying raw binary pair-setup (UxPlay-compatible)")
-	serverPub, err := c.rawPairSetup(ctx)
+	serverPub, err := c.rawPairSetup()
 	if err != nil {
 		// Fall back to TLV8/HomeKit-style pair-setup (Apple TV)
 		dbg("[PAIR] raw pair-setup failed (%v), trying TLV8 pair-setup", err)
-		if err := c.pairSetupTransient(ctx); err != nil {
+		if err := c.pairSetupTransient(); err != nil {
 			return fmt.Errorf("pair-setup: %w", err)
 		}
 		dbg("[PAIR] transient pair-setup complete, starting HAP pair-verify")
@@ -122,7 +122,7 @@ func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) erro
 	c.info.PK = serverPub
 
 	dbg("[PAIR] starting raw pair-verify (no HAP encryption)")
-	if err := c.rawPairVerify(ctx); err != nil {
+	if err := c.rawPairVerify(); err != nil {
 		return fmt.Errorf("raw pair-verify: %w", err)
 	}
 	dbg("[PAIR] raw pair-verify complete (connection stays plaintext)")
@@ -132,7 +132,7 @@ func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) erro
 // rawPairSetup sends a 32-byte Ed25519 public key to /pair-setup and expects
 // a 32-byte server Ed25519 public key back. This is the UxPlay / legacy AirPlay
 // transient pair-setup protocol.
-func (c *AirPlayClient) rawPairSetup(ctx context.Context) ([]byte, error) {
+func (c *AirPlayClient) rawPairSetup() ([]byte, error) {
 	resp, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", c.PairKeys.Ed25519Public)
 	if err != nil {
 		return nil, fmt.Errorf("pair-setup: %w", err)
@@ -144,7 +144,7 @@ func (c *AirPlayClient) rawPairSetup(ctx context.Context) ([]byte, error) {
 }
 
 // pairSetupTransient performs a transient (ephemeral, no-PIN) pair-setup.
-func (c *AirPlayClient) pairSetupTransient(ctx context.Context) error {
+func (c *AirPlayClient) pairSetupTransient() error {
 	// Transient M1: method=0, state=1, flags=transient
 	flags := make([]byte, 4)
 	binary.LittleEndian.PutUint32(flags, pairingFlagTransient)
@@ -172,7 +172,7 @@ func (c *AirPlayClient) pairSetupTransient(ctx context.Context) error {
 	}
 
 	// SRP-6a exchange with empty PIN for transient
-	return c.completeSRPExchange(ctx, "", serverSalt, serverPub)
+	return c.completeSRPExchange("", serverSalt, serverPub)
 }
 
 // StartPINDisplay triggers the PIN display on the Apple TV.
@@ -200,7 +200,7 @@ func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
 }
 
 func (c *AirPlayClient) performPairSetupAndVerify(ctx context.Context, pin string) error {
-	if err := c.pairSetup(ctx, pin); err != nil {
+	if err := c.pairSetup(pin); err != nil {
 		return fmt.Errorf("pair-setup: %w", err)
 	}
 	if err := c.PairVerify(ctx); err != nil {
@@ -210,7 +210,7 @@ func (c *AirPlayClient) performPairSetupAndVerify(ctx context.Context, pin strin
 }
 
 // pairSetup implements the SRP6a pair-setup exchange (PIN-based).
-func (c *AirPlayClient) pairSetup(ctx context.Context, pin string) error {
+func (c *AirPlayClient) pairSetup(pin string) error {
 	// M1: Send pairing method + state
 	m1 := tlv8EncodeOrdered([]tlv8Item{
 		{Tag: tlvMethod, Value: []byte{0x00}},
@@ -233,11 +233,11 @@ func (c *AirPlayClient) pairSetup(ctx context.Context, pin string) error {
 		return fmt.Errorf("M2: missing salt or public key")
 	}
 
-	return c.completeSRPExchange(ctx, pin, salt, serverPubB)
+	return c.completeSRPExchange(pin, salt, serverPubB)
 }
 
 // completeSRPExchange finishes SRP from M3 onward (shared by PIN and transient flows).
-func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, salt, serverPubB []byte) error {
+func (c *AirPlayClient) completeSRPExchange(pin string, salt, serverPubB []byte) error {
 	username := []byte("Pair-Setup")
 	password := []byte(pin)
 
@@ -590,7 +590,7 @@ func nonceBytes(n uint64) []byte {
 //
 //	key = SHA-512("Pair-Verify-AES-Key" || X25519_shared_secret)[:16]
 //	iv  = SHA-512("Pair-Verify-AES-IV"  || X25519_shared_secret)[:16]
-func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
+func (c *AirPlayClient) rawPairVerify() error {
 	// Generate ephemeral X25519 key pair
 	var clientPrivate [32]byte
 	rand.Read(clientPrivate[:])

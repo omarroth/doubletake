@@ -39,7 +39,7 @@ func TestCongestionController_ShouldDrop(t *testing.T) {
 
 	// No congestion → never drop.
 	cc.level = congestionNone
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if cc.shouldDrop(i) {
 			t.Fatalf("congestionNone should not drop frame %d", i)
 		}
@@ -49,7 +49,7 @@ func TestCongestionController_ShouldDrop(t *testing.T) {
 	cc.level = congestionLight
 	cc.skipped = 0
 	drops := 0
-	for i := 0; i < 9; i++ {
+	for i := range 9 {
 		if cc.shouldDrop(i) {
 			drops++
 		}
@@ -62,7 +62,7 @@ func TestCongestionController_ShouldDrop(t *testing.T) {
 	cc.level = congestionMedium
 	cc.skipped = 0
 	drops = 0
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if cc.shouldDrop(i) {
 			drops++
 		}
@@ -74,7 +74,7 @@ func TestCongestionController_ShouldDrop(t *testing.T) {
 	// Heavy → drop all.
 	cc.level = congestionHeavy
 	cc.skipped = 0
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		if !cc.shouldDrop(i) {
 			t.Fatalf("congestionHeavy should drop frame %d", i)
 		}
@@ -127,7 +127,7 @@ func TestSPSDimensions(t *testing.T) {
 }
 
 func TestPlistStreamPortsLegacy(t *testing.T) {
-	stream := map[string]interface{}{
+	stream := map[string]any{
 		"dataPort":    uint64(6100),
 		"controlPort": uint64(6101),
 	}
@@ -139,14 +139,14 @@ func TestPlistStreamPortsLegacy(t *testing.T) {
 }
 
 func TestPlistStreamPortsStreamConnections(t *testing.T) {
-	stream := map[string]interface{}{
+	stream := map[string]any{
 		"dataPort":    uint64(6100),
 		"controlPort": uint64(6101),
-		"streamConnections": map[string]interface{}{
-			"streamConnectionTypeRTP": map[string]interface{}{
+		"streamConnections": map[string]any{
+			"streamConnectionTypeRTP": map[string]any{
 				"streamConnectionKeyPort": uint64(7100),
 			},
-			"streamConnectionTypeRTCP": map[string]interface{}{
+			"streamConnectionTypeRTCP": map[string]any{
 				"streamConnectionKeyPort": uint64(7101),
 			},
 		},

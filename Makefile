@@ -14,10 +14,10 @@ doubletake-ctl:
 	go build -o bin/doubletake-ctl ./cmd/doubletake-ctl
 
 doubletake-release:
-	CGO_ENABLED=0 go build -ldflags='-s -w -extldflags=-static' -o doubletake ./cmd/doubletake
+	CGO_ENABLED=0 go build -ldflags='-s -w -extldflags=-static' -o bin/doubletake ./cmd/doubletake
 
 doubletake-ctl-release:
-	CGO_ENABLED=0 go build -ldflags='-s -w -extldflags=-static' -o doubletake-ctl ./cmd/doubletake-ctl
+	CGO_ENABLED=0 go build -ldflags='-s -w -extldflags=-static' -o bin/doubletake-ctl ./cmd/doubletake-ctl
 
 manpages-release:
 	tar -czf doubletake-manpages.tar.gz -C man man1

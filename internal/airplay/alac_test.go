@@ -14,7 +14,7 @@ func TestALACVerbatimEncoding(t *testing.T) {
 	const freq = 440.0
 
 	pcm := make([]byte, spf*channels*2)
-	for i := 0; i < spf; i++ {
+	for i := range spf {
 		sample := int16(math.Sin(2*math.Pi*freq*float64(i)/sampleRate) * 16000)
 		// S16LE format
 		for ch := 0; ch < channels; ch++ {

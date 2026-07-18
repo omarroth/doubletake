@@ -510,7 +510,7 @@ func (as *AudioStream) nextAudioChaChaNonce(seq uint16, rtpTime uint32, reuse *u
 	return value, nonce
 }
 
-func (as *AudioStream) audioChaChaAAD(header []byte, rtpTime uint32) []byte {
+func (as *AudioStream) audioChaChaAAD(header []byte) []byte {
 	switch as.chachaAADMode {
 	case audioChaChaAADRTPHeader:
 		return header
@@ -551,7 +551,7 @@ func (as *AudioStream) sendAudioPacketWithSeqAndNonce(payload []byte, rtpTime ui
 	if as.chachaCipher != nil {
 		var nonce [audioChaChaNonceSize]byte
 		usedNonce, nonce = as.nextAudioChaChaNonce(seq, rtpTime, reuseNonce)
-		aad := as.audioChaChaAAD(header, rtpTime)
+		aad := as.audioChaChaAAD(header)
 		sealed := as.chachaCipher.Seal(nil, nonce[:], payload, aad)
 		packetPayload = make([]byte, len(sealed)+8)
 		copy(packetPayload, sealed)

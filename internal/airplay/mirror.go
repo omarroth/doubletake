@@ -196,7 +196,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 	disableRetransmits := audioRedundant == 0
 
-	audioStreamDesc := map[string]interface{}{
+	audioStreamDesc := map[string]any{
 		"type":               int64(96),
 		"streamConnectionID": audioStreamConnectionID,
 		"ct":                 audioCT,
@@ -215,7 +215,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		audioStreamDesc["disableRetransmits"] = true
 	}
 
-	audioSetupPlist := map[string]interface{}{
+	audioSetupPlist := map[string]any{
 		"deviceID":       clientDeviceID,
 		"macAddress":     clientDeviceID,
 		"sessionUUID":    sessionUUID,
@@ -225,7 +225,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		"osBuildVersion": "13F69",
 		"model":          "Linux",
 		"name":           "Linux",
-		"streams":        []interface{}{audioStreamDesc},
+		"streams":        []any{audioStreamDesc},
 	}
 
 	// Modern HAP receivers look for shk on the audio stream descriptor.
@@ -233,11 +233,11 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		audioStreamDesc["shk"] = audioChaChaKey
 		audioStreamDesc["isMedia"] = true
 		audioStreamDesc["supportsDynamicStreamID"] = true
-		audioStreamDesc["streamConnections"] = map[string]interface{}{
-			"streamConnectionTypeRTP": map[string]interface{}{
+		audioStreamDesc["streamConnections"] = map[string]any{
+			"streamConnectionTypeRTP": map[string]any{
 				"streamConnectionKeyUseStreamEncryptionKey": true,
 			},
-			"streamConnectionTypeRTCP": map[string]interface{}{
+			"streamConnectionTypeRTCP": map[string]any{
 				"streamConnectionKeyPort": int64(audioControlLPort),
 			},
 		}
@@ -285,7 +285,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			err2)
 	}
 
-	var audioResp map[string]interface{}
+	var audioResp map[string]any
 	if _, err2 := plist.Unmarshal(audioRespBody, &audioResp); err2 != nil {
 		audioCtrlConn.Close()
 		audioDataConn.Close()
@@ -317,9 +317,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	// Extract audio ports
-	if streams, ok := audioResp["streams"].([]interface{}); ok {
+	if streams, ok := audioResp["streams"].([]any); ok {
 		for _, s := range streams {
-			stream, ok := s.(map[string]interface{})
+			stream, ok := s.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -337,15 +337,15 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	videoStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	videoURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, videoStreamConnectionID)
 
-	videoStreamDesc := map[string]interface{}{
+	videoStreamDesc := map[string]any{
 		"type":               int64(110),
 		"streamConnectionID": videoStreamConnectionID,
-		"timestampInfo": []interface{}{
-			map[string]interface{}{"name": "SubSu"},
-			map[string]interface{}{"name": "BePxT"},
-			map[string]interface{}{"name": "AfPxT"},
-			map[string]interface{}{"name": "BefEn"},
-			map[string]interface{}{"name": "EmEnc"},
+		"timestampInfo": []any{
+			map[string]any{"name": "SubSu"},
+			map[string]any{"name": "BePxT"},
+			map[string]any{"name": "AfPxT"},
+			map[string]any{"name": "BefEn"},
+			map[string]any{"name": "EmEnc"},
 		},
 	}
 
@@ -355,7 +355,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		videoStreamDesc["shiv"] = encIV
 	}
 
-	videoSetupPlist := map[string]interface{}{
+	videoSetupPlist := map[string]any{
 		"deviceID":                 clientDeviceID,
 		"macAddress":               clientDeviceID,
 		"sessionUUID":              sessionUUID,
@@ -366,7 +366,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		"osBuildVersion":           "13F69",
 		"model":                    "Linux",
 		"name":                     "Linux",
-		"streams":                  []interface{}{videoStreamDesc},
+		"streams":                  []any{videoStreamDesc},
 	}
 	// UxPlay reads ekey/eiv from the root level of the SETUP request to derive
 	// the video decryption key. Without these, video decryption won't work on UxPlay.
@@ -389,7 +389,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		return nil, fmt.Errorf("SETUP phase 2 (video): %w", err)
 	}
 
-	var videoResp map[string]interface{}
+	var videoResp map[string]any
 	if _, err := plist.Unmarshal(videoRespBody, &videoResp); err != nil {
 		return nil, fmt.Errorf("unmarshal video setup response: %w", err)
 	}
@@ -419,9 +419,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	// Extract video data port
-	if streams, ok := videoResp["streams"].([]interface{}); ok {
+	if streams, ok := videoResp["streams"].([]any); ok {
 		for _, s := range streams {
-			stream, ok := s.(map[string]interface{})
+			stream, ok := s.(map[string]any)
 			if !ok {
 				continue
 			}
@@ -478,8 +478,8 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		}
 	}
 
-	// Set volume to maximum (0 dB)
-	volumeBody := []byte("volume: 0.000000\r\n")
+	// Set volume to default (20 dB)
+	volumeBody := []byte("volume: 20.000000\r\n")
 	_, _, err = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
 	if err != nil {
 		dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)
@@ -604,7 +604,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Start heartbeat in background
 	go session.heartbeatLoop(ctx, controlURI, sessionUUID)
 	go session.dataHeartbeatLoop(ctx)
-	go session.feedbackLoop(ctx, controlURI)
+	go func() {
+		session.feedbackLoop(ctx)
+	}()
 
 	return session, nil
 }
@@ -821,13 +823,6 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			}
 		}
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // h264Parser incrementally extracts NAL units from either Annex-B or length-prefixed AVC streams.
@@ -1414,12 +1409,12 @@ func (cc *congestionController) logDrop() {
 // Per UxPlay mirror_buffer.c: SHA-512("AirPlayStreamKey<id>" + shk)[:16] and SHA-512("AirPlayStreamIV<id>" + shk)[:16].
 func deriveVideoKeys(shk []byte, streamConnectionID int64) (key, iv []byte) {
 	h := sha512.New()
-	h.Write([]byte(fmt.Sprintf("AirPlayStreamKey%d", uint64(streamConnectionID))))
+	fmt.Fprintf(h, "AirPlayStreamKey%d", uint64(streamConnectionID))
 	h.Write(shk)
 	key = h.Sum(nil)[:16]
 
 	h.Reset()
-	h.Write([]byte(fmt.Sprintf("AirPlayStreamIV%d", uint64(streamConnectionID))))
+	fmt.Fprintf(h, "AirPlayStreamIV%d", uint64(streamConnectionID))
 	h.Write(shk)
 	iv = h.Sum(nil)[:16]
 	return
@@ -1447,7 +1442,7 @@ func generateAudioChaChaKey(randReader io.Reader) ([]byte, error) {
 // The receiver's _ScreenSetup derives only "DataStream-Output-Encryption-Key" for screen
 // mirroring — "Output" refers to the sender's output direction.
 func deriveChaChaKey(ikm []byte, streamConnectionID int64) ([]byte, error) {
-	salt := []byte(fmt.Sprintf("DataStream-Salt%d", uint64(streamConnectionID)))
+	salt := fmt.Appendf(nil, "DataStream-Salt%d", uint64(streamConnectionID))
 	info := []byte("DataStream-Output-Encryption-Key")
 
 	hkdfReader := hkdf.New(sha512.New, ikm, salt, info)
@@ -1526,7 +1521,7 @@ func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
 // feedbackLoop sends periodic POST /feedback requests like AirMyPC (every 2s).
 // Sends an immediate first feedback to prevent UxPlay's 3-second timeout from
 // killing the connection before the first ticker fires.
-func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
+func (s *MirrorSession) feedbackLoop(ctx context.Context) {
 	// Wait for first video frame before sending feedback
 	select {
 	case <-ctx.Done():
@@ -1539,7 +1534,7 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
 	if err != nil {
 		dbg("[FEEDBACK] initial error: %v", err)
 	} else if len(body) > 0 {
-		var fbResp map[string]interface{}
+		var fbResp map[string]any
 		if _, perr := plist.Unmarshal(body, &fbResp); perr == nil {
 			dbg("[FEEDBACK] response: %+v", fbResp)
 		} else {
@@ -1561,7 +1556,7 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context, uri string) {
 			if err != nil {
 				dbg("[FEEDBACK] error: %v", err)
 			} else if len(body) > 0 {
-				var fbResp map[string]interface{}
+				var fbResp map[string]any
 				if _, perr := plist.Unmarshal(body, &fbResp); perr == nil {
 					dbg("[FEEDBACK] response: %+v", fbResp)
 				}
@@ -1600,7 +1595,7 @@ func (s *MirrorSession) Close() error {
 }
 
 // plistInt extracts an integer from a plist value (uint64, int64, or float64).
-func plistInt(v interface{}) int {
+func plistInt(v any) int {
 	switch n := v.(type) {
 	case uint64:
 		return int(n)
@@ -1614,20 +1609,20 @@ func plistInt(v interface{}) int {
 
 // plistStreamPorts extracts RTP/RTCP ports from either legacy stream fields or
 // modern streamConnections dictionaries.
-func plistStreamPorts(stream map[string]interface{}) (dataPort, controlPort int) {
+func plistStreamPorts(stream map[string]any) (dataPort, controlPort int) {
 	dataPort = plistInt(stream["dataPort"])
 	controlPort = plistInt(stream["controlPort"])
 
-	streamConnections, ok := stream["streamConnections"].(map[string]interface{})
+	streamConnections, ok := stream["streamConnections"].(map[string]any)
 	if !ok {
 		return dataPort, controlPort
 	}
-	if rtp, ok := streamConnections["streamConnectionTypeRTP"].(map[string]interface{}); ok {
+	if rtp, ok := streamConnections["streamConnectionTypeRTP"].(map[string]any); ok {
 		if port := plistInt(rtp["streamConnectionKeyPort"]); port > 0 {
 			dataPort = port
 		}
 	}
-	if rtcp, ok := streamConnections["streamConnectionTypeRTCP"].(map[string]interface{}); ok {
+	if rtcp, ok := streamConnections["streamConnectionTypeRTCP"].(map[string]any); ok {
 		if port := plistInt(rtcp["streamConnectionKeyPort"]); port > 0 {
 			controlPort = port
 		}

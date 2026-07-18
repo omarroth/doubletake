@@ -34,8 +34,6 @@ func TestFairPlayPrimitiveVectors(t *testing.T) {
 }
 
 func TestFairPlaySAPHashCorpus(t *testing.T) {
-	// This aggregate is generated independently by the upstream C reference
-	// implementation and exercises inputs the original single vector missed.
 	corpusHash := sha256.New()
 	var state uint64 = 0x6a09e667f3bcc909
 	for range 64 {
