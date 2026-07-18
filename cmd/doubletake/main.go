@@ -295,6 +295,10 @@ func main() {
 			log.Fatalf("test capture failed: %v", err)
 		}
 	} else {
+		restoreToken := ""
+		if creds := credStore.Lookup(info.DeviceID); creds != nil {
+			restoreToken = creds.RestoreToken
+		}
 		captureCfg := airplay.CaptureConfig{
 			FPS:           *fps,
 			Bitrate:       *bitrate,
@@ -302,6 +306,10 @@ func main() {
 			X11WindowID:   xid,
 			X11WindowName: *x11WindowName,
 			ShowCursor:    !*noCursor,
+			RestoreToken:  restoreToken,
+			SaveRestoreToken: func(token string) error {
+				return credStore.SaveRestoreToken(info.DeviceID, token)
+			},
 		}
 		var err error
 		capture, err = airplay.StartCapture(ctx, captureCfg)
