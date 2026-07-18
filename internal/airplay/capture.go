@@ -103,8 +103,10 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	// H.264.
 	//   - vapostproc imports the portal's DMA-BUF via VA-API when available
 	//     Systems without VA-API (such as Asahi Linux) fall back to videoconvert.
-	//   - format=I420 forces 4:2:0 — RGB screens otherwise make x264enc emit
-	//     "High 4:4:4 Predictive", which most receiver decoders reject (black).
+	//   - The raw format is pinned to the encoder's required 4:2:0 format. The
+	//     hardware encoders require NV12, while the software encoders use I420.
+	//     Pinning the format also prevents x264enc from emitting High 4:4:4
+	//     Predictive, which most receiver decoders reject (black).
 	//   - videorate re-stamps buffers onto a regular fps timeline: the portal can
 	//     deliver pts=0, which confuses encoder/muxer timing. drop-only=true never
 	//     duplicates frames during idle periods (no wasted bandwidth on a static
@@ -127,11 +129,11 @@ func startWaylandCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture
 	}
 
 	gstArgs = append(gstArgs,
-	"!", "videoconvert",
-	"!", "video/x-raw,format=I420",
-	"!", "videorate", "drop-only=true", "skip-to-first=true",
-	"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
-	"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "videoconvert",
+		"!", fmt.Sprintf("video/x-raw,format=%s", encoderParts.rawFormat),
+		"!", "videorate", "drop-only=true", "skip-to-first=true",
+		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 	)
 	if encoderParts.needsVulkan {
 		gstArgs = append(gstArgs, "!", "vulkanupload")
@@ -235,6 +237,7 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 		"!", fmt.Sprintf("video/x-raw,framerate=%d/1", fps),
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "videoconvert",
+		"!", fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat),
 	)
 	if encoder.needsVulkan {
 		gstArgs = append(gstArgs, "!", "vulkanupload")
@@ -422,7 +425,8 @@ func parseXrandrGeometry(line string) (xOffset, yOffset, width, height int, ok b
 // a vulkanupload step before the encoder.
 type encoderResult struct {
 	parts       []string
-	needsVulkan bool // encoder needs vulkanupload ! before it
+	needsVulkan bool   // encoder needs vulkanupload ! before it
+	rawFormat   string // system-memory format produced by videoconvert
 }
 
 // detectGstEncoder probes for available GStreamer H.264 encoders and returns
@@ -450,6 +454,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 					fmt.Sprintf("bitrate=%d", bitrate),
 				},
 				needsVulkan: true,
+				rawFormat:   "NV12",
 			}
 		}
 	}
@@ -458,7 +463,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 	if hwaccel == "auto" || hwaccel == "nvenc" {
 		if exec.Command("gst-inspect-1.0", "nvh264enc").Run() == nil {
 			log.Printf("[CAPTURE] using NVENC hardware encoding (nvh264enc)")
-			return encoderResult{parts: []string{
+			return encoderResult{rawFormat: "NV12", parts: []string{
 				"nvh264enc",
 				fmt.Sprintf("bitrate=%d", bitrate),
 				fmt.Sprintf("gop-size=%d", keyframeInterval),
@@ -477,7 +482,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 	if hwaccel == "auto" || hwaccel == "vaapi" {
 		if exec.Command("gst-inspect-1.0", "vah264enc").Run() == nil {
 			log.Printf("[CAPTURE] using VAAPI hardware encoding (vah264enc)")
-			return encoderResult{parts: []string{
+			return encoderResult{rawFormat: "NV12", parts: []string{
 				"vah264enc",
 				fmt.Sprintf("bitrate=%d", bitrate),
 				fmt.Sprintf("key-int-max=%d", keyframeInterval),
@@ -496,7 +501,7 @@ func detectGstEncoder(cfg CaptureConfig) encoderResult {
 	// Use VBR (pass=0) so the encoder can undershoot on simple scenes, saving
 	// headroom for complex frames. vbv-buf-capacity + vbv-maxrate cap bursts.
 	maxrate := bitrate + bitrate/4 // allow 25% overshoot on peaks
-	return encoderResult{parts: []string{
+	return encoderResult{rawFormat: "I420", parts: []string{
 		"x264enc",
 		"tune=zerolatency",
 		"speed-preset=superfast",
