@@ -73,13 +73,18 @@ func TestFairPlayMessageVectors(t *testing.T) {
 		var decrypted [128]byte
 		decryptFairPlayMessage(message, decrypted[:])
 		requireFairPlayHex(t, "decrypted message", decrypted[:], tc.decrypted)
+		var encrypted [128]byte
+		if err := encryptFairPlayMessage(tc.mode, decrypted[:], encrypted[:]); err != nil {
+			t.Fatal(err)
+		}
+		requireFairPlayHex(t, "encrypted message", encrypted[:], hex.EncodeToString(message[16:144]))
 		if tc.mode == 3 {
 			inPlace := append([]byte(nil), message...)
 			decryptFairPlayMessage(inPlace, inPlace[16:144])
 			requireFairPlayHex(t, "in-place decrypted message", inPlace[16:144], tc.decrypted)
 		}
 
-		aesKey := deriveFairPlayWrappingKey(fairplayDefaultSAPTail[:], message)
+		aesKey := deriveFairPlayWrappingKey(fairPlayReferenceReceiverSAP(), message)
 		requireFairPlayHex(t, "AES key", aesKey[:], tc.aesKey)
 	}
 }
@@ -94,6 +99,6 @@ func TestFairPlayKeyUnwrapVector(t *testing.T) {
 	for i := range ekey {
 		ekey[i] = byte(i*7 + 3)
 	}
-	got := unwrapFairPlayKey(m3, ekey[:])
+	got := unwrapFairPlayKeyForTest(fairPlayReferenceReceiverSAP(), m3, ekey[:])
 	requireFairPlayHex(t, "FairPlay key", got[:], "903e5be94732428e9965afb262b193a4")
 }

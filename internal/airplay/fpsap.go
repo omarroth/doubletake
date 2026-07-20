@@ -1,28 +1,24 @@
 package airplay
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 )
 
-// fpsapM3Prefix is the invariant 144-byte portion of a version-3 FairPlay
-// SAP response. The final 20 bytes are derived from the 128-byte m2 payload.
-var fpsapM3Prefix = mustDecodeHexFP(
-	"46504c590301030000000098038f1a9c991ea22c511e45ba97f1af8dfb0f86f5" +
-		"50c54486fe6b3ab233da431ef8e5fc1156dba321fffeabb1b392b09d227e88c7" +
-		"12202866eb7bbf310015aa1d19a5df36d5dfd8d3ca1639b376eaece946edfe8b" +
-		"7a66cd302d04aac3c1251714019bd5f2d49b543e11eed1646291ec8efd96b691" +
-		"01b849fd93a02860d1a0dff5cd4414aa")
+// This m1 capability byte is a bit mask, not the message mode. Apple's sender
+// derives it as 3 with any unavailable capabilities cleared; this
+// implementation supports the full set. The receiver selects mode 0..3 in m2.
+const fpsapM1Capabilities = byte(3)
 
-// The descriptor's first two blocks are fixed. This is the compressor state
-// after those blocks and the 17 fixed bytes beginning the remaining input.
-var fpsapDescriptorInitialState = [4]uint32{
-	0xd30fe3ad, 0x8670fb82, 0xc1ebdda2, 0x3fb07aa8,
-}
+var fpsapM1Payload = [...]byte{0x02, 0x00, fpsapM1Capabilities, 0xbb}
 
-var fpsapDescriptorRemainderPrefix = [...]byte{
-	0x9f, 0xa7, 0xc5, 0x13, 0x20, 0xae, 0xa6, 0x2d, 0x29,
-	0x49, 0x78, 0x6c, 0x87, 0x64, 0x2e, 0x34, 0xba,
+var fpsapM3Label = [...]byte{0x8f, 0x1a, 0x9c}
+
+var fpsapDescriptorPrefix = [...]byte{
+	0xa0, 0x44, 0x9c, 0x4d, 0x09, 0xe4, 0xbd, 0x7f, 0x6e,
+	0xc5, 0xd0, 0xcc, 0x35, 0x9d, 0xa7, 0x46, 0x7a,
 }
 
 var fpsapDescriptorSuffix = [...]byte{
@@ -43,35 +39,66 @@ var fpsapSecondPositionMap = [...]uint8{
 	0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3,
 }
 
-func fpsapDynamicSAP(payload [128]byte) (out [128]byte) {
-	message := make([]byte, 144)
-	message[12] = 3
-	copy(message[16:], payload[:])
-	decryptFairPlayMessage(message, out[:])
-	return out
+type fpsapSession struct {
+	localSAP  [128]byte
+	remoteSAP [128]byte
+	m3        [164]byte
+	hasM3     bool
 }
 
-// fpsapDescriptor derives the 20 bytes used to key the two table networks.
-// Each remaining block contributes the SAP hash, then uses the cycle variant
-// of the MD5-shaped compressor. The final padded block is compressed twice.
-func fpsapDescriptor(dynamicSAP [128]byte) (out [20]byte) {
-	var padded [192]byte
-	offset := copy(padded[:], fpsapDescriptorRemainderPrefix[:])
-	offset += copy(padded[offset:], dynamicSAP[:])
+// newFPSAPSession models the stateful lifecycle visible in Apple's
+// sender: one opaque context is created before m1 and reused for m3 and key
+// wrapping. The native implementation fills the local SAP from an
+// arc4random-seeded internal generator, then overwrites its first two bytes with
+// 00 01. Using the caller's cryptographic entropy source for the remaining 126
+// opaque bytes preserves those protocol semantics without porting its PRNG.
+func newFPSAPSession(entropy io.Reader) (*fpsapSession, error) {
+	session := &fpsapSession{}
+	session.localSAP[1] = 1
+	if _, err := io.ReadFull(entropy, session.localSAP[2:]); err != nil {
+		return nil, fmt.Errorf("initialize local SAP: %w", err)
+	}
+	return session, nil
+}
+
+func (session *fpsapSession) message1() []byte {
+	m1 := newFPSAPRecord(1, len(fpsapM1Payload))
+	copy(m1[12:], fpsapM1Payload[:])
+	return m1
+}
+
+func decryptFPSAPBody(mode byte, payload [128]byte) (out [128]byte, err error) {
+	if int(mode) >= len(fairplayMessageIV) {
+		return out, fmt.Errorf("unsupported FairPlay mode %d", mode)
+	}
+	message := make([]byte, 144)
+	message[12] = mode
+	copy(message[16:], payload[:])
+	decryptFairPlayMessage(message, out[:])
+	return out, nil
+}
+
+// fpsapDescriptorForSAP derives the white-box seed from both halves of an
+// exchange, without assuming a captured sender or receiver SAP value.
+func fpsapDescriptorForSAP(m3SAP, m2SAP [128]byte) (out [20]byte) {
+	var padded [320]byte
+	offset := copy(padded[:], fpsapDescriptorPrefix[:])
+	offset += copy(padded[offset:], m3SAP[:])
+	offset += copy(padded[offset:], m2SAP[:])
 	offset += copy(padded[offset:], fpsapDescriptorSuffix[:])
 	padded[offset] = 0x80
-	binary.LittleEndian.PutUint64(padded[len(padded)-8:], 290*8)
+	binary.LittleEndian.PutUint64(padded[len(padded)-8:], uint64(offset)*8)
 
-	state := fpsapDescriptorInitialState
+	state := fairplayWordsFromLittleEndian(fairplayInitialSessionKey)
 	var firstFinal [4]uint32
-	for offset := 0; offset < len(padded); offset += 64 {
-		block := padded[offset : offset+64]
+	for blockOffset := 0; blockOffset < len(padded); blockOffset += 64 {
+		block := padded[blockOffset : blockOffset+64]
 		add := fairplaySAPHash(block)
 		for i := range state {
 			state[i] += binary.LittleEndian.Uint32(add[i*4:])
 		}
 		state = fairplayMD5Compress(state, block, fpsapCycleMutation)
-		if offset == len(padded)-64 {
+		if blockOffset == len(padded)-64 {
 			firstFinal = state
 			state = fairplayMD5Compress(state, block, fpsapCycleMutation)
 		}
@@ -163,9 +190,11 @@ func fpsapMix(tables *fpsapNetworkTables, state *[16]byte, substituted [16]byte)
 	}
 }
 
-func fpsapExchangeStandalone(payload [128]byte) [20]byte {
-	dynamicSAP := fpsapDynamicSAP(payload)
-	seed := fpsapDescriptor(dynamicSAP)
+func fpsapExchangeForSAP(m3SAP, m2SAP [128]byte) [20]byte {
+	return fpsapExchangeSeed(fpsapDescriptorForSAP(m3SAP, m2SAP))
+}
+
+func fpsapExchangeSeed(seed [20]byte) [20]byte {
 	masks := fpsapMasks(seed)
 	intermediate := fpsapFirstNetwork(masks)
 	left := fpsapDigest32(intermediate, fpsapFixedBlock)
@@ -178,15 +207,87 @@ func fpsapExchangeStandalone(payload [128]byte) [20]byte {
 	return out
 }
 
-func fpsapExchangeM3(m2 []byte) ([]byte, error) {
-	if len(m2) < 142 {
-		return nil, fmt.Errorf("m2 too short: got %d bytes, need at least 142", len(m2))
+func (session *fpsapSession) exchangeM3(m2 []byte) ([]byte, error) {
+	if err := validateFPSAPRecord(m2, 2, 130); err != nil {
+		return nil, fmt.Errorf("invalid m2: %w", err)
 	}
-	var payload [128]byte
-	copy(payload[:], m2[14:142])
-	hash := fpsapExchangeStandalone(payload)
-	out := make([]byte, 0, len(fpsapM3Prefix)+len(hash))
-	out = append(out, fpsapM3Prefix...)
-	out = append(out, hash[:]...)
-	return out, nil
+	if m2[12] != 2 {
+		return nil, fmt.Errorf("invalid m2 payload marker %d", m2[12])
+	}
+	mode := m2[13]
+	if int(mode) >= len(fairplayMessageIV) {
+		return nil, fmt.Errorf("m2 selected unsupported mode %d", mode)
+	}
+
+	m3 := newFPSAPRecord(3, 152)
+	m3[12] = mode
+	copy(m3[13:16], fpsapM3Label[:])
+	if err := encryptFairPlayMessage(mode, session.localSAP[:], m3[16:144]); err != nil {
+		return nil, fmt.Errorf("encrypt m3 SAP: %w", err)
+	}
+
+	var m2Ciphertext [128]byte
+	copy(m2Ciphertext[:], m2[14:142])
+	m2SAP, err := decryptFPSAPBody(mode, m2Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt m2 SAP: %w", err)
+	}
+	tail := fpsapExchangeForSAP(session.localSAP, m2SAP)
+	copy(m3[144:], tail[:])
+	session.remoteSAP = m2SAP
+	copy(session.m3[:], m3)
+	session.hasM3 = true
+	return append([]byte(nil), m3...), nil
+}
+
+func (session *fpsapSession) confirmM4(m4 []byte) error {
+	if !session.hasM3 {
+		return fmt.Errorf("m3 has not been generated")
+	}
+	return validateFPSAPM4(m4, session.m3[:])
+}
+
+func (session *fpsapSession) wrapKey(rawKey [16]byte, entropy io.Reader) ([72]byte, error) {
+	if !session.hasM3 {
+		return [72]byte{}, fmt.Errorf("m3 has not been generated")
+	}
+	return wrapFairPlayKey(session.remoteSAP, session.m3[:], rawKey, entropy)
+}
+
+func validateFPSAPM4(m4, m3 []byte) error {
+	if err := validateFPSAPRecord(m4, 4, 20); err != nil {
+		return err
+	}
+	if len(m3) != 164 {
+		return fmt.Errorf("invalid m3 length %d", len(m3))
+	}
+	if !bytes.Equal(m4[12:], m3[144:]) {
+		return fmt.Errorf("m4 confirmation does not match m3")
+	}
+	return nil
+}
+
+func validateFPSAPRecord(record []byte, messageType byte, payloadLength int) error {
+	wantLength := 12 + payloadLength
+	if len(record) != wantLength {
+		return fmt.Errorf("length %d, want %d", len(record), wantLength)
+	}
+	if !bytes.Equal(record[:4], []byte("FPLY")) {
+		return fmt.Errorf("invalid magic %x", record[:4])
+	}
+	if record[4] != 3 || record[5] != 1 || record[6] != messageType || record[7] != 0 {
+		return fmt.Errorf("invalid version/type %x", record[4:8])
+	}
+	if got := int(binary.BigEndian.Uint32(record[8:12])); got != payloadLength {
+		return fmt.Errorf("declared payload length %d, want %d", got, payloadLength)
+	}
+	return nil
+}
+
+func newFPSAPRecord(messageType byte, payloadLength int) []byte {
+	record := make([]byte, 12+payloadLength)
+	copy(record[:4], "FPLY")
+	copy(record[4:8], []byte{3, 1, messageType, 0})
+	binary.BigEndian.PutUint32(record[8:12], uint32(payloadLength))
+	return record
 }

@@ -9,9 +9,6 @@ import (
 	"fmt"
 )
 
-// fairPlayM1 is the fixed first message in the FairPlay SAP exchange.
-var fairPlayM1 = mustDecodeHexFP("46504c590301010000000004020003bb")
-
 var ErrFairPlayUnsupported = errors.New("receiver does not support FairPlay SAP")
 
 func mustDecodeHexFP(s string) []byte {
@@ -30,9 +27,16 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 
 	dbg("[FP] starting FairPlay SAP handshake...")
 
+	// Apple's sender creates one opaque FPSAP context before m1 and retains it
+	// for m3 and encrypted-key creation. Keep the equivalent state together for
+	// the lifetime of this authentication attempt.
+	fpsap, err := newFPSAPSession(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("initialize FPSAP session: %w", err)
+	}
+
 	// Phase 1: Send m1, receive m2
-	m1 := make([]byte, len(fairPlayM1))
-	copy(m1, fairPlayM1)
+	m1 := fpsap.message1()
 
 	dbg("[FP] posting m1 (%d bytes) to /fp-setup", len(m1))
 	m2, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m1,
@@ -45,14 +49,11 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 		return fmt.Errorf("fp-setup phase 1 (m1): %w", err)
 	}
 
-	if len(m2) < 12 {
-		return fmt.Errorf("m2 response too short: %d bytes", len(m2))
-	}
 	dbg("[FP] received m2 (%d bytes)", len(m2))
 	dbg("[FP] m2 first 32: %02x", m2[:min(32, len(m2))])
 
 	// Phase 2: Compute m3 and send it to the receiver.
-	m3, err := fpsapExchangeM3(m2)
+	m3, err := fpsap.exchangeM3(m2)
 	if err != nil {
 		return fmt.Errorf("FPSAPExchange: %w", err)
 	}
@@ -70,13 +71,11 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 		return fmt.Errorf("fp-setup phase 2 (m3): %w", err)
 	}
 
-	if len(m4) < 12 {
-		return fmt.Errorf("m4 response too short: %d bytes", len(m4))
+	if err := fpsap.confirmM4(m4); err != nil {
+		return fmt.Errorf("FPSAP m4: %w", err)
 	}
 	dbg("[FP] received m4 (%d bytes)", len(m4))
-
-	m4Payload := fplyUnwrap(m4)
-	dbg("[FP] m4 payload (%d bytes): %02x", len(m4Payload), m4Payload)
+	dbg("[FP] m4 payload (%d bytes): %02x", len(m4)-12, m4[12:])
 
 	// Generate and store IV for stream encryption
 	var iv [16]byte
@@ -89,17 +88,24 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	c.fpM3 = make([]byte, len(m3))
 	copy(c.fpM3, m3)
 
-	// Build ekey and derive audio encryption key.
-	// Both sender and receiver call unwrapFairPlayKey(m3, ekey) with the same
-	// inputs (m3 sent during FP handshake, ekey sent in SETUP body).
-	ekey := buildEkey()
+	// Generate the raw audio key and wrap it in the FairPlay ekey record. Apple's
+	// sender API accepts the raw key as input; the receiver performs the inverse
+	// operation using the state established by m3.
+	var fpAesKey [16]byte
+	if _, err := rand.Read(fpAesKey[:]); err != nil {
+		return fmt.Errorf("generate FairPlay audio key: %w", err)
+	}
+	ekey, err := fpsap.wrapKey(fpAesKey, rand.Reader)
+	if err != nil {
+		return fmt.Errorf("wrap FairPlay audio key: %w", err)
+	}
 	c.FpEkey = ekey[:]
 	dbg("[FP] ekey chunk1 [16:32]: %02x", ekey[16:32])
+	dbg("[FP] ekey key length [32:36]: %d", 16)
 	dbg("[FP] ekey chunk2 [56:72]: %02x", ekey[56:72])
 
-	fpAesKey := unwrapFairPlayKey(c.fpM3, ekey[:])
 	c.fpAesKey = fpAesKey[:]
-	dbg("[FP] unwrapFairPlayKey fpAesKey: %02x", fpAesKey[:])
+	dbg("[FP] wrapped fpAesKey: %02x", fpAesKey[:])
 	dbg("[FP] m3 first 32 bytes: %02x", c.fpM3[:min(32, len(c.fpM3))])
 
 	// Hash with pair-verify shared secret (ECDH X25519) if available.
@@ -123,46 +129,6 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] stream IV:      %02x", iv[:])
 
 	return nil
-}
-
-// buildEkey constructs a 72-byte ekey with the FPLY header format.
-// The chunk data is randomized per session so that unwrapFairPlayKey produces
-// a unique AES key for each session. Both sender and receiver compute the
-// same key from the same (m3, ekey) inputs.
-//
-// Format (72 bytes):
-//
-//	[0:4]   "FPLY"
-//	[4:8]   01 02 01 00
-//	[8:12]  00 00 00 3c  (0x3c = 60 = remaining bytes)
-//	[12:16] 00 00 00 00  (padding)
-//	[16:32] chunk1 (16 bytes, random)
-//	[32:56] padding (24 bytes, zeros)
-//	[56:72] chunk2 (16 bytes, random)
-func buildEkey() [72]byte {
-	var ekey [72]byte
-	copy(ekey[0:4], []byte("FPLY"))
-	ekey[4] = 0x01
-	ekey[5] = 0x02
-	ekey[6] = 0x01
-	ekey[7] = 0x00
-	ekey[8] = 0x00
-	ekey[9] = 0x00
-	ekey[10] = 0x00
-	ekey[11] = 0x3c
-	// Fill chunk1 [16:32] and chunk2 [56:72] with random data
-	rand.Read(ekey[16:32])
-	rand.Read(ekey[56:72])
-	return ekey
-}
-
-// fplyUnwrap strips the FPLY framing header and returns the payload.
-// If the data doesn't have FPLY framing, it's returned as-is.
-func fplyUnwrap(data []byte) []byte {
-	if len(data) >= 12 && string(data[:4]) == "FPLY" {
-		return data[12:]
-	}
-	return data
 }
 
 // deriveStreamKeys derives AES stream encryption keys from the pair-verify shared secret.
