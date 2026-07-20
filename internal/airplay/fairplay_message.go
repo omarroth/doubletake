@@ -1,5 +1,7 @@
 package airplay
 
+import "fmt"
+
 // FairPlay message encryption uses the standard inverse AES round operations,
 // but its four modes have custom middle round keys rather than AES key
 // schedules. crypto/aes therefore cannot represent this block transform.
@@ -44,6 +46,48 @@ func decryptFairPlayMessageBlock(state *[16]byte, mode byte) {
 	xorAESRoundKey(state, &fairplayMessageRoundKey0)
 }
 
+// encryptFairPlayMessage applies the inverse of decryptFairPlayMessage to one
+// 128-byte SAP value. The encrypted output is the body stored at bytes 16:144
+// of an FPLY message.
+func encryptFairPlayMessage(mode byte, plaintext, encrypted []byte) error {
+	if int(mode) >= len(fairplayMessageIV) {
+		return fmt.Errorf("unsupported FairPlay mode %d", mode)
+	}
+	if len(plaintext) != 128 || len(encrypted) != 128 {
+		return fmt.Errorf("FairPlay message body lengths are %d and %d, want 128", len(plaintext), len(encrypted))
+	}
+
+	chain := fairplayMessageIV[mode][:]
+	for block := 0; block < 8; block++ {
+		start := block * 16
+		var state [16]byte
+		for i := range state {
+			state[i] = plaintext[start+i] ^ chain[i]
+		}
+		encryptFairPlayMessageBlock(&state, mode)
+		copy(encrypted[start:start+16], state[:])
+		chain = encrypted[start : start+16]
+	}
+	return nil
+}
+
+func encryptFairPlayMessageBlock(state *[16]byte, mode byte) {
+	xorAESRoundKey(state, &fairplayMessageRoundKey0)
+	for i := range state {
+		state[i] = forwardAESSBox[state[i]]
+	}
+	aesShiftRows(state)
+	for round := 0; round < 9; round++ {
+		aesMixColumns(state)
+		xorAESRoundKey(state, &fairplayMessageMiddleKeys[mode][round])
+		for i := range state {
+			state[i] = forwardAESSBox[state[i]]
+		}
+		aesShiftRows(state)
+	}
+	xorAESRoundKey(state, &fairplayMessageRoundKey10)
+}
+
 func xorAESRoundKey(state, key *[16]byte) {
 	for i := range state {
 		state[i] ^= key[i]
@@ -59,6 +103,15 @@ func inverseAESShiftRows(state *[16]byte) {
 	}
 }
 
+func aesShiftRows(state *[16]byte) {
+	previous := *state
+	for row := 0; row < 4; row++ {
+		for column := 0; column < 4; column++ {
+			state[4*column+row] = previous[4*((column+row)&3)+row]
+		}
+	}
+}
+
 func inverseAESMixColumns(state *[16]byte) {
 	for column := 0; column < 4; column++ {
 		offset := column * 4
@@ -67,6 +120,17 @@ func inverseAESMixColumns(state *[16]byte) {
 		state[offset+1] = aesGFMultiply(a, 9) ^ aesGFMultiply(b, 14) ^ aesGFMultiply(c, 11) ^ aesGFMultiply(d, 13)
 		state[offset+2] = aesGFMultiply(a, 13) ^ aesGFMultiply(b, 9) ^ aesGFMultiply(c, 14) ^ aesGFMultiply(d, 11)
 		state[offset+3] = aesGFMultiply(a, 11) ^ aesGFMultiply(b, 13) ^ aesGFMultiply(c, 9) ^ aesGFMultiply(d, 14)
+	}
+}
+
+func aesMixColumns(state *[16]byte) {
+	for column := 0; column < 4; column++ {
+		offset := column * 4
+		a, b, c, d := state[offset], state[offset+1], state[offset+2], state[offset+3]
+		state[offset] = aesGFMultiply(a, 2) ^ aesGFMultiply(b, 3) ^ c ^ d
+		state[offset+1] = a ^ aesGFMultiply(b, 2) ^ aesGFMultiply(c, 3) ^ d
+		state[offset+2] = a ^ b ^ aesGFMultiply(c, 2) ^ aesGFMultiply(d, 3)
+		state[offset+3] = aesGFMultiply(a, 3) ^ b ^ c ^ aesGFMultiply(d, 2)
 	}
 }
 
@@ -166,3 +230,10 @@ var inverseAESSBox = [256]byte{
 	0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
 	0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
 }
+
+var forwardAESSBox = func() (table [256]byte) {
+	for encrypted, plaintext := range inverseAESSBox {
+		table[plaintext] = byte(encrypted)
+	}
+	return table
+}()

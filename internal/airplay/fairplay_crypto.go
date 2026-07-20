@@ -2,7 +2,11 @@ package airplay
 
 import (
 	"crypto/aes"
+	"crypto/hmac"
+	"crypto/sha1"
 	"encoding/binary"
+	"fmt"
+	"io"
 )
 
 var fairplayInitialSessionKey = [16]byte{
@@ -20,19 +24,7 @@ var fairplayKDFSuffix = [17]byte{
 	0x97, 0xae, 0x70, 0xfb, 0xe0, 0x00, 0x3f, 0x1c, 0x39,
 }
 
-// Only the second 128 bytes of the fixed SAP record participate in the KDF.
-var fairplayDefaultSAPTail = [128]byte{
-	0x00, 0x01, 0xcc, 0x34, 0x2a, 0x5e, 0x5b, 0x1a, 0x67, 0x73, 0xc2, 0x0e, 0x21, 0xb8, 0x22, 0x4d,
-	0xf8, 0x62, 0x48, 0x18, 0x64, 0xef, 0x81, 0x0a, 0xae, 0x2e, 0x37, 0x03, 0xc8, 0x81, 0x9c, 0x23,
-	0x53, 0x9d, 0xe5, 0xf5, 0xd7, 0x49, 0xbc, 0x5b, 0x7a, 0x26, 0x6c, 0x49, 0x62, 0x83, 0xce, 0x7f,
-	0x03, 0x93, 0x7a, 0xe1, 0xf6, 0x16, 0xde, 0x0c, 0x15, 0xff, 0x33, 0x8c, 0xca, 0xff, 0xb0, 0x9e,
-	0xaa, 0xbb, 0xe4, 0x0f, 0x5d, 0x5f, 0x55, 0x8f, 0xb9, 0x7f, 0x17, 0x31, 0xf8, 0xf7, 0xda, 0x60,
-	0xa0, 0xec, 0x65, 0x79, 0xc3, 0x3e, 0xa9, 0x83, 0x12, 0xc3, 0xb6, 0x71, 0x35, 0xa6, 0x69, 0x4f,
-	0xf8, 0x23, 0x05, 0xd9, 0xba, 0x5c, 0x61, 0x5f, 0xa2, 0x54, 0xd2, 0xb1, 0x83, 0x45, 0x83, 0xce,
-	0xe4, 0x2d, 0x44, 0x26, 0xc8, 0x35, 0xa7, 0xa5, 0xf6, 0xc8, 0x42, 0x1c, 0x0d, 0xa3, 0xf1, 0xc7,
-}
-
-func deriveFairPlayWrappingKey(sapTail []byte, message []byte) [16]byte {
+func deriveFairPlayWrappingKey(receiverSAP [128]byte, message []byte) [16]byte {
 	var decrypted [128]byte
 	decryptFairPlayMessage(message, decrypted[:])
 
@@ -42,7 +34,7 @@ func deriveFairPlayWrappingKey(sapTail []byte, message []byte) [16]byte {
 	var material [320]byte
 	offset := copy(material[:], fairplayKDFPrefix[:])
 	offset += copy(material[offset:], decrypted[:])
-	offset += copy(material[offset:], sapTail[:128])
+	offset += copy(material[offset:], receiverSAP[:])
 	offset += copy(material[offset:], fairplayKDFSuffix[:])
 	material[offset] = 0x80
 	binary.LittleEndian.PutUint64(material[len(material)-8:], uint64(offset)*8)
@@ -59,17 +51,54 @@ func deriveFairPlayWrappingKey(sapTail []byte, message []byte) [16]byte {
 	return fairplayWordsBigEndian(state)
 }
 
-func unwrapFairPlayKey(m3 []byte, ekey []byte) [16]byte {
-	aesKey := deriveFairPlayWrappingKey(fairplayDefaultSAPTail[:], m3)
-	cipher, err := aes.NewCipher(aesKey[:])
-	if err != nil {
-		panic(err) // aesKey always has the fixed AES-128 length.
+// wrapFairPlayKey emits the 72-byte AirPlay v3 record produced by Apple's
+// FairPlay sender:
+//
+//	[0:16]  FPLY encrypted-key header
+//	[16:32] per-key random mask
+//	[32:36] big-endian raw-key length (16)
+//	[36:56] HMAC-SHA1(session MAC key, record[0:36] || raw key)
+//	[56:72] AES-wrapped (raw key XOR mask)
+//
+// Both session keys depend on the receiver's decrypted m2 SAP. Reusing a
+// captured receiver SAP makes the record self-consistent only for that capture.
+// The native sender obtains the mask from its session PRNG; accepting an entropy
+// source here preserves the wire semantics without reproducing that PRNG.
+func wrapFairPlayKey(receiverSAP [128]byte, m3 []byte, rawKey [16]byte, entropy io.Reader) ([72]byte, error) {
+	var ekey [72]byte
+	if err := validateFPSAPRecord(m3, 3, 152); err != nil {
+		return ekey, fmt.Errorf("invalid m3: %w", err)
+	}
+	if mode := m3[12]; int(mode) >= len(fairplayMessageIV) {
+		return ekey, fmt.Errorf("unsupported FairPlay mode %d", mode)
 	}
 
-	var keyOut [16]byte
-	cipher.Decrypt(keyOut[:], ekey[56:72])
-	for i := range keyOut {
-		keyOut[i] ^= ekey[16+i]
+	copy(ekey[:], []byte{
+		'F', 'P', 'L', 'Y', 0x01, 0x02, 0x01, 0x00,
+		0x00, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x00,
+	})
+	if _, err := io.ReadFull(entropy, ekey[16:32]); err != nil {
+		return [72]byte{}, fmt.Errorf("generate FairPlay key mask: %w", err)
 	}
-	return keyOut
+	binary.BigEndian.PutUint32(ekey[32:36], uint32(len(rawKey)))
+
+	wrappingKey := deriveFairPlayWrappingKey(receiverSAP, m3)
+	cipher, err := aes.NewCipher(wrappingKey[:])
+	if err != nil {
+		return [72]byte{}, fmt.Errorf("create FairPlay wrapping cipher: %w", err)
+	}
+	var masked [16]byte
+	for i := range masked {
+		masked[i] = rawKey[i] ^ ekey[16+i]
+	}
+	cipher.Encrypt(ekey[56:72], masked[:])
+
+	var senderSAP [128]byte
+	decryptFairPlayMessage(m3, senderSAP[:])
+	macKey := fpsapDescriptorForSAP(senderSAP, receiverSAP)
+	mac := hmac.New(sha1.New, macKey[:])
+	_, _ = mac.Write(ekey[:36])
+	_, _ = mac.Write(rawKey[:])
+	copy(ekey[36:56], mac.Sum(nil))
+	return ekey, nil
 }
