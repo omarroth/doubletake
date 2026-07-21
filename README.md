@@ -47,6 +47,8 @@ You can also install from the AUR:
 
 These are devices that have been tested with doubletake. If there are devices not listed here that you have confirmed working or non-functional, please open an issue.
 
+- AppleTV3,2 (2013 3rd generation) (currently non-functional, see [#17](https://github.com/omarroth/doubletake/issues/17))
+- AppleTV11,1 (4K, 2021 2nd gen)
 - AppleTV14,1 (4K, 2022 3rd gen) + Homepod (1st gen)
 - Mac17,2 (MacBook Pro, M5 14")
 - Mac16,10 (Mac mini, M4)
