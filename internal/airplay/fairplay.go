@@ -108,17 +108,11 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 	dbg("[FP] wrapped fpAesKey: %02x", fpAesKey[:])
 	dbg("[FP] m3 first 32 bytes: %02x", c.fpM3[:min(32, len(c.fpM3))])
 
-	// Hash with pair-verify shared secret (ECDH X25519) if available.
-	// The receiver does: SHA-512(fairplay_decrypt(ekey) || ecdh_secret)[:16]
-	finalKey := c.fpAesKey
-	if c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0 {
-		h := sha512.New()
-		h.Write(c.fpAesKey)
-		h.Write(c.PairKeys.SharedSecret)
-		finalKey = h.Sum(nil)[:16]
-		dbg("[FP] hashed with SharedSecret (%d bytes)", len(c.PairKeys.SharedSecret))
+	finalKey := deriveStreamMasterKey(c.fpAesKey, sharedSecret(c.PairKeys), c.encrypted)
+	if c.encrypted && len(sharedSecret(c.PairKeys)) > 0 {
+		dbg("[FP] hashed with SharedSecret (%d bytes)", len(sharedSecret(c.PairKeys)))
 	} else {
-		dbg("[FP] using raw fpAesKey (no SharedSecret available)")
+		dbg("[FP] using raw fpAesKey (legacy receiver or no SharedSecret)")
 	}
 
 	c.fpKey = finalKey
@@ -153,4 +147,38 @@ func (c *AirPlayClient) deriveStreamKeys() error {
 	copy(c.streamIV, c.encReadKey)
 
 	return nil
+}
+
+// sharedSecret returns the pair-verify X25519 secret, or nil.
+func sharedSecret(keys *PairKeys) []byte {
+	if keys == nil {
+		return nil
+	}
+	return keys.SharedSecret
+}
+
+// deriveStreamMasterKey returns the key the receiver will decrypt the stream
+// with, given the raw FairPlay key that ekey wraps.
+//
+// A HAP-paired receiver mixes the pair-verify secret in:
+//
+//	SHA-512(fairplay_decrypt(ekey) || ecdh_secret)[:16]
+//
+// A legacy receiver does not. ekey wraps the raw key, and that is the only key
+// material a legacy receiver ever sees, so it decrypts with that key directly.
+//
+// hapEncrypted is the discriminator, not the presence of a secret: rawPairVerify
+// stores a shared secret even though it deliberately leaves the channel
+// unencrypted, so keying off the secret alone mixed it in on the legacy path
+// too. The sender then encrypted with SHA-512(key || secret) while the receiver
+// decrypted with the raw key -- RTSP setup succeeded and the picture stayed
+// black. See issue #17.
+func deriveStreamMasterKey(rawKey, secret []byte, hapEncrypted bool) []byte {
+	if !hapEncrypted || len(secret) == 0 {
+		return rawKey
+	}
+	h := sha512.New()
+	h.Write(rawKey)
+	h.Write(secret)
+	return h.Sum(nil)[:16]
 }
