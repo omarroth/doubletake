@@ -352,6 +352,9 @@ func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, map[string]string, 
 	dbg("[READ] plaintext response header:\n%s", header)
 	statusCode, contentLength, headers := parseHTTPHeader(header)
 	dbg("[READ] status=%d content-length=%d", statusCode, contentLength)
+	if err := validateContentLength(contentLength); err != nil {
+		return nil, headers, err
+	}
 
 	if statusCode < 200 || statusCode >= 300 {
 		// Drain body if present
@@ -695,4 +698,24 @@ func (mc *mirrorCipher) EncryptFrame(payload []byte) []byte {
 	}
 
 	return out
+}
+
+// maxResponseBody bounds what a receiver can make the sender allocate from a
+// Content-Length header. Control-channel bodies here are small plists; this is
+// far above anything legitimate and far below anything that would exhaust
+// memory.
+const maxResponseBody = 8 << 20
+
+// validateContentLength rejects a Content-Length the sender cannot safely act
+// on. A negative value is the important one: it reaches make([]byte, n) and
+// panics with "makeslice: len out of range", so a receiver answering
+// "Content-Length: -1" crashes the sender outright.
+func validateContentLength(n int) error {
+	if n < 0 {
+		return fmt.Errorf("invalid negative Content-Length %d", n)
+	}
+	if n > maxResponseBody {
+		return fmt.Errorf("Content-Length %d exceeds the %d byte limit", n, maxResponseBody)
+	}
+	return nil
 }
