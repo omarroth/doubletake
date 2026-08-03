@@ -8,8 +8,10 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -110,6 +112,15 @@ type AirPlayClient struct {
 	// Stream encryption key (from FP or pair-verify)
 	streamKey []byte
 	streamIV  []byte
+
+	// HTTP Digest credentials, used only when the receiver has "Require
+	// Password" enabled and challenges a request with 401. Separate from
+	// pairing: pair-setup authenticates the client identity, this
+	// authenticates individual requests.
+	authPassword string
+	// Most recent Digest challenge seen on this connection. Cached so later
+	// requests can authenticate up front instead of relying on a retry.
+	authChallenge *digestChallenge
 }
 
 func NewAirPlayClient(host string, port int) *AirPlayClient {
@@ -119,6 +130,88 @@ func NewAirPlayClient(host string, port int) *AirPlayClient {
 		sessionID: generateUUID(),
 		PairingID: generateUUID(),
 	}
+}
+
+// SetPassword configures the password used to answer HTTP Digest challenges
+// from receivers with "Require Password" enabled. An empty password leaves
+// authentication disabled and 401s surface to the caller unchanged.
+func (c *AirPlayClient) SetPassword(password string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authPassword = password
+}
+
+// digestRetryHeader returns an Authorization header value when err is a 401
+// carrying a Digest challenge we hold credentials for. Callers retry at most
+// once: if the authenticated request is rejected too, that error surfaces
+// rather than looping.
+//
+// Must be called with c.mu held.
+func (c *AirPlayClient) digestRetryHeader(method, uri string, respHeaders map[string]string, err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != 401 {
+		return "", false
+	}
+
+	// Indexing a nil map is fine; a 401 without the header just means we
+	// cannot answer it.
+	ch, ok := parseDigestChallenge(respHeaders["www-authenticate"])
+	if !ok {
+		log.Printf("warning: %s %s was rejected with 401 but sent no Digest challenge to answer", method, uri)
+		return "", false
+	}
+	// Cache it even when we cannot answer right now, so the rest of the session
+	// authenticates up front: a receiver that challenges one request challenges
+	// them all, and a mirroring session issues around two dozen.
+	c.authChallenge = ch
+
+	// Say so loudly rather than letting an opaque 401 surface: a challenge we
+	// have no password for is the single most likely reason mirroring fails
+	// against a receiver with "Require Password" enabled.
+	if c.authPassword == "" {
+		log.Printf("%s %s needs a code: the receiver sent a Digest challenge (realm=%q)", method, uri, ch.Realm)
+		log.Printf("  set $DOUBLETAKE_CODE (or -code) to the password configured on the receiver")
+		return "", false
+	}
+
+	return authorizationHeader(DigestUsername, c.authPassword, ch, method, uri), true
+}
+
+// preemptiveAuthHeader returns an Authorization header built from the cached
+// challenge, so a request that already knows it will be challenged answers up
+// front rather than being sent twice.
+//
+// Must be called with c.mu held.
+func (c *AirPlayClient) preemptiveAuthHeader(method, uri string) (string, bool) {
+	if c.authPassword == "" || c.authChallenge == nil {
+		return "", false
+	}
+	return authorizationHeader(DigestUsername, c.authPassword, c.authChallenge, method, uri), true
+}
+
+// logIfAuthRejected reports a second 401 distinctly from the first. Reaching
+// here means a password was sent and refused -- a different problem from
+// having none at all.
+func (c *AirPlayClient) logIfAuthRejected(method, uri string, err error) {
+	var statusErr *HTTPStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == 401 {
+		log.Printf("%s %s: receiver rejected the code (Digest username %q)", method, uri, DigestUsername)
+	}
+}
+
+// withHeader returns a copy of hdrs with key set. Call sites reuse their header
+// maps across requests, so mutating the original would leak a stale nonce into
+// later ones.
+func withHeader(hdrs map[string]string, key, value string) map[string]string {
+	out := make(map[string]string, len(hdrs)+1)
+	for k, v := range hdrs {
+		out[k] = v
+	}
+	out[key] = value
+	return out
 }
 
 func (c *AirPlayClient) Connect(ctx context.Context) error {
@@ -195,6 +288,22 @@ func (c *AirPlayClient) httpRequest(method, path, contentType string, body []byt
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if authHdr, ok := c.preemptiveAuthHeader(method, path); ok {
+		dbg("[HTTP] authenticating %s %s up front from the cached challenge", method, path)
+		extraHeaders = append(append([]map[string]string{}, extraHeaders...), map[string]string{"Authorization": authHdr})
+	}
+
+	respBody, respHeaders, err := c.httpRequestOnce(method, path, contentType, body, extraHeaders...)
+	if authHdr, ok := c.digestRetryHeader(method, path, respHeaders, err); ok {
+		dbg("[HTTP] 401 digest challenge on %s %s, retrying with credentials", method, path)
+		retry := append(append([]map[string]string{}, extraHeaders...), map[string]string{"Authorization": authHdr})
+		respBody, _, err = c.httpRequestOnce(method, path, contentType, body, retry...)
+		c.logIfAuthRejected(method, path, err)
+	}
+	return respBody, err
+}
+
+func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body []byte, extraHeaders ...map[string]string) ([]byte, map[string]string, error) {
 	seq := c.cseq.Add(1)
 
 	var buf bytes.Buffer
@@ -223,15 +332,11 @@ func (c *AirPlayClient) httpRequest(method, path, contentType string, body []byt
 	}
 
 	if _, err := c.conn.Write(data); err != nil {
-		return nil, fmt.Errorf("write request: %w", err)
+		return nil, nil, fmt.Errorf("write request: %w", err)
 	}
 	dbg("[HTTP] wrote %d bytes to socket, waiting for response...", len(data))
 
-	resp, _, err := c.readHTTPResponse()
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
+	return c.readHTTPResponse()
 }
 
 // rawRequest sends a bare RTSP/1.0 request without X-Apple-Session-ID or HAP
@@ -276,6 +381,21 @@ func (c *AirPlayClient) rtspRequest(method, uri, contentType string, body []byte
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if authHdr, ok := c.preemptiveAuthHeader(method, uri); ok {
+		dbg("[RTSP] authenticating %s %s up front from the cached challenge", method, uri)
+		extraHeaders = withHeader(extraHeaders, "Authorization", authHdr)
+	}
+
+	respBody, respHeaders, err := c.rtspRequestOnce(method, uri, contentType, body, extraHeaders)
+	if authHdr, ok := c.digestRetryHeader(method, uri, respHeaders, err); ok {
+		dbg("[RTSP] 401 digest challenge on %s %s, retrying with credentials", method, uri)
+		respBody, respHeaders, err = c.rtspRequestOnce(method, uri, contentType, body, withHeader(extraHeaders, "Authorization", authHdr))
+		c.logIfAuthRejected(method, uri, err)
+	}
+	return respBody, respHeaders, err
+}
+
+func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []byte, extraHeaders map[string]string) ([]byte, map[string]string, error) {
 	seq := c.cseq.Add(1)
 
 	var buf bytes.Buffer
@@ -310,7 +430,10 @@ func (c *AirPlayClient) rtspRequest(method, uri, contentType string, body []byte
 
 	respBody, respHeaders, err := c.readHTTPResponse()
 	if err != nil {
-		return nil, nil, err
+		// Return the headers even on failure: a 401 carries its
+		// WWW-Authenticate challenge there, and dropping them makes an
+		// answerable challenge look like an unanswerable one.
+		return nil, respHeaders, err
 	}
 
 	dbg("[RTSP] <- response body %d bytes", len(respBody))

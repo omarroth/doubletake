@@ -119,6 +119,34 @@ sudo ufw allow from any proto tcp to any port 60000:60010
 For nftables/firewalld, add equivalent rules allowing inbound UDP and TCP from
 the Apple TV's address on the chosen range.
 
+## Password-protected receivers
+
+If the receiver has **Require Password** enabled (on an Apple TV: Settings →
+AirPlay and HomeKit), it challenges the mirroring `SETUP` request with HTTP
+Digest auth and mirroring fails with `HTTP 401` until doubletake answers it.
+Pass the password with `-code`:
+
+```sh
+DOUBLETAKE_CODE='...' doubletake -target 192.168.1.77
+```
+
+`-code` carries whatever the receiver is asking for — the onscreen pairing PIN
+during `-pair`, or the fixed password when "Require Password" is enabled.
+`$DOUBLETAKE_CODE` is preferred over the flag: a command line is visible to
+other users via `ps` and lands in shell history. The environment variable takes
+precedence when both are set.
+
+Note that this is separate from pairing. Pairing (`-pair`) authenticates the
+client identity via SRP and saves credentials; the password authenticates
+individual RTSP requests. A receiver may require either, both, or neither.
+Supplying `-code` does not by itself trigger re-pairing.
+
+One thing that makes this confusing to diagnose: **"Require Password" is a
+fixed password you set, not a rotating onscreen code.** Nothing appears on the
+TV during `-pair`, and the prompt is asking for that configured password.
+
+Run with `-debug` to see the challenge and whether the retry was accepted.
+
 ## Usage
 
 ```sh
@@ -168,7 +196,7 @@ doubletake-ctl disconnect
 |------|---------|-------------|
 | `-target` | | Apple TV IP (skip mDNS discovery) |
 | `-port` | 7000 | AirPlay port |
-| `-pin` | | 4-digit PIN for pairing |
+| `-code` | | Pairing PIN shown on the receiver, or its configured password when "Require Password" is enabled (see [Password-protected receivers](#password-protected-receivers)); prefer `$DOUBLETAKE_CODE` |
 | `-cred-backend` | `file` | Credential backend (`file` or `keyring`) |
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
 | `-pair` | false | Force new pairing |
