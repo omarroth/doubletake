@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -252,6 +254,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	}
 
 	dbg("[SETUP] phase 1 (audio+session): ct=%d spf=%d audioFormat=0x%x controlPort=%d", audioCT, audioSPF, audioFmt, audioControlLPort)
+
+	debugDumpPlist("audio setup plist", audioSetupPlist)
+	debugDumpPlist("audio stream descriptor", audioStreamDesc)
 
 	audioSetupBody, err2 := plist.Marshal(audioSetupPlist, plist.BinaryFormat)
 	if err2 != nil {
@@ -1884,4 +1889,37 @@ func generateUUID() string {
 	b[8] = (b[8] & 0x3f) | 0x80 // Variant 10
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// debugDumpPlist logs a plist map in a stable key order, summarising byte
+// slices by length and hex prefix. Lets the whole SETUP descriptor be diffed
+// between receiver configurations that accept it and ones that reject it.
+func debugDumpPlist(label string, m map[string]interface{}) {
+	if !DebugMode {
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	dbg("[SETUP] %s (%d keys):", label, len(keys))
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case []byte:
+			dbg("[SETUP]   %s = <%d bytes> %s", k, len(v), hex.EncodeToString(v[:min(len(v), 16)]))
+		case map[string]interface{}:
+			inner := make([]string, 0, len(v))
+			for ik := range v {
+				inner = append(inner, ik)
+			}
+			sort.Strings(inner)
+			dbg("[SETUP]   %s = map%v", k, inner)
+		case []interface{}:
+			dbg("[SETUP]   %s = list of %d", k, len(v))
+		default:
+			dbg("[SETUP]   %s = %v", k, v)
+		}
+	}
 }
