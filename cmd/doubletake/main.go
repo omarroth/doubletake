@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -58,7 +59,7 @@ func parsePortRange(s string) (int, int, error) {
 func main() {
 	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
-	pin := flag.String("pin", "", "4-digit PIN for pairing (shown on Apple TV)")
+	pin := flag.String("pin", "", "Pairing PIN or password (an onscreen code, or the password set on the receiver)")
 	credFile := flag.String("creds", airplay.DefaultCredentialsPath(), "Path to saved pairing credentials")
 	credBackend := flag.String("cred-backend", "file", "Credential storage backend: file or keyring (system keyring via Secret Service)")
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
@@ -159,12 +160,7 @@ func main() {
 		// Full pair-setup with PIN
 		pinVal := *pin
 		if pinVal == "" {
-			// Trigger PIN display on the TV first, then ask user
-			if err := client.StartPINDisplay(); err != nil {
-				log.Fatalf("failed to trigger PIN display: %v", err)
-			}
-			fmt.Print("Enter the PIN shown on Apple TV: ")
-			fmt.Scanln(&pinVal)
+			pinVal = promptForPIN(client)
 		}
 		if err := client.Pair(ctx, pinVal); err != nil {
 			log.Fatalf("pairing failed: %v", err)
@@ -349,14 +345,23 @@ func main() {
 	log.Println("stream ended")
 }
 
+// promptForPIN asks the receiver to display a pairing code and reads the user's
+// answer. Receivers configured with a fixed password rather than an onscreen
+// code show nothing at all -- that is not an error, the user simply types the
+// password they set, so a failed pair-pin-start is only a warning.
 func promptForPIN(client *airplay.AirPlayClient) string {
 	if err := client.StartPINDisplay(); err != nil {
 		log.Printf("warning: failed to trigger PIN display: %v", err)
 	}
-	fmt.Print("Enter the PIN shown on Apple TV: ")
-	var pinVal string
-	fmt.Scanln(&pinVal)
-	return pinVal
+	fmt.Print("Enter the code shown on the receiver, or its configured password: ")
+
+	// Read the whole line rather than using fmt.Scanln, which stops at the
+	// first space and would silently truncate a password containing one.
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		log.Printf("warning: failed to read PIN: %v", err)
+	}
+	return strings.TrimRight(line, "\r\n")
 }
 
 func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
