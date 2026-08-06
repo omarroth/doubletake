@@ -30,12 +30,12 @@ type ReceiverInfo struct {
 	SourceVersion     string        `plist:"sourceVersion"`
 	Features          uint64        `plist:"features"`
 	StatusFlags       uint64        `plist:"statusFlags"`
-	PK                []byte        `plist:"pk"`
+	PK                plistData     `plist:"pk"`
 	HasUDPMirror      bool          `plist:"hasUDPMirroringSupport"`
 	HDRCapability     string        `plist:"receiverHDRCapability"`
 	VolumeControlType int           `plist:"volumeControlType"`
 	InitialVolume     float64       `plist:"initialVolume"`
-	KeepAliveBody     bool          `plist:"keepAliveSendStatsAsBody"`
+	KeepAliveBody     plistFlag     `plist:"keepAliveSendStatsAsBody"`
 	PSI               string        `plist:"psi"`
 	PI                string        `plist:"pi"`
 	MacAddress        string        `plist:"macAddress"`
@@ -44,10 +44,10 @@ type ReceiverInfo struct {
 
 // DisplayInfo describes a receiver display advertised in the /info response.
 type DisplayInfo struct {
-	Width        int `plist:"width"`
-	Height       int `plist:"height"`
-	WidthPixels  int `plist:"widthPixels"`
-	HeightPixels int `plist:"heightPixels"`
+	Width        plistNumber `plist:"width"`
+	Height       plistNumber `plist:"height"`
+	WidthPixels  plistNumber `plist:"widthPixels"`
+	HeightPixels plistNumber `plist:"heightPixels"`
 }
 
 // DisplaySize returns the receiver's primary display resolution in pixels, or
@@ -66,7 +66,7 @@ func (i *ReceiverInfo) DisplaySize() (int, int) {
 	if w <= 0 || h <= 0 {
 		return 0, 0
 	}
-	return w, h
+	return int(w), int(h)
 }
 
 // HTTPStatusError is returned when a receiver responds with a non-2xx RTSP/HTTP status.
