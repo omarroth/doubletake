@@ -42,6 +42,7 @@ type ReceiverInfo struct {
 	PI                string        `plist:"pi"`
 	MacAddress        string        `plist:"macAddress"`
 	Displays          []DisplayInfo `plist:"displays"`
+	hasPTPInfo        bool
 }
 
 // AirPlay receiver status flags used to choose one authentication prompt.
@@ -281,7 +282,7 @@ func (c *AirPlayClient) GetInfo() (*ReceiverInfo, error) {
 			}
 			return keys
 		}())
-		for _, key := range []string{"audioFormats", "audioLatencies", "displays", "features", "statusFlags", "initialVolume", "volumeControlType", "keepAliveSendStatsAsBody", "supportedAudioFormatsExtended", "supportedFormats"} {
+		for _, key := range []string{"audioFormats", "audioLatencies", "displays", "features", "statusFlags", "initialVolume", "volumeControlType", "keepAliveSendStatsAsBody", "supportedAudioFormatsExtended", "supportedFormats", "PTPInfo"} {
 			if v, ok := fullInfo[key]; ok {
 				dbg("[INFO] %s: %+v", key, v)
 			}
@@ -291,6 +292,9 @@ func (c *AirPlayClient) GetInfo() (*ReceiverInfo, error) {
 	var info ReceiverInfo
 	if _, err := plist.Unmarshal(resp, &info); err != nil {
 		return nil, fmt.Errorf("decode info plist: %w", err)
+	}
+	if _, ok := fullInfo["PTPInfo"]; ok {
+		info.hasPTPInfo = true
 	}
 	c.info = &info
 	return &info, nil

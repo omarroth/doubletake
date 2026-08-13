@@ -218,6 +218,20 @@ func TestTimingProtocolForSession(t *testing.T) {
 	}
 }
 
+func TestTimingProtocolForClientUsesAdvertisedPTP(t *testing.T) {
+	legacy := &AirPlayClient{info: &ReceiverInfo{}}
+	if got := timingProtocolForClient(legacy, false); got != timingProtocolNTP {
+		t.Fatalf("legacy without PTPInfo = %q, want NTP", got)
+	}
+	ptpTV := &AirPlayClient{info: &ReceiverInfo{hasPTPInfo: true}}
+	if got := timingProtocolForClient(ptpTV, false); got != timingProtocolPTP {
+		t.Fatalf("third-party with PTPInfo = %q, want PTP", got)
+	}
+	if got := timingProtocolForClient(&AirPlayClient{info: &ReceiverInfo{hasPTPInfo: true}}, true); got != timingProtocolPTP {
+		t.Fatalf("modern + PTPInfo = %q, want PTP", got)
+	}
+}
+
 func TestModernSessionSetupRequiresFirstPartyProfile(t *testing.T) {
 	const rokuFeatures = uint64(0x38bcf46007f8ad0)
 

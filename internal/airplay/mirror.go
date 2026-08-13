@@ -135,6 +135,10 @@ type MirrorSession struct {
 }
 
 func selectAudioSecurityMode(encrypted bool) audioSecurityMode {
+	// Encrypted pair-verify sessions (Apple and third-party HAP) encrypt audio
+	// with a stream key advertised as shk. FairPlay ekey is a separate path and
+	// is not available on TVs that omit FPSAP. The SETUP *shape* (controlPort
+	// vs streamConnections) is chosen later from usesModernSessionSetup().
 	if encrypted {
 		return audioSecurityChaCha
 	}
@@ -150,6 +154,17 @@ func sourceVersionForSession(modern bool) string {
 
 func timingProtocolForSession(modern bool) string {
 	if modern {
+		return timingProtocolPTP
+	}
+	return timingProtocolNTP
+}
+
+func (i *ReceiverInfo) advertisesPTP() bool {
+	return i != nil && i.hasPTPInfo
+}
+
+func timingProtocolForClient(c *AirPlayClient, modern bool) string {
+	if modern || c != nil && c.info.advertisesPTP() {
 		return timingProtocolPTP
 	}
 	return timingProtocolNTP
@@ -240,7 +255,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	senderName := pairingClientName()
 	modernSession := c.usesModernSessionSetup()
 	sourceVersion := sourceVersionForSession(modernSession)
-	timingProtocol := timingProtocolForSession(modernSession)
+	timingProtocol := timingProtocolForClient(c, modernSession)
 	var clock *mediaClock
 	if timingProtocol == timingProtocolPTP {
 		clock = &mediaClock{}
@@ -475,13 +490,19 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		audioStreamDesc["redundantAudio"] = int64(2)
 	}
 
-	// Modern HAP receivers look for shk on the audio stream descriptor.
-	modernAudio := audioMode == audioSecurityChaCha && len(audioChaChaKey) == 32
+	// Modern Apple SETUP replaces controlPort with streamConnections.
+	// Third-party HAP TVs accepted PTP + controlPort; they still need shk or
+	// they silently drop plaintext ALAC.
+	modernAudio := modernSession && audioMode == audioSecurityChaCha && len(audioChaChaKey) == 32
 	if modernAudio {
 		addModernScreenAudioStreamFields(audioStreamDesc, audioChaChaKey, audioControlLPort)
 		dbg("[SETUP] audio stream descriptor includes shk (%d bytes)", len(audioChaChaKey))
 	} else {
 		audioStreamDesc["controlPort"] = int64(audioControlLPort)
+		if audioMode == audioSecurityChaCha && len(audioChaChaKey) == 32 {
+			audioStreamDesc["shk"] = audioChaChaKey
+			dbg("[SETUP] audio stream descriptor includes shk (%d bytes) with legacy controlPort", len(audioChaChaKey))
+		}
 	}
 	var audioSetupPlist map[string]interface{}
 	if modernControlSetup {
@@ -517,7 +538,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		skipRecord, _ = audioResp["skipRecord"].(bool)
 		if timingProtocol == timingProtocolPTP {
 			if err := clock.configureFromSetup(audioResp, audioRespHeaders, audioRespReceivedAt); err != nil {
-				return nil, fmt.Errorf("configure PTP media clock: %w", err)
+				// Third-party TVs advertise PTPInfo but often omit Apple clock
+				// headers. Keep the session; frames fall back to local time.
+				dbg("[PTP] %v; using local timestamps", err)
 			}
 		}
 		receiverEventPort = plistInt(audioResp["eventPort"])
