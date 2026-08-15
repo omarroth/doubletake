@@ -1,6 +1,7 @@
 package airplay
 
 import (
+	"bytes"
 	"context"
 	"crypto/cipher"
 	"crypto/rand"
@@ -157,6 +158,13 @@ func timingProtocolForSession(modern bool) string {
 
 func (c *AirPlayClient) usesModernSessionSetup() bool {
 	return c.encrypted && c.info != nil && c.info.usesModernPairing()
+}
+
+// usesSessionFirstSetup reports whether SETUP must create the session before
+// any media stream. Real Apple senders and AirServer clones (AirTame) reject a
+// second full session plist on the video SETUP with HTTP 400.
+func (c *AirPlayClient) usesSessionFirstSetup() bool {
+	return c.usesModernSessionSetup() || (c.info != nil && c.info.looksLikeAirServerClone())
 }
 
 type mirrorSetupRequest struct {
@@ -335,10 +343,13 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// AirPlay prepares the receiver with a control-only SETUP before creating
 	// media streams. This ordering matters: the receiver starts an audio packet
 	// processor only when type 96 is created after the session is prepared.
-	modernControlSetup := modernSession
+	modernControlSetup := c.usesSessionFirstSetup()
 
 	audioStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	selectedAudioCodec := AudioCodecALAC
+	if c.info.looksLikeAirServerClone() {
+		selectedAudioCodec = AudioCodecAAC
+	}
 	// Real Apple senders use streamConnectionID as the RTSP URI path.
 	// Control, audio, RECORD, and SET_PARAMETER share the audio URI; video uses
 	// a separate URI with its own streamConnectionID.
@@ -433,13 +444,29 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	if modernControlSetup {
 		dbg("[SETUP] phase 1 (control): preparing media session")
-		controlResp, controlHeaders, receivedAt, err := sendSetup(audioURI, "control", setupRequest.controlPlist())
+		controlPlist := setupRequest.controlPlist()
+		// AirServer clones accept a session-first SETUP but still expect FairPlay
+		// ekey/eiv on that first plist. Stream-only follow-ups never install a master.
+		if c.info.looksLikeAirServerClone() && c.FpEkey != nil && c.fpIV != nil {
+			controlPlist["et"] = int64(32)
+			controlPlist["ekey"] = c.FpEkey
+			controlPlist["eiv"] = c.fpIV
+			dbg("[SETUP] control SETUP includes FairPlay ekey=%d bytes, eiv=%d bytes", len(c.FpEkey), len(c.fpIV))
+		}
+		controlResp, controlHeaders, receivedAt, err := sendSetup(audioURI, "control", controlPlist)
 		if err != nil {
 			return nil, err
 		}
+		if timingProtocol == timingProtocolNTP {
+			if receiverTimingPort := plistInt(controlResp["timingPort"]); receiverTimingPort > 0 {
+				go sendNTPTimingProbes(sessionCtx, timingConn, c.host, receiverTimingPort)
+			}
+		}
 		skipRecord, _ = controlResp["skipRecord"].(bool)
-		if err := clock.configureFromSetup(controlResp, controlHeaders, receivedAt); err != nil {
-			return nil, fmt.Errorf("configure PTP media clock: %w", err)
+		if timingProtocol == timingProtocolPTP {
+			if err := clock.configureFromSetup(controlResp, controlHeaders, receivedAt); err != nil {
+				return nil, fmt.Errorf("configure PTP media clock: %w", err)
+			}
 		}
 		receiverEventPort = plistInt(controlResp["eventPort"])
 		if err := connectEvent(); err != nil {
@@ -471,7 +498,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		"latencyMin":         latMin,
 		"latencyMax":         latMax,
 	}
-	if useAudioFEC(audioMode == audioSecurityChaCha) {
+	if selectedAudioCodec != AudioCodecAAC && useAudioFEC(audioMode == audioSecurityChaCha) {
 		audioStreamDesc["redundantAudio"] = int64(2)
 	}
 
@@ -486,6 +513,11 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	var audioSetupPlist map[string]interface{}
 	if modernControlSetup {
 		audioSetupPlist = streamOnlyPlist(audioStreamDesc)
+		if c.info.looksLikeAirServerClone() && c.FpEkey != nil && c.fpIV != nil {
+			audioSetupPlist["et"] = int64(32)
+			audioSetupPlist["ekey"] = c.FpEkey
+			audioSetupPlist["eiv"] = c.fpIV
+		}
 	} else {
 		audioSetupPlist = setupRequest.legacyStreamPlist(audioStreamDesc)
 		if !modernAudio {
@@ -575,13 +607,12 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		videoSetupPlist = streamOnlyPlist(videoStreamDesc)
 	} else {
 		videoSetupPlist = setupRequest.legacyStreamPlist(videoStreamDesc)
-		// UxPlay reads ekey/eiv from the root level of SETUP to derive the
-		// video decryption key.
-		if c.FpEkey != nil && encKey != nil {
-			videoSetupPlist["ekey"] = c.FpEkey
-			videoSetupPlist["eiv"] = encIV
-			dbg("[SETUP] video SETUP includes FairPlay ekey=%d bytes, eiv=%d bytes", len(c.FpEkey), len(encIV))
-		}
+	}
+	// UxPlay and AirServer read ekey/eiv from the root of a video SETUP.
+	if c.FpEkey != nil && encKey != nil && (c.info.looksLikeAirServerClone() || !modernControlSetup) {
+		videoSetupPlist["ekey"] = c.FpEkey
+		videoSetupPlist["eiv"] = encIV
+		dbg("[SETUP] video SETUP includes FairPlay ekey=%d bytes, eiv=%d bytes", len(c.FpEkey), len(encIV))
 	}
 	dbg("[SETUP] phase %d (video): streamConnectionID=%d", videoPhase, videoStreamConnectionID)
 
@@ -783,6 +814,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	return session, nil
 }
 
+// AudioCodec returns the codec negotiated for this mirror session.
+func (s *MirrorSession) AudioCodec() AudioCodec {
+	if s.audioStream == nil {
+		return AudioCodecALAC
+	}
+	return AudioCodec(s.audioStream.ct)
+}
+
 func addModernScreenAudioStreamFields(stream map[string]interface{}, key []byte, controlPort int) {
 	// Modern connection dictionaries replace the legacy top-level controlPort.
 	delete(stream, "controlPort")
@@ -823,10 +862,11 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	parser := newH264Parser()
 
 	var latestSPS, latestPPS []byte // raw NAL data WITHOUT start code
-	var vclBuf []byte               // AVCC-formatted data accumulating for current access unit
-	var pendingKeyframe bool        // true if vclBuf contains IDR slice(s)
-	var codecSent bool              // true if codec frame sent for current keyframe
-	var streamPrimed bool           // true after first SPS/PPS+IDR has been sent
+	var sentSPS, sentPPS []byte
+	var vclBuf []byte        // AVCC-formatted data accumulating for current access unit
+	var pendingKeyframe bool // true if vclBuf contains IDR slice(s)
+	var codecSent bool       // true if codec frame sent for current keyframe
+	var streamPrimed bool    // true after first SPS/PPS+IDR has been sent
 	var frameCount int
 	var lastProgressLog time.Time
 	var nalLog strings.Builder
@@ -852,7 +892,8 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 		packetTimestamp, packetTimeline := s.frameTimeNow()
 
 		// Send SPS+PPS as unencrypted avcC codec frame before keyframes
-		if pendingKeyframe && !codecSent && latestSPS != nil && latestPPS != nil {
+		if pendingKeyframe && !codecSent && latestSPS != nil && latestPPS != nil &&
+			(!streamPrimed || !bytes.Equal(latestSPS, sentSPS) || !bytes.Equal(latestPPS, sentPPS)) {
 			// Derive the encoded content dimensions from the SPS itself so the
 			// codec header reports exactly what the encoder produced, regardless
 			// of the captured surface size (which we no longer pin to a config
@@ -876,6 +917,8 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			}
 			codecSent = true
 			streamPrimed = true
+			sentSPS = append(sentSPS[:0], latestSPS...)
+			sentPPS = append(sentPPS[:0], latestPPS...)
 		}
 
 		frameData := vclBuf
@@ -1784,6 +1827,12 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 		if n < 32 {
 			continue
 		}
+		if buf[0] == 0x80 && buf[1] == 0xd3 {
+			continue
+		}
+		if buf[0] != 0x80 || buf[1] != 0xd2 {
+			continue
+		}
 
 		// Log the Apple TV's send timestamp for timing analysis
 		senderTS := binary.BigEndian.Uint64(buf[24:32])
@@ -1816,6 +1865,37 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 	}
 }
 
+// sendNTPTimingProbes initiates timing with receivers that return their own
+// timing port instead of probing the sender first.
+func sendNTPTimingProbes(ctx context.Context, conn net.PacketConn, host string, port int) {
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		dbg("[NTP] resolve receiver timing port: %v", err)
+		return
+	}
+	for sequence := uint16(1); sequence <= 3; sequence++ {
+		request := make([]byte, 32)
+		request[0], request[1] = 0x80, 0xd2
+		binary.BigEndian.PutUint16(request[2:4], sequence)
+		binary.BigEndian.PutUint64(request[24:32], ntpBootTimestamp())
+		if _, err := conn.WriteTo(request, addr); err != nil {
+			dbg("[NTP] send timing probe to %s: %v", addr, err)
+			return
+		}
+		if sequence < 3 {
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			}
+		}
+	}
+}
+
 // uuidToMAC converts a UUID-ish string to a stable locally-administered MAC address.
 // Falls back to a fixed MAC if the UUID does not contain enough hex digits.
 func uuidToMAC(id string) string {
@@ -1836,7 +1916,7 @@ func uuidToMAC(id string) string {
 	return strings.ToUpper(strings.Join(parts, ":"))
 }
 
-// appStartTime is the reference point for boot-relative timestamps.
+// appStartTime is the fallback reference point when no system boot clock is available.
 var appStartTime = time.Now()
 
 // ntpTimeNow returns a 64-bit NTP fixed-point timestamp for mirroring frame headers.
@@ -1895,7 +1975,7 @@ func ntpTimeWithBias(bias time.Duration) uint64 {
 	if bias < 5*time.Millisecond {
 		bias = 5 * time.Millisecond
 	}
-	return compactTimestamp(time.Since(appStartTime) + bias)
+	return compactTimestamp(bootRelativeNow() + bias)
 }
 
 func compactTimestamp(d time.Duration) uint64 {
@@ -1976,7 +2056,7 @@ func tryConsecutiveUDP(base, count int) ([]net.PacketConn, bool) {
 const secondsFrom1900To1970 = 2208988800
 
 func ntpBootTimestamp() uint64 {
-	d := time.Since(appStartTime)
+	d := bootRelativeNow()
 	sec := uint64(d/time.Second) + secondsFrom1900To1970
 	nsecFrac := uint64(d % time.Second)
 	frac := (nsecFrac << 32) / uint64(time.Second)

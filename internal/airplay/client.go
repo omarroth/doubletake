@@ -81,7 +81,15 @@ type DisplayInfo struct {
 // codec header uses this as the presentation (display) size so the receiver
 // can center/pillarbox content whose aspect ratio differs from the display.
 func (i *ReceiverInfo) DisplaySize() (int, int) {
-	if i == nil || len(i.Displays) == 0 {
+	if i == nil {
+		return 0, 0
+	}
+	// AirTame / AirServer omit displays[] but drive a 1080p Vivante framebuffer.
+	// Encoding the sender desktop at native 2560x1440 stays black on that VPU.
+	if len(i.Displays) == 0 && i.looksLikeAirServerClone() {
+		return 1920, 1080
+	}
+	if len(i.Displays) == 0 {
 		return 0, 0
 	}
 	d := i.Displays[0]
@@ -805,15 +813,26 @@ func (mc *mirrorCipher) EncryptFrame(payload []byte) []byte {
 	// Step 1: XOR prefix bytes using cached keystream from previous frame's
 	// trailing partial block (matches receiver's og buffer usage).
 	if mc.nextCryptCount > 0 {
-		n := mc.nextCryptCount
+		available := mc.nextCryptCount
+		n := available
 		if n > inputLen {
 			n = inputLen
 		}
-		ogStart := 16 - mc.nextCryptCount
+		ogStart := 16 - available
 		for i := 0; i < n; i++ {
 			out[i] = payload[i] ^ mc.og[ogStart+i]
 		}
 		pos = n
+		if n < available {
+			// Keep the unused suffix in the same right-aligned layout used by
+			// the next frame. Small VCL payloads can consume this cached block
+			// over more than one frame.
+			remaining := available - n
+			copy(mc.og[16-remaining:], mc.og[ogStart+n:])
+			mc.nextCryptCount = remaining
+			return out
+		}
+		mc.nextCryptCount = 0
 	}
 
 	// Step 2: Advance CTR to next 16-byte boundary (aes_ctr_start_fresh_block).
@@ -835,7 +854,6 @@ func (mc *mirrorCipher) EncryptFrame(payload []byte) []byte {
 
 	// Step 4: Handle trailing partial block.
 	restLen := remaining % 16
-	mc.nextCryptCount = 0
 	if restLen > 0 {
 		// Pad input to 16 bytes, encrypt full block, use first restLen bytes.
 		var padded [16]byte

@@ -339,6 +339,13 @@ func startX11Capture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, er
 	}
 
 	beforeConvert := []gstStage{frameRateStage(fps), lowLatencyVideoQueueStage()}
+	if cfg.MaxWidth > 0 && cfg.MaxHeight > 0 {
+		// Fold size into the existing videoconvert caps. A second video/x-raw
+		// filter is parsed by gst-launch as element "video" (the '/' pad syntax).
+		beforeConvert = append(beforeConvert, gstStage{"videoscale", "add-borders=true"})
+		encoder.rawFormat = fmt.Sprintf("%s,width=%d,height=%d", encoder.rawFormat, cfg.MaxWidth, cfg.MaxHeight)
+		dbg("[CAPTURE] scaling X11 capture to %dx%d", cfg.MaxWidth, cfg.MaxHeight)
+	}
 	gstArgs := buildGstVideoPipeline(ximageSrcArgs, beforeConvert, nil, encoder)
 
 	dbg("[CAPTURE] gst-launch-1.0 (x11) %s", strings.Join(gstArgs, " "))

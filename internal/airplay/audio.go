@@ -26,6 +26,7 @@ type audioChaChaAADMode int
 
 const (
 	AudioCodecALAC AudioCodec = 2 // ct=2, spf=352, audioFormat=0x40000
+	AudioCodecAAC  AudioCodec = 7 // ct=7, spf=480, audioFormat=0x1000000
 
 	audioSecurityLegacyAES audioSecurityMode = iota
 	audioSecurityChaCha
@@ -64,6 +65,9 @@ func defaultAudioChaChaAADMode() audioChaChaAADMode {
 // Info returns SETUP parameters for the supported mirrored-audio codec.
 func (c AudioCodec) Info() (ct int64, spf int64, audioFormat int64, latencyMin int64, latencyMax int64, latencySamples uint32) {
 	latency := targetLatencySamples44k1()
+	if c == AudioCodecAAC {
+		return 7, 480, 0x1000000, 0, int64(latency), latency
+	}
 	return 2, 352, 0x40000, 0, int64(latency), latency
 }
 
@@ -91,11 +95,12 @@ type AudioCapture struct {
 	waitCh  chan struct{}
 	waitErr error
 	stopped bool
+	eld     *eldEncoder
 }
 
 // StartAudioCapture launches a pipeline that captures system audio (monitor source)
 // and feeds raw PCM into the built-in ALAC encoder.
-func StartAudioCapture(ctx context.Context, testTone bool) (*AudioCapture, error) {
+func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*AudioCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
 	// Detect audio source
@@ -123,6 +128,14 @@ func StartAudioCapture(ctx context.Context, testTone bool) (*AudioCapture, error
 	ac := &AudioCapture{
 		cancel: cancel,
 		waitCh: make(chan struct{}),
+	}
+	if codec == AudioCodecAAC {
+		var err error
+		ac.eld, err = newELDEncoder(44100, 480, 128000)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
 	}
 
 	gstArgs := []string{"--quiet"}
@@ -169,6 +182,13 @@ func (ac *AudioCapture) ReadFrame(buf []byte) (int, error) {
 		}
 		return 0, io.EOF
 	default:
+	}
+	if ac.eld != nil {
+		pcm := make([]byte, ac.eld.frameLen*2*2)
+		if _, err := io.ReadFull(ac.pcmPipe, pcm); err != nil {
+			return 0, err
+		}
+		return ac.eld.Encode(pcm, buf)
 	}
 
 	const spf = 352
@@ -229,6 +249,9 @@ func (ac *AudioCapture) Stop() {
 		return
 	}
 	ac.stopped = true
+	if ac.eld != nil {
+		ac.eld.Close()
+	}
 	if ac.cancel != nil {
 		ac.cancel()
 	}
@@ -420,7 +443,8 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 		}
 	}
 
-	spf := uint16(352)
+	_, codecSPF, _, _, _, _ := AudioCodec(ct).Info()
+	spf := uint16(codecSPF)
 	latencySamples := audioLatencySamplesForCodec(ct, latencyOverride)
 
 	// Apple senders use SSRC=0 for mirroring audio RTP.

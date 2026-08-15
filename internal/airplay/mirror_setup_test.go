@@ -22,6 +22,15 @@ type rtspTestRequest struct {
 	headers map[string]string
 }
 
+func TestSelectAudioSecurityMode(t *testing.T) {
+	if got := selectAudioSecurityMode(false); got != audioSecurityLegacyAES {
+		t.Fatalf("plaintext session audio mode = %v, want AES/legacy", got)
+	}
+	if got := selectAudioSecurityMode(true); got != audioSecurityChaCha {
+		t.Fatalf("encrypted HAP session audio mode = %v, want ChaCha", got)
+	}
+}
+
 func TestSourceVersionForSession(t *testing.T) {
 	if got := sourceVersionForSession(false); got != legacyAirPlaySourceVersion {
 		t.Fatalf("legacy source version = %q, want %q", got, legacyAirPlaySourceVersion)

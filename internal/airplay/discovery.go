@@ -276,11 +276,23 @@ func supportsTransientPairing(features uint64) bool {
 	return features&(FeatureTransientPairing|FeatureSystemPairing) != 0
 }
 
+// looksLikeAirServerClone reports receivers that impersonate a first-party
+// Apple TV in /info (model + CoreUtils feature bits) but omit a display list
+// and do not speak CoreUtils pair-setup. AirTame 2 / AirServer answer as
+// AppleTV5,3 with AirPlay/375.3 and reject modern HKP type 5 M1 with HTTP 500.
+func (i *ReceiverInfo) looksLikeAirServerClone() bool {
+	return i != nil &&
+		i.Model == "AppleTV5,3" &&
+		len(i.Displays) == 0 &&
+		i.Features&featureThirdPartyReceiverMask == 0
+}
+
 // usesModernPairing reports whether the receiver can use the first-party
 // CoreUtils/HAP profile directly. Third-party receivers retain HKP type 3 and
 // legacy session setup even when they copy the modern pairing feature bits.
 func (i *ReceiverInfo) usesModernPairing() bool {
 	return i != nil &&
+		!i.looksLikeAirServerClone() &&
 		i.Features&featureCoreUtilsPairingMask != 0 &&
 		i.Features&featureThirdPartyReceiverMask == 0
 }
