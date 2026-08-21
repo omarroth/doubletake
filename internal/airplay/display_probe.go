@@ -83,5 +83,11 @@ func x11Endpoint(display string) (network, address string, err error) {
 	if host == "" || host == "unix" {
 		return "unix", fmt.Sprintf("/tmp/.X11-unix/X%d", n), nil
 	}
+	// An IPv6 literal may already be bracketed in DISPLAY. JoinHostPort adds
+	// its own brackets to any host containing a colon, so leaving these on
+	// produces an undialable "[[::1]]:6000".
+	if len(host) > 1 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
 	return "tcp", net.JoinHostPort(host, strconv.Itoa(6000+n)), nil
 }
