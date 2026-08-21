@@ -76,13 +76,25 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 	if err := ValidateHWAccel(cfg.HWAccel); err != nil {
 		return nil, err
 	}
-	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
+	// A display variable that is set is not necessarily a display that exists:
+	// probe it so a stale variable fails here with a clear message instead of
+	// producing a silent black stream. See probeX11Display.
+	if display := os.Getenv("DISPLAY"); (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && display != "" {
+		if err := probeX11Display(display); err != nil {
+			return nil, err
+		}
 		return startX11Capture(ctx, cfg)
 	}
-	if os.Getenv("WAYLAND_DISPLAY") != "" {
+	if display := os.Getenv("WAYLAND_DISPLAY"); display != "" {
+		if err := probeWaylandDisplay(display); err != nil {
+			return nil, err
+		}
 		return startWaylandCapture(ctx, cfg)
 	}
-	if os.Getenv("DISPLAY") != "" {
+	if display := os.Getenv("DISPLAY"); display != "" {
+		if err := probeX11Display(display); err != nil {
+			return nil, err
+		}
 		return startX11Capture(ctx, cfg)
 	}
 	return nil, fmt.Errorf("no display server detected (neither WAYLAND_DISPLAY nor DISPLAY is set)")
