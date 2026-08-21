@@ -201,12 +201,52 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 		{name: "skip record", skipRecord: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			testSetupMirrorNoAudioStillNegotiatesAudioSession(t, test.skipRecord)
+			testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{skipRecord: test.skipRecord, noAudio: true})
 		})
 	}
 }
 
-func testSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T, skipRecord bool) {
+// A session that DOES carry audio must still set the receiver's volume, so the
+// -no-audio guard narrows that behaviour rather than removing it.
+func TestSetupMirrorWithAudioSetsReceiverVolume(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		skipRecord bool
+	}{
+		{name: "record", skipRecord: false},
+		{name: "skip record", skipRecord: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{skipRecord: test.skipRecord, noAudio: false})
+		})
+	}
+}
+
+// A no-audio session must not be able to write the receiver's volume through
+// the daemon's mute control either: unmuting sends 0 dB, which is full scale.
+func TestSetAudioMutedRefusesWhenSessionHasNoAudio(t *testing.T) {
+	for _, muted := range []bool{true, false} {
+		session := &MirrorSession{client: &AirPlayClient{}, sessionURI: "rtsp://example/session", noAudio: true}
+		err := session.SetAudioMuted(muted)
+		if err == nil {
+			t.Fatalf("SetAudioMuted(%v) = nil, want a refusal for a no-audio session", muted)
+		}
+		// Assert the REASON, not merely that something failed: without the
+		// guard this call still errors (no connection), so an error alone
+		// would pass on the unfixed code.
+		if !strings.Contains(err.Error(), "audio disabled") {
+			t.Fatalf("SetAudioMuted(%v) error = %q, want a refusal naming the disabled audio", muted, err)
+		}
+	}
+}
+
+type audioSessionCase struct {
+	skipRecord bool
+	noAudio    bool
+}
+
+func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase) {
+	skipRecord, noAudio := test.skipRecord, test.noAudio
 	eventListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen event channel: %v", err)
@@ -448,12 +488,12 @@ func testSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T, skipRecord 
 	}
 	defer client.Close()
 
-	session, err := client.SetupMirror(ctx, StreamConfig{FPS: 30, NoAudio: true})
+	session, err := client.SetupMirror(ctx, StreamConfig{FPS: 30, NoAudio: noAudio})
 	if err != nil {
-		t.Fatalf("SetupMirror(no audio): %v", err)
+		t.Fatalf("SetupMirror(noAudio=%v): %v", noAudio, err)
 	}
 	if !session.HasAudio() {
-		t.Fatal("expected no-audio session setup to keep the negotiated audio stream state")
+		t.Fatalf("noAudio=%v: expected the negotiated audio stream state to survive setup", noAudio)
 	}
 	if !skipRecord && session.timestampBias != 250*time.Millisecond {
 		t.Fatalf("session timestamp bias = %v, want RECORD Audio-Latency of 250ms", session.timestampBias)
@@ -488,7 +528,13 @@ func testSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T, skipRecord 
 		recordIndex = len(wantMethods)
 		wantMethods = append(wantMethods, "RECORD")
 	}
-	wantMethods = append(wantMethods, "SET_PARAMETER", "SET_PARAMETER", "POST", "TEARDOWN")
+	// The two volume SET_PARAMETERs are sent only when the session carries
+	// audio: `volume: 0.000000` is 0 dB — full scale — so a video-only
+	// session would force the receiver to maximum.
+	if !noAudio {
+		wantMethods = append(wantMethods, "SET_PARAMETER", "SET_PARAMETER")
+	}
+	wantMethods = append(wantMethods, "POST", "TEARDOWN")
 	got := make([]rtspTestRequest, 0, len(wantMethods))
 	for range wantMethods {
 		select {
