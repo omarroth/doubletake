@@ -1,6 +1,7 @@
 package airplay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -13,6 +14,71 @@ import (
 
 	"github.com/godbus/dbus/v5"
 )
+
+func TestRawVideoRelayCapsNegotiateWithInstalledParser(t *testing.T) {
+	if _, err := exec.LookPath("gst-launch-1.0"); err != nil {
+		t.Skip("gst-launch-1.0 is unavailable")
+	}
+	const width, height = 4, 2
+	args := []string{
+		"--quiet",
+		"fdsrc", "fd=0",
+		"!", "video/x-raw,format=NV12,width=4,height=2,framerate=30/1",
+		"!", "rawvideoparse", "use-sink-caps=true",
+		"!", "fakesink",
+	}
+	cmd := exec.Command("gst-launch-1.0", args...)
+	cmd.Stdin = bytes.NewReader(make([]byte, width*height*3/2))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("raw relay caps failed real GStreamer negotiation: %v\n%s", err, output)
+	}
+}
+
+func TestWaylandEncoderStartFailureClosesEveryPipeDescriptor(t *testing.T) {
+	before := openDescriptorCount(t)
+	for i := 0; i < 20; i++ {
+		source := exec.Command("true")
+		encoder := exec.Command("/definitely/not/a/doubletake-test-command")
+		pipes, err := openWaylandSplitPipes(source, encoder)
+		if err != nil {
+			t.Fatalf("openWaylandSplitPipes: %v", err)
+		}
+		if _, err := startWaylandEncoder(encoder, pipes); err == nil {
+			t.Fatal("startWaylandEncoder unexpectedly succeeded")
+		}
+	}
+	after := openDescriptorCount(t)
+	if after > before {
+		t.Fatalf("stderr setup failures leaked descriptors: before=%d after=%d", before, after)
+	}
+}
+
+func TestOpenWaylandSplitPipesCloseReleasesEveryDescriptor(t *testing.T) {
+	before := openDescriptorCount(t)
+	source := exec.Command("true")
+	encoder := exec.Command("true")
+	pipes, err := openWaylandSplitPipes(source, encoder)
+	if err != nil {
+		t.Fatalf("openWaylandSplitPipes: %v", err)
+	}
+	pipes.close()
+	after := openDescriptorCount(t)
+	if after > before {
+		t.Fatalf("pipe close leaked descriptors: before=%d after=%d", before, after)
+	}
+}
+
+func openDescriptorCount(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("/proc/self/fd is unavailable")
+	}
+	if err != nil {
+		t.Fatalf("read /proc/self/fd: %v", err)
+	}
+	return len(entries)
+}
 
 func TestCapturePreparationCloseReleasesUnstartedResources(t *testing.T) {
 	portalFD, peerFD, err := os.Pipe()
@@ -135,6 +201,30 @@ func TestRecommendedAutomaticVideoLatencyUsesP95AndDeliveryMargin(t *testing.T) 
 	}
 	if got := automaticVideoDeliveryMargin(60); got != ordinaryScreenFrameQueueDuration {
 		t.Fatalf("60fps delivery margin = %v, want ordinary 67ms floor", got)
+	}
+}
+
+func TestCaptureMinimumVideoLeadIncludesWaylandRawRelay(t *testing.T) {
+	const measured = 300 * time.Millisecond
+	if got := captureMinimumVideoLead(capturePreparationWayland, 0); got != 250*time.Millisecond {
+		t.Fatalf("unmeasured Wayland split lead = %v, want 250ms", got)
+	}
+	if got := captureMinimumVideoLead(capturePreparationWayland, measured); got != measured {
+		t.Fatalf("larger measured Wayland lead = %v, want %v", got, measured)
+	}
+	if got := captureMinimumVideoLead(capturePreparationX11, 0); got != 0 {
+		t.Fatalf("X11 minimum lead = %v, want no split-pipeline override", got)
+	}
+}
+
+func TestWaylandRawVideoSizeBoundsReceiverCanvas(t *testing.T) {
+	width, height := waylandRawVideoSize(1<<30, 1<<30, [2]int{2880, 1800})
+	if width != 2160 || height != 2160 {
+		t.Fatalf("hostile square receiver canvas = %dx%d, want bounded 2160x2160", width, height)
+	}
+	width, height = waylandRawVideoSize(0, 0, [2]int{2881, 1801})
+	if width != 2880 || height != 1800 {
+		t.Fatalf("portal fallback canvas = %dx%d, want even 2880x1800", width, height)
 	}
 }
 
@@ -361,8 +451,22 @@ func TestFrameIntervalMillis(t *testing.T) {
 	}
 }
 
-func TestPipeWireVideoSourceCopiesPortalBuffers(t *testing.T) {
-	got := pipeWireVideoSourceStage(3, 42, 30)
+func TestPipeWireVideoSourcePreservesDMABuffersForVAAPI(t *testing.T) {
+	got := pipeWireVideoSourceStage(3, 42, 30, false)
+	want := gstStage{
+		"pipewiresrc",
+		"fd=3",
+		"path=42",
+		"do-timestamp=true",
+		"keepalive-time=33",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PipeWire VA-API source stage = %v, want %v", got, want)
+	}
+}
+
+func TestPipeWireVideoSourceCopiesPortalBuffersForSoftwareConversion(t *testing.T) {
+	got := pipeWireVideoSourceStage(3, 42, 30, true)
 	want := gstStage{
 		"pipewiresrc",
 		"fd=3",
@@ -372,7 +476,52 @@ func TestPipeWireVideoSourceCopiesPortalBuffers(t *testing.T) {
 		"always-copy=true",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("PipeWire source stage = %v, want %v", got, want)
+		t.Fatalf("PipeWire software source stage = %v, want %v", got, want)
+	}
+}
+
+func TestVAAPIPostprocReceivesOriginalPortalDMABuffer(t *testing.T) {
+	got := vaapiVideoImportStages()
+	want := []gstStage{
+		{"vapostproc", "disable-passthrough=true"},
+		{"video/x-raw,format=NV12"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("VA-API import stages = %v, want %v", got, want)
+	}
+}
+
+func TestWaylandVideoInputStagesPreservePortalBufferOwnership(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		useVAAPI    bool
+		wantSource  gstStage
+		wantImports []gstStage
+	}{
+		{
+			name:       "VA-API imports original portal buffer",
+			useVAAPI:   true,
+			wantSource: gstStage{"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=33"},
+			wantImports: []gstStage{
+				{"vapostproc", "disable-passthrough=true"},
+				{"video/x-raw,format=NV12"},
+			},
+		},
+		{
+			name:       "software conversion copies portal buffer",
+			useVAAPI:   false,
+			wantSource: gstStage{"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=33", "always-copy=true"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSource, gotImports := waylandVideoInputStages(3, 42, 30, tt.useVAAPI)
+			if !reflect.DeepEqual(gotSource, tt.wantSource) {
+				t.Fatalf("source stage = %v, want %v", gotSource, tt.wantSource)
+			}
+			if !reflect.DeepEqual(gotImports, tt.wantImports) {
+				t.Fatalf("import stages = %v, want %v", gotImports, tt.wantImports)
+			}
+		})
 	}
 }
 
@@ -448,6 +597,53 @@ func TestBuildGstVideoPipeline(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GStreamer pipeline = %v, want %v", got, want)
+	}
+}
+
+func TestBuildSplitWaylandVideoPipelineSerializesRawFramesBeforeEncoding(t *testing.T) {
+	encoder := encoderResult{
+		parts:     gstStage{"testh264enc", "bitrate=2500"},
+		rawFormat: "NV12",
+	}
+	producer, consumer := buildSplitGstVideoPipeline(
+		gstStage{"pipewiresrc", "fd=3", "path=42"},
+		[]gstStage{
+			{"vapostproc"},
+			{"compositor", "force-live=true"},
+			{"video/x-raw,width=2880,height=1800,framerate=30/1"},
+			lowLatencyVideoQueueStage(),
+		},
+		nil,
+		encoder,
+		1280,
+		720,
+		30,
+		true,
+	)
+	wantProducerSuffix := []string{
+		"!", "video/x-raw,width=1280,height=720,pixel-aspect-ratio=1/1",
+		"!", "fdsink", "fd=1", "sync=false", "async=false",
+	}
+	if got := producer[len(producer)-len(wantProducerSuffix):]; !reflect.DeepEqual(got, wantProducerSuffix) {
+		t.Fatalf("raw producer suffix = %v, want %v", got, wantProducerSuffix)
+	}
+	wantConsumerPrefix := []string{
+		"--quiet", "fdsrc", "fd=0", "do-timestamp=true",
+		"!", "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1",
+		"!", "rawvideoparse", "use-sink-caps=true",
+		"!", "testh264enc", "bitrate=2500",
+	}
+	if got := consumer[:len(wantConsumerPrefix)]; !reflect.DeepEqual(got, wantConsumerPrefix) {
+		t.Fatalf("encoder consumer prefix = %v, want %v", got, wantConsumerPrefix)
+	}
+	wantConsumerSuffix := []string{
+		"!", "rtph264pay", "pt=96", "mtu=60000", "aggregate-mode=none", "timestamp-offset=0", "seqnum-offset=0",
+		"!", "rtponviftimestamp", "ntp-offset=-1", "set-e-bit=false", "set-t-bit=false",
+		"!", "rtpstreampay",
+		"!", "fdsink", "fd=1", "sync=false", "async=false",
+	}
+	if got := consumer[len(consumer)-len(wantConsumerSuffix):]; !reflect.DeepEqual(got, wantConsumerSuffix) {
+		t.Fatalf("timestamped consumer suffix = %v, want %v", got, wantConsumerSuffix)
 	}
 }
 

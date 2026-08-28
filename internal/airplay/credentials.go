@@ -103,6 +103,16 @@ type CredentialStore struct {
 	backend CredentialBackend
 }
 
+// RestoreTokenReset is a one-shot restore-token deletion which can be rolled
+// back if the daemon loses its stream reservation before reconnecting.
+type RestoreTokenReset struct {
+	store         *CredentialStore
+	deviceID      string
+	previousToken string
+	changed       bool
+	done          bool
+}
+
 // NewCredentialStore creates a credential store backed by a JSON file at path.
 func NewCredentialStore(path string) (*CredentialStore, error) {
 	fb, err := newFileBackend(path)
@@ -193,6 +203,81 @@ func (cs *CredentialStore) SaveRestoreToken(deviceID, restoreToken string) error
 	return cs.backend.Save(deviceID, creds)
 }
 
+// ClearRestoreToken removes only the Wayland screencast restore token for a
+// device. Pairing credentials and all other device entries are preserved.
+func (cs *CredentialStore) ClearRestoreToken(deviceID string) error {
+	reset, err := cs.BeginRestoreTokenReset(deviceID)
+	if err != nil {
+		return err
+	}
+	reset.Commit()
+	return nil
+}
+
+// BeginRestoreTokenReset clears the restore token while retaining enough state
+// to restore it if the caller cannot commit the corresponding reconnect.
+func (cs *CredentialStore) BeginRestoreTokenReset(deviceID string) (*RestoreTokenReset, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	reset := &RestoreTokenReset{store: cs, deviceID: deviceID}
+	creds, err := cs.backend.Lookup(deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if creds == nil || creds.RestoreToken == "" {
+		return reset, nil
+	}
+	reset.previousToken = creds.RestoreToken
+	reset.changed = true
+	updated := *creds
+	updated.RestoreToken = ""
+	if err := cs.backend.Save(deviceID, &updated); err != nil {
+		return nil, err
+	}
+	return reset, nil
+}
+
+// Commit makes a successful deletion permanent.
+func (r *RestoreTokenReset) Commit() {
+	if r == nil {
+		return
+	}
+	r.store.mu.Lock()
+	r.done = true
+	r.store.mu.Unlock()
+}
+
+// Rollback restores only the previous token onto a fresh credential snapshot.
+// A concurrently saved non-empty token wins, and all other fields are retained.
+func (r *RestoreTokenReset) Rollback() error {
+	if r == nil {
+		return nil
+	}
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	if r.done || !r.changed {
+		r.done = true
+		return nil
+	}
+	creds, err := r.store.backend.Lookup(r.deviceID)
+	if err != nil {
+		return err
+	}
+	if creds == nil {
+		creds = &SavedCredentials{}
+	}
+	if creds.RestoreToken == "" {
+		updated := *creds
+		updated.RestoreToken = r.previousToken
+		if err := r.store.backend.Save(r.deviceID, &updated); err != nil {
+			return err
+		}
+	}
+	r.done = true
+	return nil
+}
+
 // fileBackend stores credentials as a JSON file on disk.
 type fileBackend struct {
 	path    string
@@ -222,8 +307,17 @@ func (fb *fileBackend) Lookup(deviceID string) (*SavedCredentials, error) {
 }
 
 func (fb *fileBackend) Save(deviceID string, creds *SavedCredentials) error {
+	previous, existed := fb.devices[deviceID]
 	fb.devices[deviceID] = creds
-	return fb.persist()
+	if err := fb.persist(); err != nil {
+		if existed {
+			fb.devices[deviceID] = previous
+		} else {
+			delete(fb.devices, deviceID)
+		}
+		return err
+	}
+	return nil
 }
 
 func (fb *fileBackend) persist() error {

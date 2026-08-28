@@ -344,6 +344,7 @@ doubletake-ctl status
 doubletake-ctl connect 192.168.1.77
 doubletake-ctl connect 192.168.1.133
 doubletake-ctl disconnect 192.168.1.77
+doubletake-ctl reset-restore-token 192.168.1.133
 doubletake-ctl disconnect
 ```
 
@@ -399,6 +400,7 @@ doubletake-ctl devices
 doubletake-ctl connect [target] [PIN-or-password]
 doubletake-ctl pin <PIN-or-password>
 doubletake-ctl disconnect [target]
+doubletake-ctl reset-restore-token <target>
 doubletake-ctl mute [target]
 doubletake-ctl unmute [target]
 ```
@@ -406,6 +408,11 @@ doubletake-ctl unmute [target]
 - `disconnect` without a target stops all active streams.
 - `disconnect <target>` stops only that receiver.
 - `mute`/`unmute` can operate globally or per target.
+- `reset-restore-token <target>` stops one fully streaming receiver, clears only
+  its saved Wayland portal restore token, and reconnects it on the same IP and
+  port. Pairing credentials and other streams are unchanged. The command rejects
+  targets sharing a capture group; disconnect those peers first so the old portal
+  source can be stopped before a replacement is authorized.
 - `pin` retains its historical command name, but submits whichever credential
   the daemon requests: an on-screen PIN or a configured password. It is
   targetless and therefore requires exactly one waiting receiver; use

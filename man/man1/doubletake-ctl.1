@@ -29,6 +29,12 @@ to select one explicitly.
 .TP
 .B disconnect [\fITARGET\fR]
 Disconnect from an Apple TV. If no target is specified, disconnects all active connections
+.TP
+.B reset-restore-token \fITARGET\fR
+Stop one fully streaming target, clear only its saved Wayland portal restore
+token, and reconnect the same IP and port. Pairing credentials and other streams
+are preserved. The command refuses a target whose capture group is shared; first
+disconnect the peers using that group so the old portal source can be stopped.
 .SH EXAMPLES
 .TP
 Check daemon status:
@@ -46,6 +52,9 @@ Disconnect from a specific Apple TV:
 .TP
 Disconnect all connections:
 .B doubletake-ctl disconnect
+.TP
+Clear one receiver's Wayland restore token and reconnect it:
+.B doubletake-ctl reset-restore-token 192.168.1.77
 .SH USAGE
 First, start the doubletake daemon in a separate terminal or background:
 .IP

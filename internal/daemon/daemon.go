@@ -204,6 +204,7 @@ type activeStream struct {
 	device         string // friendly name
 	deviceIP       string
 	deviceID       string
+	port           int
 	state          State
 	audioMuted     bool
 	session        *airplay.MirrorSession
@@ -233,7 +234,10 @@ type videoCaptureGroup struct {
 	capture          *airplay.ScreenCapture
 	minimumVideoLead time.Duration
 	cancel           context.CancelFunc
+	resetReservedBy  *activeStream
 }
+
+var errCaptureGroupResetReserved = errors.New("capture group is reserved for restore-token reset")
 
 // daemonCleanup owns resources detached from the daemon's state maps. Building
 // a cleanup plan while holding d.mu makes the state change atomic; running it
@@ -264,6 +268,9 @@ func (cleanup *daemonCleanup) addStream(entry *activeStream) {
 		cleanup.clients = append(cleanup.clients, entry.client)
 		entry.client = nil
 	}
+	if entry.captureGroup != nil && entry.captureGroup.resetReservedBy == entry {
+		entry.captureGroup.resetReservedBy = nil
+	}
 	entry.captureGroup = nil
 }
 
@@ -277,6 +284,7 @@ func (cleanup *daemonCleanup) addCaptureGroup(group *videoCaptureGroup) {
 		group.capture = nil
 	}
 	group.broadcast = nil
+	group.resetReservedBy = nil
 }
 
 // run may block and therefore must never be called with d.mu held. Cancel all
@@ -548,6 +556,8 @@ func (d *Daemon) handleRequest(req Request) Response {
 		return d.handleConnect(req)
 	case "disconnect":
 		return d.handleDisconnect(req)
+	case "reset-restore-token":
+		return d.handleResetRestoreToken(req)
 	case "mute":
 		return d.handleSetMute(req, true)
 	case "unmute":
@@ -783,6 +793,7 @@ func (d *Daemon) handleConnect(req Request) Response {
 	connCtx, cancel := context.WithCancel(context.Background())
 	entry := &activeStream{
 		deviceIP:     target,
+		port:         port,
 		state:        StateConnecting,
 		cancelFn:     cancel,
 		credentialCh: make(chan string, 1),
@@ -1124,6 +1135,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	streamCfg := d.mirrorStreamConfig()
 	streamCfg.AutomaticHEVCAvailable = capturePreparation.AutomaticHEVCAvailable()
 	streamCfg.MeasuredVideoLatency = capturePreparation.MeasuredVideoLatency()
+	streamCfg.MinimumVideoLead = capturePreparation.MinimumVideoLead()
 	var broadcast *airplay.BroadcastCapture
 	selectedCaptureKey := videoCaptureKey{maxWidth: -1, maxHeight: -1}
 	prepareVideo := func(width, height int, codec airplay.VideoCodec) (airplay.VideoPreparationResult, error) {
@@ -1342,20 +1354,38 @@ func (d *Daemon) getOrStartPreparedCaptureGroup(ctx context.Context, entry *acti
 	if d.captureGroups == nil {
 		d.captureGroups = make(map[videoCaptureKey]*videoCaptureGroup)
 	}
-	if group := d.captureGroups[key]; group != nil {
-		entry.captureGroup = group
-		broadcast := group.broadcast
+	if _, err := d.migrateRestoreTokenResetReservationLocked(entry, key); err != nil {
 		d.mu.Unlock()
-		preparation.Close()
-		if broadcast == nil {
-			return nil, 0, fmt.Errorf("capture group %dx%d has no broadcast", key.maxWidth, key.maxHeight)
-		}
-		return broadcast, group.minimumVideoLead, nil
+		return nil, 0, err
 	}
-
-	captureCtx, captureCancel := context.WithCancel(context.Background())
-	group := &videoCaptureGroup{key: key, cancel: captureCancel}
-	d.captureGroups[key] = group
+	group := d.captureGroups[key]
+	var captureCtx context.Context
+	var captureCancel context.CancelFunc
+	if group != nil {
+		if group.resetReservedBy != nil && group.resetReservedBy != entry {
+			d.mu.Unlock()
+			return nil, 0, fmt.Errorf("%w: %dx%d", errCaptureGroupResetReserved, key.maxWidth, key.maxHeight)
+		}
+		if group.resetReservedBy == entry && group.broadcast == nil && group.capture == nil && group.cancel == nil {
+			captureCtx, captureCancel = context.WithCancel(context.Background())
+			group.cancel = captureCancel
+			group.resetReservedBy = nil
+		} else {
+			entry.captureGroup = group
+			broadcast := group.broadcast
+			d.mu.Unlock()
+			preparation.Close()
+			if broadcast == nil {
+				return nil, 0, fmt.Errorf("capture group %dx%d has no broadcast", key.maxWidth, key.maxHeight)
+			}
+			return broadcast, group.minimumVideoLead, nil
+		}
+	} else {
+		captureCtx, captureCancel = context.WithCancel(context.Background())
+		group = &videoCaptureGroup{key: key, cancel: captureCancel}
+		d.captureGroups[key] = group
+		entry.captureGroup = group
+	}
 	entry.captureGroup = group
 	d.mu.Unlock()
 
@@ -1448,22 +1478,37 @@ func (d *Daemon) getOrStartCaptureGroup(entry *activeStream, restoreToken, devic
 	if d.captureGroups == nil {
 		d.captureGroups = make(map[videoCaptureKey]*videoCaptureGroup)
 	}
-	if group := d.captureGroups[key]; group != nil {
-		entry.captureGroup = group
-		broadcast := group.broadcast
+	if _, err := d.migrateRestoreTokenResetReservationLocked(entry, key); err != nil {
 		d.mu.Unlock()
-		if broadcast == nil {
-			return nil, fmt.Errorf("capture group %dx%d has no broadcast", key.maxWidth, key.maxHeight)
-		}
-		return broadcast, nil
+		return nil, err
 	}
-
-	// Publish the group and cancellation hook before entering the display portal
-	// or launching GStreamer. A targeted disconnect can then cancel an orphaned
-	// startup without affecting captures used by other canvas groups.
-	captureCtx, captureCancel := context.WithCancel(context.Background())
-	group := &videoCaptureGroup{key: key, cancel: captureCancel}
-	d.captureGroups[key] = group
+	group := d.captureGroups[key]
+	var captureCtx context.Context
+	var captureCancel context.CancelFunc
+	if group != nil {
+		if group.resetReservedBy != nil && group.resetReservedBy != entry {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: %dx%d", errCaptureGroupResetReserved, key.maxWidth, key.maxHeight)
+		}
+		if group.resetReservedBy == entry && group.broadcast == nil && group.capture == nil && group.cancel == nil {
+			captureCtx, captureCancel = context.WithCancel(context.Background())
+			group.cancel = captureCancel
+			group.resetReservedBy = nil
+		} else {
+			entry.captureGroup = group
+			broadcast := group.broadcast
+			d.mu.Unlock()
+			if broadcast == nil {
+				return nil, fmt.Errorf("capture group %dx%d has no broadcast", key.maxWidth, key.maxHeight)
+			}
+			return broadcast, nil
+		}
+	} else {
+		captureCtx, captureCancel = context.WithCancel(context.Background())
+		group = &videoCaptureGroup{key: key, cancel: captureCancel}
+		d.captureGroups[key] = group
+		entry.captureGroup = group
+	}
 	entry.captureGroup = group
 	d.mu.Unlock()
 
@@ -1526,6 +1571,30 @@ func (d *Daemon) getOrStartCaptureGroup(entry *activeStream, restoreToken, devic
 	}()
 
 	return newBC, nil
+}
+
+// migrateRestoreTokenResetReservationLocked moves an owner-only reset claim
+// when the receiver negotiates a different canvas after reconnecting. It never
+// joins an occupied destination: reset replacement remains exclusive.
+func (d *Daemon) migrateRestoreTokenResetReservationLocked(entry *activeStream, key videoCaptureKey) (*videoCaptureGroup, error) {
+	reservation := entry.captureGroup
+	if reservation == nil || reservation.resetReservedBy != entry ||
+		reservation.broadcast != nil || reservation.capture != nil || reservation.cancel != nil {
+		return nil, nil
+	}
+	if reservation.key == key {
+		return reservation, nil
+	}
+	if d.captureGroups[reservation.key] != reservation {
+		return nil, context.Canceled
+	}
+	if d.captureGroups[key] != nil {
+		return nil, fmt.Errorf("%w: replacement canvas %dx%d is already active", errCaptureGroupResetReserved, key.maxWidth, key.maxHeight)
+	}
+	delete(d.captureGroups, reservation.key)
+	reservation.key = key
+	d.captureGroups[key] = reservation
+	return reservation, nil
 }
 
 // detachStreamLocked removes a single stream and transfers ownership of its

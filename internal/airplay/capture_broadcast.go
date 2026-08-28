@@ -19,13 +19,21 @@ const (
 	// metadata; it is deliberately generous for normal H.264 buffer cadence.
 	broadcastSinkQueueChunks = 4096
 
+	// Encoded frames are detached from the portal-owned raw-buffer pool. Keep
+	// enough of them to absorb a receiver's ordinary two-second socket-write
+	// stall without terminating the session; the independent byte limit still
+	// bounds memory and a persistently stalled peer is removed.
+	broadcastSinkQueueDuration = 2 * time.Second
+
 	// Source shutdown normally races with consumers draining their last few
 	// buffers. Do not let a receiver that stopped reading keep Run alive forever.
 	broadcastSinkDrainTimeout = 2 * time.Second
 )
 
-var errBroadcastSinkBacklog = errors.New("broadcast sink backlog limit exceeded")
-var errBroadcastSinkMode = errors.New("backpressured broadcast sink requires an otherwise unused capture")
+var (
+	errBroadcastSinkBacklog = errors.New("broadcast sink backlog limit exceeded")
+	errBroadcastSinkMode    = errors.New("backpressured broadcast sink requires an otherwise unused capture")
+)
 
 // BroadcastCapture reads from a single ScreenCapture and fans the raw byte
 // stream out to multiple registered sinks. Each sink has an independent,
@@ -55,7 +63,6 @@ type BroadcastCapture struct {
 	// following sequence, which gives attachment an exact cutover even when a
 	// source read has completed but has not yet been fanned out.
 	sequence uint64
-
 	drainTimeout time.Duration
 
 	sinks []*BroadcastSink
@@ -81,10 +88,9 @@ type BroadcastSink struct {
 
 	maxQueuedBytes  int
 	maxQueuedChunks int
-	// Apple's ordinary virtual-display source bounds its upstream frame queue to
-	// 67 ms and drops an incoming source frame at that limit. Doubletake derives
-	// a downstream encoded-relay ceiling from that value and counts configured
-	// sample durations. The byte and chunk limits remain independent safeguards.
+	// This encoded system-memory queue is independent of Apple's upstream raw
+	// frame queue. It counts nominal sample durations so PTS gaps caused by raw
+	// frame dropping do not spuriously detach a healthy receiver.
 	maxFrameQueueDuration time.Duration
 	backpressure          bool
 	blockedProducers      int // number waiting for queue handoff; guarded by mu
@@ -105,7 +111,7 @@ func newBroadcastSinkWithPolicy(owner *BroadcastCapture, backpressure bool) *Bro
 		owner:                 owner,
 		maxQueuedBytes:        broadcastSinkQueueBytes,
 		maxQueuedChunks:       broadcastSinkQueueChunks,
-		maxFrameQueueDuration: ordinaryScreenFrameQueueDuration,
+		maxFrameQueueDuration: broadcastSinkQueueDuration,
 		backpressure:          backpressure,
 		frameDuration:         frameDuration,
 		done:                  make(chan struct{}),

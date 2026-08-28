@@ -54,6 +54,12 @@ func (c *Client) DisconnectTarget(target string) (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "disconnect", Target: target})
 }
 
+// ResetRestoreToken clears one active receiver's Wayland restore token and
+// reconnects that same target.
+func (c *Client) ResetRestoreToken(target string) (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "reset-restore-token", Target: target})
+}
+
 // Mute mutes mirrored audio on all active sessions.
 func (c *Client) Mute() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "mute"})

@@ -579,6 +579,37 @@ func TestMediaFirstAutoFallsBackBeforeCreatingLatencyMismatch(t *testing.T) {
 	}
 }
 
+func TestMediaFirstRelayLeadPreservesAutomaticHEVC(t *testing.T) {
+	SetTargetLatency(0)
+	t.Cleanup(func() { SetTargetLatency(0) })
+	_, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{
+		Profile: ReceiverProfileRoku, DisplayWidth: 3840, DisplayHeight: 2160,
+	})
+	if err := client.Pair(ctx, ""); err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	session, err := client.SetupMirrorWithVideoCodecPreparation(ctx, StreamConfig{
+		VideoCodec:             VideoCodecAuto,
+		AutomaticHEVCAvailable: true,
+		MinimumVideoLead:       250 * time.Millisecond,
+	}, func(_, _ int, codec VideoCodec) error {
+		if codec != VideoCodecHEVC {
+			return fmt.Errorf("media-first relay codec = %s, want HEVC", codec)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("setup mirror: %v", err)
+	}
+	defer session.Close()
+	if session.videoCodec != VideoCodecHEVC || session.timestampBias != 250*time.Millisecond {
+		t.Fatalf("media-first relay session = codec %s lead %v, want HEVC/250ms", session.videoCodec, session.timestampBias)
+	}
+	if session.audioStream == nil || session.audioStream.latencySamples != samplesFor44k1(260*time.Millisecond) {
+		t.Fatalf("media-first relay audio lead = %#v, want %d samples", session.audioStream, samplesFor44k1(260*time.Millisecond))
+	}
+}
+
 func TestMediaFirstCalibratedAutoFallsBackBeforeLiveMeasurement(t *testing.T) {
 	SetTargetLatency(0)
 	t.Cleanup(func() { SetTargetLatency(0) })

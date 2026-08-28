@@ -504,6 +504,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	var receiverEventPort int
 	var attemptedEventPort int
 	audioControlLPort := audioCtrlConn.LocalAddr().(*net.UDPAddr).Port
+	if !targetLatencyIsExplicit() {
+		latencies = latencies.withMinimumVideoLead(cfg.MinimumVideoLead)
+	}
 	audioLatencySamples := samplesFor44k1(latencies.audio)
 	measuredLatencyApplied := false
 	audioSetupCommitted := false

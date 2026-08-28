@@ -371,6 +371,7 @@ func main() {
 	}
 	streamCfg.AutomaticHEVCAvailable = capturePreparation.AutomaticHEVCAvailable()
 	streamCfg.MeasuredVideoLatency = capturePreparation.MeasuredVideoLatency()
+	streamCfg.MinimumVideoLead = capturePreparation.MinimumVideoLead()
 
 	var capture *airplay.ScreenCapture
 	var broadcast *airplay.BroadcastCapture

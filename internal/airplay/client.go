@@ -1203,6 +1203,7 @@ type StreamConfig struct {
 	VideoCodec             VideoCodec    // empty/h264, auto, or capability-gated hevc
 	AutomaticHEVCAvailable bool          // capture preflight found the hardware HEVC-4K path
 	MeasuredVideoLatency   time.Duration // measured minimum lead for the local HEVC capture path
+	MinimumVideoLead       time.Duration // known capture/transport lead before codec selection
 	NoEncrypt              bool          // Disable encryption for debugging
 	DirectKey              bool          // Use shk/shiv directly without SHA-512 derivation
 	NoAudio                bool          // Disable audio streaming
