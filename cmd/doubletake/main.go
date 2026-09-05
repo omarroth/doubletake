@@ -80,6 +80,7 @@ func main() {
 	x11WindowID := flag.String("x11-window-id", "", "X11 window id to capture, decimal or 0xhex")
 	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
+	portalResize := flag.Bool("portal-resize", false, "Resize the captured frame to the size the screencast portal reported, using vapostproc. Needed on fractionally scaled outputs, which are otherwise cropped to the top-left corner")
 	flag.Parse()
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)
@@ -346,6 +347,7 @@ func main() {
 		X11WindowID:   xid,
 		X11WindowName: *x11WindowName,
 		ShowCursor:    !*noCursor,
+		PortalResize:  *portalResize,
 	}
 	var capturePreparation *airplay.CapturePreparation
 	if *testMode {
