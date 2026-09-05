@@ -37,6 +37,9 @@ type CaptureConfig struct {
 
 	ShowCursor bool // show the mouse cursor in the captured video (Wayland and X11)
 
+	// PortalResize fits the captured frame to the size the portal reported.
+	PortalResize bool
+
 	RestoreToken     string
 	SaveRestoreToken func(string) error
 }
@@ -860,8 +863,20 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 	var beforeConvert []gstStage
 	if hasGstElement("vapostproc") {
 		beforeConvert = append(beforeConvert, gstStage{"vapostproc"})
+		// Fractional Wayland scaling makes the portal report logical dimensions
+		// while PipeWire delivers physical buffers. The portal exposes no physical
+		// size, so request the reported caps unconditionally; vapostproc negotiates
+		// passthrough when they already match. Keep this on the GPU path because
+		// software scaling would penalize systems without GPU processing.
+		if hasCompositor && cfg.PortalResize {
+			beforeConvert = append(beforeConvert,
+				gstStage{fmt.Sprintf("video/x-raw,width=%d,height=%d", streamSize[0], streamSize[1])})
+		}
 	} else {
 		log.Printf("[CAPTURE] vapostproc unavailable, using software conversion")
+		if cfg.PortalResize {
+			log.Printf("[CAPTURE] -portal-resize applies to the vapostproc path only and is inactive")
+		}
 	}
 
 	var afterScale []gstStage
