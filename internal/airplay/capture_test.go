@@ -3,6 +3,7 @@ package airplay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -361,18 +362,28 @@ func TestFrameIntervalMillis(t *testing.T) {
 	}
 }
 
-func TestPipeWireVideoSourceCopiesPortalBuffers(t *testing.T) {
-	got := pipeWireVideoSourceStage(3, 42, 30)
-	want := gstStage{
+func TestPipeWireVideoSourceBufferPoolPolicy(t *testing.T) {
+	base := gstStage{
 		"pipewiresrc",
 		"fd=3",
 		"path=42",
 		"do-timestamp=true",
 		"keepalive-time=33",
-		"always-copy=true",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("PipeWire source stage = %v, want %v", got, want)
+	for _, test := range []struct {
+		name       string
+		alwaysCopy bool
+		want       gstStage
+	}{
+		{name: "native import", want: base},
+		{name: "retaining system path", alwaysCopy: true, want: append(append(gstStage(nil), base...), "always-copy=true")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := pipeWireVideoSourceStage(3, 42, 30, test.alwaysCopy)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("PipeWire source stage = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -720,6 +731,7 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 		method      string
 		available   map[string]bool
 		wantEncoder string
+		wantMemory  encoderInputMemory
 		wantProbes  []string
 		wantError   string
 	}{
@@ -761,6 +773,7 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			method:      "vaapi",
 			available:   map[string]bool{"vah264enc": true, "openh264enc": true},
 			wantEncoder: "vah264enc",
+			wantMemory:  encoderInputVAMemory,
 			wantProbes:  []string{"vah264enc"},
 		},
 		{
@@ -806,6 +819,65 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			}
 			if len(encoder.parts) == 0 || encoder.parts[0] != test.wantEncoder {
 				t.Fatalf("encoder = %#v, want %s", encoder, test.wantEncoder)
+			}
+			if encoder.inputMemory != test.wantMemory {
+				t.Fatalf("encoder input memory = %v, want %v", encoder.inputMemory, test.wantMemory)
+			}
+		})
+	}
+}
+
+func TestVAWaylandPipelineKeepsFramesInVAMemory(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"vah264enc"}, rawFormat: "NV12", codec: VideoCodecH264, inputMemory: encoderInputVAMemory}
+	for _, size := range [][2]int{{0, 0}, {1920, 1080}, {1279, 719}, {1, 1}} {
+		pipeline := buildVAWaylandVideoPipeline(3, 42, 30, encoder, size[0], size[1], true)
+		joined := strings.Join(pipeline, " ")
+		for _, forbidden := range []string{"always-copy", "videoconvert", "videoscale", "compositor"} {
+			if strings.Contains(joined, forbidden) {
+				t.Errorf("VA pipeline must not copy or process portal frames on the CPU: %s", joined)
+			}
+		}
+		for _, required := range []string{"keepalive-time=33", "disable-passthrough=true", "add-borders=true", "video/x-raw(ANY),pixel-aspect-ratio=1/1", "video/x-raw(memory:VAMemory),format=NV12"} {
+			if !strings.Contains(joined, required) {
+				t.Errorf("VA pipeline is missing %q: %s", required, joined)
+			}
+		}
+		if size[0] > 1 && size[1] > 1 {
+			want := fmt.Sprintf("width=%d,height=%d,pixel-aspect-ratio=1/1", size[0]&^1, size[1]&^1)
+			if !strings.Contains(joined, want) {
+				t.Errorf("VA scaling must use an even receiver canvas: %s", joined)
+			}
+		} else if strings.Contains(joined, "width=") || strings.Contains(joined, "height=") {
+			t.Errorf("invalid receiver size must not constrain the capture: %s", joined)
+		}
+		// The VA path must retain the same timestamp-preserving output as other
+		// sources, since the sender schedules video from the encoded buffer PTS.
+		suffix := appendGstVideoEncoding(nil, encoder, true)
+		if !reflect.DeepEqual(pipeline[len(pipeline)-len(suffix):], suffix) {
+			t.Errorf("VA pipeline changed the shared encoding/output suffix: %s", joined)
+		}
+	}
+}
+
+func TestVAWaylandPipelineSelection(t *testing.T) {
+	hasVA := func(element string) bool { return element == "vapostproc" }
+	noVA := func(string) bool { return false }
+	for _, test := range []struct {
+		name       string
+		encoder    encoderResult
+		hasElement func(string) bool
+		want       bool
+	}{
+		{name: "VA H264", encoder: encoderResult{parts: gstStage{"vah264enc"}, inputMemory: encoderInputVAMemory}, hasElement: hasVA, want: true},
+		{name: "missing postprocessor", encoder: encoderResult{parts: gstStage{"vah264enc"}, inputMemory: encoderInputVAMemory}, hasElement: noVA},
+		{name: "VA encoder without VA input", encoder: encoderResult{parts: gstStage{"vah264enc"}}, hasElement: hasVA},
+		{name: "software H264", encoder: encoderResult{parts: gstStage{"openh264enc"}}, hasElement: hasVA},
+		{name: "NVENC H264", encoder: encoderResult{parts: gstStage{"nvh264enc"}}, hasElement: hasVA},
+		{name: "empty encoder", hasElement: hasVA},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := canBuildVAWaylandVideoPipeline(test.encoder, test.hasElement); got != test.want {
+				t.Fatalf("canBuildVAWaylandVideoPipeline() = %t, want %t", got, test.want)
 			}
 		})
 	}
