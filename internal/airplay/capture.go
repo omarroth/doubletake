@@ -2,7 +2,9 @@ package airplay
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -70,10 +72,16 @@ type ScreenCapture struct {
 	frames   videoAccessUnitReader
 	cancel   context.CancelFunc
 	pwNodeID uint32
-	dbusConn *dbus.Conn    // portal session D-Bus connection (must stay open for Wayland)
+	portal   io.Closer     // portal session (must stay open for Wayland)
 	waitCh   chan struct{} // closed when process exits
 	waitErr  error         // set before waitCh is closed
 	stopped  bool
+	stderr   *captureStderrTail
+}
+
+type pipeWirePortalSession interface {
+	io.Closer
+	openPipeWireRemote(context.Context) (*os.File, error)
 }
 
 type capturePreparationKind uint8
@@ -107,7 +115,7 @@ type CapturePreparation struct {
 
 	pwNodeID   uint32
 	pwFd       *os.File
-	dbusConn   *dbus.Conn
+	portal     pipeWirePortalSession
 	streamSize [2]int
 }
 
@@ -191,7 +199,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
 		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
 	}
-	nodeID, pwFd, dbusConn, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
+	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -203,7 +211,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	dbg("pipewire node ID: %d", nodeID)
 	preparation.pwNodeID = nodeID
 	preparation.pwFd = pwFd
-	preparation.dbusConn = dbusConn
+	preparation.portal = portal
 	return preparation, nil
 }
 
@@ -313,24 +321,31 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 	cfg.MaxWidth = width
 	cfg.MaxHeight = height
 	kind := p.kind
-	ctx := lifetime
-	if ctx == nil {
-		ctx = p.ctx
+	captureCtx := lifetime
+	if captureCtx == nil {
+		captureCtx = p.ctx
+	}
+	if captureCtx == nil {
+		captureCtx = context.Background()
+	}
+	startupCtx := p.ctx
+	if startupCtx == nil {
+		startupCtx = captureCtx
 	}
 	nodeID := p.pwNodeID
 	pwFd := p.pwFd
-	dbusConn := p.dbusConn
+	portal := p.portal
 	streamSize := p.streamSize
 	timestampedOutput := supportsTimestampedVideoOutput(cfg.VideoCodec)
 	p.pwFd = nil
-	p.dbusConn = nil
+	p.portal = nil
 	p.mu.Unlock()
 	if cfg.VideoCodec == VideoCodecHEVC && !timestampedOutput {
 		if pwFd != nil {
 			_ = pwFd.Close()
 		}
-		if dbusConn != nil {
-			_ = dbusConn.Close()
+		if portal != nil {
+			_ = portal.Close()
 		}
 		return nil, fmt.Errorf("HEVC capture requires GStreamer rtph265pay, rtponviftimestamp, and rtpstreampay")
 	}
@@ -338,8 +353,8 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 		if pwFd != nil {
 			_ = pwFd.Close()
 		}
-		if dbusConn != nil {
-			_ = dbusConn.Close()
+		if portal != nil {
+			_ = portal.Close()
 		}
 		return nil, fmt.Errorf("HEVC capture requires GStreamer h265parse")
 	}
@@ -348,20 +363,26 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 		if pwFd != nil {
 			_ = pwFd.Close()
 		}
-		if dbusConn != nil {
-			_ = dbusConn.Close()
+		if portal != nil {
+			_ = portal.Close()
 		}
 		return nil, err
 	}
 
 	switch kind {
 	case capturePreparationWayland:
-		return startPreparedWaylandCapture(ctx, cfg, encoder, nodeID, pwFd, dbusConn, streamSize, timestampedOutput)
+		return startPreparedWaylandCapture(startupCtx, captureCtx, cfg, encoder, nodeID, pwFd, portal, streamSize, timestampedOutput)
 	case capturePreparationX11:
-		return startPreparedX11Capture(ctx, cfg, encoder, timestampedOutput)
+		return startPreparedX11Capture(captureCtx, cfg, encoder, timestampedOutput)
 	case capturePreparationTest:
-		return startPreparedTestCapture(ctx, cfg, encoder, timestampedOutput)
+		return startPreparedTestCapture(captureCtx, cfg, encoder, timestampedOutput)
 	default:
+		if pwFd != nil {
+			_ = pwFd.Close()
+		}
+		if portal != nil {
+			_ = portal.Close()
+		}
 		return nil, fmt.Errorf("invalid capture preparation kind %d", kind)
 	}
 }
@@ -404,15 +425,15 @@ func (p *CapturePreparation) Close() {
 	}
 	p.used = true
 	pwFd := p.pwFd
-	dbusConn := p.dbusConn
+	portal := p.portal
 	p.pwFd = nil
-	p.dbusConn = nil
+	p.portal = nil
 	p.mu.Unlock()
 	if pwFd != nil {
 		_ = pwFd.Close()
 	}
-	if dbusConn != nil {
-		_ = dbusConn.Close()
+	if portal != nil {
+		_ = portal.Close()
 	}
 }
 
@@ -722,6 +743,29 @@ type encoderResult struct {
 	inputMemory encoderInputMemory
 }
 
+type waylandPipelineMode uint8
+
+const (
+	waylandPipelineSystemMemory waylandPipelineMode = iota
+	waylandPipelineVAMemory
+)
+
+type waylandCapturePlan struct {
+	encoder encoderResult
+	mode    waylandPipelineMode
+}
+
+func (p waylandCapturePlan) String() string {
+	encoder := "GStreamer encoder"
+	if len(p.encoder.parts) != 0 {
+		encoder = p.encoder.parts[0]
+	}
+	if p.mode == waylandPipelineVAMemory {
+		return encoder + " with native VA frame import"
+	}
+	return encoder + " with system-memory frame staging"
+}
+
 func frameRateStage(fps int) gstStage {
 	return gstStage{fmt.Sprintf("video/x-raw,framerate=%d/1", fps)}
 }
@@ -868,16 +912,214 @@ func canBuildVAWaylandVideoPipeline(encoder encoderResult, hasElement func(strin
 	return encoder.inputMemory == encoderInputVAMemory && hasElement("vapostproc")
 }
 
-func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoderParts encoderResult, nodeID uint32, pwFd *os.File, dbusConn *dbus.Conn, streamSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
-	if pwFd == nil || dbusConn == nil {
+func waylandCapturePlans(encoder encoderResult, hasElement func(string) bool) []waylandCapturePlan {
+	plans := make([]waylandCapturePlan, 0, 2)
+	if canBuildVAWaylandVideoPipeline(encoder, hasElement) {
+		plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineVAMemory})
+	}
+	// vah264enc accepts both VAMemory and ordinary NV12. A failed VA import
+	// can therefore fall back to a CPU-owned frame without changing the selected
+	// encoder backend. Every other encoder has only its normal system-memory plan.
+	plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineSystemMemory})
+	return plans
+}
+
+// systemMemoryStagingFormat deliberately differs from every encoder input
+// format we select. Requiring that intermediate layout prevents videoconvert
+// from passing through an already matching PipeWire buffer; the second
+// conversion must allocate a new ordinary system-memory output buffer.
+func systemMemoryStagingFormat(target string) string {
+	switch target {
+	case "I420":
+		return "NV12"
+	case "NV12":
+		return "I420"
+	case "I420_10LE":
+		return "P010_10LE"
+	case "P010_10LE":
+		return "I420_10LE"
+	default:
+		// All current encoders use one of the formats above. Keeping a distinct
+		// fallback still makes an added format fail during startup validation
+		// rather than silently retaining a portal-owned buffer.
+		return "I420"
+	}
+}
+
+// buildSystemWaylandVideoPipeline negotiates system memory immediately after
+// pipewiresrc, before any element which may retain a portal buffer. Two
+// deliberately different raw layouts make the second videoconvert allocate a
+// fresh buffer even when the portal already supplies the encoder's format.
+func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
+	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
+	stagingFormat := systemMemoryStagingFormat(encoder.rawFormat)
+	args = appendGstStage(args, gstStage{"videoconvert"})
+	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", stagingFormat)})
+	args = appendGstStage(args, gstStage{"videoconvert"})
+	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
+
+	hasCompositor := portalSize[0] > 0 && portalSize[1] > 0 && hasElement != nil && hasElement("compositor")
+	if hasCompositor {
+		args = appendGstStage(args, gstStage{"compositor", "force-live=true", "ignore-inactive-pads=true", "background=black"})
+		args = appendGstStage(args, gstStage{fmt.Sprintf(
+			"video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1",
+			encoder.rawFormat, portalSize[0], portalSize[1], fps)})
+	}
+	for _, stage := range receiverScaleStages(maxWidth, maxHeight) {
+		args = appendGstStage(args, stage)
+	}
+	if !hasCompositor {
+		args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
+		args = appendGstStage(args, frameRateStage(fps))
+	}
+	args = appendGstStage(args, lowLatencyVideoQueueStage())
+	if encoder.needsVulkan {
+		args = appendGstStage(args, gstStage{"vulkanupload"})
+	}
+	return appendGstVideoEncoding(args, encoder, timestampedOutput)
+}
+
+func buildWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
+	if canBuildVAWaylandVideoPipeline(encoder, hasElement) {
+		return buildVAWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
+	}
+	return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, portalSize, timestampedOutput, hasElement)
+}
+
+func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan waylandCapturePlan, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
+	if plan.mode == waylandPipelineVAMemory {
+		return buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+	}
+	return buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, portalSize, timestampedOutput, hasElement)
+}
+
+const (
+	waylandCaptureAttemptTimeout = 3 * time.Second
+	waylandCaptureStartupBudget  = 10 * time.Second
+	maxStartupProbeUnits         = 256
+	maxStartupProbeBytes         = 64 << 20
+)
+
+type waylandCaptureAttemptStarter func(context.Context, CaptureConfig, waylandCapturePlan, uint32, *os.File, [2]int, bool) (*ScreenCapture, error)
+type waylandCaptureProber func(context.Context, *ScreenCapture, VideoCodec, bool) error
+type pipeWireRemoteOpener func(context.Context) (*os.File, error)
+
+func startPreparedWaylandCapture(startupCtx, captureCtx context.Context, cfg CaptureConfig, encoder encoderResult, nodeID uint32, pwFd *os.File, portal pipeWirePortalSession, streamSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
+	if portal == nil {
 		if pwFd != nil {
 			_ = pwFd.Close()
 		}
-		if dbusConn != nil {
-			_ = dbusConn.Close()
+		return nil, fmt.Errorf("prepared Wayland capture is missing portal resources")
+	}
+	return startPreparedWaylandCapturePlans(startupCtx, captureCtx, cfg,
+		waylandCapturePlans(encoder, hasGstElement), nodeID, pwFd, portal,
+		portal.openPipeWireRemote, streamSize, timestampedOutput,
+		startWaylandCaptureAttempt, probeWaylandCaptureStartup)
+}
+
+func startPreparedWaylandCapturePlans(
+	startupCtx context.Context,
+	captureCtx context.Context,
+	cfg CaptureConfig,
+	plans []waylandCapturePlan,
+	nodeID uint32,
+	initialRemote *os.File,
+	portal io.Closer,
+	openRemote pipeWireRemoteOpener,
+	streamSize [2]int,
+	timestampedOutput bool,
+	startAttempt waylandCaptureAttemptStarter,
+	probeAttempt waylandCaptureProber,
+) (_ *ScreenCapture, resultErr error) {
+	if startupCtx == nil {
+		startupCtx = context.Background()
+	}
+	if captureCtx == nil {
+		captureCtx = context.Background()
+	}
+	if initialRemote == nil || portal == nil || openRemote == nil || startAttempt == nil || probeAttempt == nil {
+		if initialRemote != nil {
+			_ = initialRemote.Close()
+		}
+		if portal != nil {
+			_ = portal.Close()
 		}
 		return nil, fmt.Errorf("prepared Wayland capture is missing portal resources")
 	}
+	if len(plans) == 0 {
+		_ = initialRemote.Close()
+		_ = portal.Close()
+		return nil, fmt.Errorf("prepared Wayland capture has no encoder plans")
+	}
+
+	startupCtx, cancelStartup := context.WithTimeout(startupCtx, waylandCaptureStartupBudget)
+	defer cancelStartup()
+	remote := initialRemote
+	portalTransferred := false
+	defer func() {
+		if remote != nil {
+			_ = remote.Close()
+		}
+		if !portalTransferred {
+			_ = portal.Close()
+		}
+	}()
+
+	attemptErrors := make([]string, 0, len(plans))
+	for index, plan := range plans {
+		if err := startupCtx.Err(); err != nil {
+			attemptErrors = append(attemptErrors, fmt.Sprintf("startup budget: %v", err))
+			break
+		}
+		if index != 0 {
+			var err error
+			remote, err = openRemote(startupCtx)
+			if err != nil {
+				if remote != nil {
+					_ = remote.Close()
+					remote = nil
+				}
+				attemptErrors = append(attemptErrors, fmt.Sprintf("%s: open a fresh PipeWire remote: %v", plan, err))
+				continue
+			}
+			if remote == nil {
+				attemptErrors = append(attemptErrors, fmt.Sprintf("%s: portal returned a nil PipeWire remote", plan))
+				continue
+			}
+		}
+
+		capture, err := startAttempt(captureCtx, cfg, plan, nodeID, remote, streamSize, timestampedOutput)
+		_ = remote.Close()
+		remote = nil
+		if err != nil {
+			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: %v", plan, err))
+			continue
+		}
+
+		probeCtx, cancelProbe := context.WithTimeout(startupCtx, waylandCaptureAttemptTimeout)
+		err = probeAttempt(probeCtx, capture, plan.encoder.codec, timestampedOutput)
+		cancelProbe()
+		if err != nil {
+			capture.Stop()
+			attemptError := fmt.Sprintf("%s: %v", plan, err)
+			if stderr := capture.stderrText(); stderr != "" {
+				attemptError += "; GStreamer stderr: " + stderr
+			}
+			attemptErrors = append(attemptErrors, attemptError)
+			log.Printf("[CAPTURE] %s failed startup validation: %v", plan, err)
+			continue
+		}
+
+		capture.portal = portal
+		portalTransferred = true
+		log.Printf("[CAPTURE] using %s", plan)
+		return capture, nil
+	}
+
+	return nil, fmt.Errorf("no Wayland capture pipeline produced a decodable startup sequence:\n  %s", strings.Join(attemptErrors, "\n  "))
+}
+
+func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan waylandCapturePlan, nodeID uint32, pwFd *os.File, streamSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
 	fps := cfg.FPS
@@ -885,50 +1127,12 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 		fps = 30
 	}
 
-	// Capture from the PipeWire portal and feed the shared video pipeline.
-	//   - vapostproc imports the portal's DMA-BUF via VA-API when available
-	//     Systems without VA-API (such as Asahi Linux) fall back to videoconvert.
-	//   - Wayland compositors may stop publishing an undamaged screen. A forced-live
-	//     GStreamer compositor repeats its input pad's latest frame at a regular
-	//     rate, because AirPlay requires continuous video even for a static image.
-	// The encoded dimensions are capped to the receiver's advertised display size
-	// when available. The actual result is read back from the codec SPS downstream.
+	// Capture from the PipeWire portal. Every plan establishes ownership of its
+	// output before a compositor, queue, or encoder can retain a portal buffer.
 	const pwFdNum = 3
-	var gstArgs []string
-	if canBuildVAWaylandVideoPipeline(encoderParts, hasGstElement) {
-		gstArgs = buildVAWaylandVideoPipeline(pwFdNum, nodeID, fps, encoderParts, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
-	} else {
-		source := pipeWireVideoSourceStage(pwFdNum, nodeID, fps, true)
-
-		hasCompositor := streamSize[0] > 0 && streamSize[1] > 0 && hasGstElement("compositor")
-
-		var beforeConvert []gstStage
-		if hasGstElement("vapostproc") {
-			beforeConvert = append(beforeConvert, gstStage{"vapostproc"})
-		} else {
-			log.Printf("[CAPTURE] vapostproc unavailable, using software conversion")
-		}
-
-		var afterScale []gstStage
-		if hasCompositor {
-			beforeConvert = append(beforeConvert,
-				gstStage{"compositor", "force-live=true", "ignore-inactive-pads=true", "background=black"},
-				gstStage{fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", streamSize[0], streamSize[1], fps)},
-			)
-		} else {
-			log.Printf("[CAPTURE] idle-frame compositor unavailable; using portal frame timing")
-		}
-		if hasCompositor {
-			afterScale = append(afterScale, lowLatencyVideoQueueStage())
-		} else {
-			afterScale = append(afterScale,
-				gstStage{"videorate", "drop-only=true", "skip-to-first=true"},
-				frameRateStage(fps),
-				lowLatencyVideoQueueStage(),
-			)
-		}
-		gstArgs = buildGstVideoPipeline(source, beforeConvert, afterScale, encoderParts, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
-	}
+	gstArgs := buildWaylandVideoPipelineForPlan(
+		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight,
+		streamSize, timestampedOutput, hasGstElement)
 
 	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
@@ -937,33 +1141,36 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		pwFd.Close()
-		dbusConn.Close()
 		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
-	stderr, _ := cmd.StderrPipe()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		_ = stdout.Close()
+		return nil, fmt.Errorf("gst stderr pipe: %w", err)
+	}
 
 	waitResult, err := startGStreamerCommand(cmd)
 	if err != nil {
 		cancel()
-		pwFd.Close()
-		dbusConn.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
-	pwFd.Close() // child inherited it
 
-	go logStderr("GST", stderr)
+	stderrTail := newCaptureStderrTail()
+	go logStderr("GST", stderr, stderrTail)
 
 	capture := &ScreenCapture{
 		cmd:      cmd,
 		stdout:   stdout,
 		cancel:   cancel,
 		pwNodeID: nodeID,
-		dbusConn: dbusConn,
 		waitCh:   make(chan struct{}),
+		stderr:   stderrTail,
 	}
 	if timestampedOutput {
-		capture.frames = newRTPVideoAccessUnitReader(stdout, encoderParts.codec)
+		capture.frames = newRTPVideoAccessUnitReader(stdout, plan.encoder.codec)
 	}
 	go func() {
 		capture.waitErr = <-waitResult
@@ -971,6 +1178,309 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 	}()
 
 	return capture, nil
+}
+
+type prefetchedVideoAccessUnitReader struct {
+	units  []VideoAccessUnit
+	reader videoAccessUnitReader
+}
+
+func (r *prefetchedVideoAccessUnitReader) hasPrefetchedUnit() bool {
+	return r != nil && len(r.units) != 0
+}
+
+func (r *prefetchedVideoAccessUnitReader) ReadVideoAccessUnit() (VideoAccessUnit, error) {
+	if len(r.units) != 0 {
+		unit := r.units[0]
+		r.units[0] = VideoAccessUnit{}
+		r.units = r.units[1:]
+		return unit, nil
+	}
+	return r.reader.ReadVideoAccessUnit()
+}
+
+type prefixedReadCloser struct {
+	prefix *bytes.Reader
+	reader io.Reader
+	closer io.Closer
+}
+
+func (r *prefixedReadCloser) Read(p []byte) (int, error) {
+	if r.prefix != nil && r.prefix.Len() != 0 {
+		return r.prefix.Read(p)
+	}
+	return r.reader.Read(p)
+}
+
+func (r *prefixedReadCloser) hasPrefix() bool {
+	return r != nil && r.prefix != nil && r.prefix.Len() != 0
+}
+
+func (r *prefixedReadCloser) Close() error {
+	return r.closer.Close()
+}
+
+type completeAccessUnitEvidence struct {
+	codec       VideoCodec
+	haveVPS     bool
+	haveSPS     bool
+	havePPS     bool
+	haveRandom  bool
+	haveNextVCL bool
+}
+
+func (e *completeAccessUnitEvidence) observe(data []byte) error {
+	nals := splitAnnexBAccessUnit(data)
+	if len(nals) == 0 {
+		return fmt.Errorf("encoded access unit is not Annex-B framed")
+	}
+	hasVCL, hasRandom := false, false
+	for _, wrapped := range nals {
+		raw := stripStartCode(wrapped)
+		if len(raw) == 0 {
+			continue
+		}
+		if normalizeVideoCodec(e.codec) == VideoCodecHEVC {
+			typ := hevcNALType(raw)
+			switch typ {
+			case 32:
+				e.haveVPS = true
+			case 33:
+				e.haveSPS = true
+			case 34:
+				e.havePPS = true
+			}
+			if typ <= 31 {
+				hasVCL = true
+				hasRandom = hasRandom || typ >= 16 && typ <= 21
+			}
+		} else {
+			typ := raw[0] & 0x1f
+			switch typ {
+			case 7:
+				e.haveSPS = true
+			case 8:
+				e.havePPS = true
+			}
+			if typ >= 1 && typ <= 5 {
+				hasVCL = true
+				hasRandom = hasRandom || typ == 5
+			}
+		}
+	}
+
+	if e.haveRandom && hasVCL {
+		e.haveNextVCL = true
+	}
+	if hasRandom && e.haveSPS && e.havePPS &&
+		(normalizeVideoCodec(e.codec) != VideoCodecHEVC || e.haveVPS) {
+		e.haveRandom = true
+	}
+	return nil
+}
+
+func (e *completeAccessUnitEvidence) ready() bool {
+	return e.haveRandom && e.haveNextVCL
+}
+
+func (e *completeAccessUnitEvidence) String() string {
+	if normalizeVideoCodec(e.codec) == VideoCodecHEVC {
+		return fmt.Sprintf("VPS=%t SPS=%t PPS=%t IRAP=%t following-VCL=%t", e.haveVPS, e.haveSPS, e.havePPS, e.haveRandom, e.haveNextVCL)
+	}
+	return fmt.Sprintf("SPS=%t PPS=%t IDR=%t following-VCL=%t", e.haveSPS, e.havePPS, e.haveRandom, e.haveNextVCL)
+}
+
+func readTimestampedCaptureStartup(capture *ScreenCapture, codec VideoCodec) ([]VideoAccessUnit, error) {
+	units := make([]VideoAccessUnit, 0, 4)
+	evidence := completeAccessUnitEvidence{codec: codec}
+	totalBytes := 0
+	for len(units) < maxStartupProbeUnits {
+		unit, err := capture.ReadVideoAccessUnit()
+		if err != nil {
+			return nil, fmt.Errorf("read startup access unit (%s): %w", evidence.String(), captureStartupReadError(capture, err))
+		}
+		if len(unit.AnnexB) == 0 {
+			return nil, fmt.Errorf("read startup access unit: empty encoded frame")
+		}
+		totalBytes += len(unit.AnnexB)
+		if totalBytes > maxStartupProbeBytes {
+			return nil, fmt.Errorf("startup access units exceeded %d bytes (%s)", maxStartupProbeBytes, evidence.String())
+		}
+		units = append(units, unit)
+		if err := evidence.observe(unit.AnnexB); err != nil {
+			return nil, err
+		}
+		if evidence.ready() {
+			return units, nil
+		}
+	}
+	return nil, fmt.Errorf("startup did not produce a decodable sequence within %d access units (%s)", maxStartupProbeUnits, evidence.String())
+}
+
+type rawH264AccessUnitEvidence struct {
+	haveSPS       bool
+	havePPS       bool
+	currentVCL    bool
+	currentRandom bool
+	haveRandom    bool
+	haveNextVCL   bool
+}
+
+func (e *rawH264AccessUnitEvidence) finishAccessUnit() {
+	if !e.currentVCL {
+		return
+	}
+	if e.haveRandom {
+		e.haveNextVCL = true
+	}
+	if e.currentRandom && e.haveSPS && e.havePPS {
+		e.haveRandom = true
+	}
+	e.currentVCL = false
+	e.currentRandom = false
+}
+
+func (e *rawH264AccessUnitEvidence) observe(nal []byte) {
+	raw := stripStartCode(nal)
+	if len(raw) == 0 {
+		return
+	}
+	typ := raw[0] & 0x1f
+	switch typ {
+	case 7:
+		e.haveSPS = true
+	case 8:
+		e.havePPS = true
+	case 9:
+		e.finishAccessUnit()
+	case 1, 2, 3, 4, 5:
+		if isFirstSlice(raw) && e.currentVCL {
+			e.finishAccessUnit()
+		}
+		e.currentVCL = true
+		e.currentRandom = e.currentRandom || typ == 5
+	}
+}
+
+func (e *rawH264AccessUnitEvidence) String() string {
+	return fmt.Sprintf("SPS=%t PPS=%t IDR=%t following-VCL=%t", e.haveSPS, e.havePPS, e.haveRandom, e.haveNextVCL)
+}
+
+func readRawH264CaptureStartup(capture *ScreenCapture) ([]byte, error) {
+	parser := newH264Parser()
+	evidence := rawH264AccessUnitEvidence{}
+	prefix := make([]byte, 0, 256*1024)
+	buf := make([]byte, 64*1024)
+	for len(prefix) <= maxStartupProbeBytes {
+		n, err := capture.Read(buf)
+		if n > 0 {
+			prefix = append(prefix, buf[:n]...)
+			for _, nal := range parser.Push(buf[:n]) {
+				evidence.observe(nal)
+			}
+			if evidence.haveRandom && evidence.haveNextVCL {
+				return prefix, nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read raw H.264 startup (%s): %w", evidence.String(), captureStartupReadError(capture, err))
+		}
+	}
+	return nil, fmt.Errorf("raw H.264 startup exceeded %d bytes (%s)", maxStartupProbeBytes, evidence.String())
+}
+
+func captureStartupReadError(capture *ScreenCapture, readErr error) error {
+	if capture == nil || capture.waitCh == nil {
+		return readErr
+	}
+	if readErr == io.EOF || errors.Is(readErr, os.ErrClosed) {
+		select {
+		case <-capture.waitCh:
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	select {
+	case <-capture.waitCh:
+		if capture.waitErr != nil {
+			return fmt.Errorf("capture exited: %w", capture.waitErr)
+		}
+	default:
+	}
+	return readErr
+}
+
+func captureStartupExitError(capture *ScreenCapture) error {
+	if capture == nil || capture.waitCh == nil {
+		return nil
+	}
+	select {
+	case <-capture.waitCh:
+		if capture.waitErr != nil {
+			return fmt.Errorf("capture exited after startup validation: %w", capture.waitErr)
+		}
+		return fmt.Errorf("capture exited after startup validation: %w", io.EOF)
+	default:
+		return nil
+	}
+}
+
+func probeWaylandCaptureStartup(ctx context.Context, capture *ScreenCapture, codec VideoCodec, timestampedOutput bool) error {
+	if capture == nil {
+		return fmt.Errorf("startup probe received a nil capture")
+	}
+	type probeResult struct {
+		units []VideoAccessUnit
+		raw   []byte
+		err   error
+	}
+	resultCh := make(chan probeResult, 1)
+	go func() {
+		if timestampedOutput {
+			units, err := readTimestampedCaptureStartup(capture, codec)
+			resultCh <- probeResult{units: units, err: err}
+			return
+		}
+		if normalizeVideoCodec(codec) != VideoCodecH264 {
+			resultCh <- probeResult{err: fmt.Errorf("raw startup validation is only supported for H.264")}
+			return
+		}
+		raw, err := readRawH264CaptureStartup(capture)
+		resultCh <- probeResult{raw: raw, err: err}
+	}()
+	applyResult := func(result probeResult) error {
+		if result.err != nil {
+			return result.err
+		}
+		// Do not accept a child which emitted just enough buffered output to pass
+		// validation and then exited. Once a live capture has been returned, its
+		// prefetched data still drains before a later process failure is reported.
+		if err := captureStartupExitError(capture); err != nil {
+			return err
+		}
+		if timestampedOutput {
+			capture.frames = &prefetchedVideoAccessUnitReader{units: result.units, reader: capture.frames}
+		} else {
+			stdout := capture.stdout
+			capture.stdout = &prefixedReadCloser{prefix: bytes.NewReader(result.raw), reader: stdout, closer: stdout}
+		}
+		return nil
+	}
+
+	select {
+	case result := <-resultCh:
+		return applyResult(result)
+	case <-ctx.Done():
+		// Closing stdout and stopping the child is required to interrupt a read
+		// from the encoder pipe before another attempt opens a fresh remote.
+		select {
+		case result := <-resultCh:
+			return applyResult(result)
+		default:
+		}
+		capture.Stop()
+		<-resultCh
+		return fmt.Errorf("startup access-unit probe: %w", ctx.Err())
+	}
 }
 
 func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder encoderResult, timestampedOutput bool) (*ScreenCapture, error) {
@@ -1052,6 +1562,9 @@ func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder enc
 }
 
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
+	if prefixed, ok := sc.stdout.(*prefixedReadCloser); ok && prefixed.hasPrefix() {
+		return prefixed.Read(buf)
+	}
 	select {
 	case <-sc.waitCh:
 		if sc.waitErr != nil {
@@ -1069,6 +1582,9 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 func (sc *ScreenCapture) ReadVideoAccessUnit() (VideoAccessUnit, error) {
 	if sc == nil || sc.frames == nil {
 		return VideoAccessUnit{}, fmt.Errorf("capture does not provide timestamped access units")
+	}
+	if prefetched, ok := sc.frames.(*prefetchedVideoAccessUnitReader); ok && prefetched.hasPrefetchedUnit() {
+		return prefetched.ReadVideoAccessUnit()
 	}
 	select {
 	case <-sc.waitCh:
@@ -1095,8 +1611,8 @@ func (sc *ScreenCapture) Stop() {
 		sc.stdout.Close()
 	}
 
-	if sc.dbusConn != nil {
-		sc.dbusConn.Close()
+	if sc.portal != nil {
+		_ = sc.portal.Close()
 	}
 
 	if sc.cmd != nil && sc.cmd.Process != nil {
@@ -1462,14 +1978,76 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 	return capture, nil
 }
 
-func logStderr(prefix string, r io.Reader) {
-	if r == nil {
+const maxCaptureStderrTailBytes = 32 << 10
+
+type captureStderrTail struct {
+	mu   sync.Mutex
+	data []byte
+	done chan struct{}
+}
+
+func newCaptureStderrTail() *captureStderrTail {
+	return &captureStderrTail{done: make(chan struct{})}
+}
+
+func (t *captureStderrTail) append(line string) {
+	if t == nil {
 		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.data = append(t.data, line...)
+	t.data = append(t.data, '\n')
+	if len(t.data) > maxCaptureStderrTailBytes {
+		t.data = append([]byte(nil), t.data[len(t.data)-maxCaptureStderrTailBytes:]...)
+	}
+}
+
+func (t *captureStderrTail) finish() {
+	if t != nil {
+		close(t.done)
+	}
+}
+
+func (t *captureStderrTail) String() string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.data))
+}
+
+func (sc *ScreenCapture) stderrText() string {
+	if sc == nil || sc.stderr == nil {
+		return ""
+	}
+	select {
+	case <-sc.stderr.done:
+	case <-time.After(100 * time.Millisecond):
+	}
+	return sc.stderr.String()
+}
+
+func logStderr(prefix string, r io.Reader, tails ...*captureStderrTail) {
+	if r == nil {
+		for _, tail := range tails {
+			tail.finish()
+		}
+		return
+	}
+	defer func() {
+		for _, tail := range tails {
+			tail.finish()
+		}
+	}()
 	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
+		for _, tail := range tails {
+			tail.append(scanner.Text())
+		}
 		dbg("[%s] %s", prefix, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
@@ -1546,19 +2124,48 @@ func vbvBufferKbit(bitrateKbps, fps int) int {
 	return vbv
 }
 
+type screenCastPortalSession struct {
+	conn        *dbus.Conn
+	sessionPath dbus.ObjectPath
+}
+
+func (s *screenCastPortalSession) Close() error {
+	if s == nil || s.conn == nil {
+		return nil
+	}
+	return s.conn.Close()
+}
+
+func (s *screenCastPortalSession) openPipeWireRemote(ctx context.Context) (*os.File, error) {
+	if s == nil || s.conn == nil || !s.sessionPath.IsValid() {
+		return nil, fmt.Errorf("invalid screencast portal session")
+	}
+	portal := s.conn.Object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
+	call := portal.CallWithContext(ctx, "org.freedesktop.portal.ScreenCast.OpenPipeWireRemote", 0,
+		s.sessionPath, map[string]dbus.Variant{})
+	if call.Err != nil {
+		return nil, fmt.Errorf("OpenPipeWireRemote: %w", call.Err)
+	}
+	var pwFD dbus.UnixFD
+	if err := call.Store(&pwFD); err != nil {
+		return nil, fmt.Errorf("store pipewire fd: %w", err)
+	}
+	return os.NewFile(uintptr(pwFD), "pipewire-remote"), nil
+}
+
 // requestScreencast uses the xdg-desktop-portal D-Bus API to request screen capture
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
-// the D-Bus connection (which must stay open to keep the screencast session alive),
-// and a fresh restore token when the portal grants persistence.
-func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int) (uint32, *os.File, *dbus.Conn, string, error) {
+// the retained portal session (which must stay open for capture and retries), and a
+// fresh restore token when the portal grants persistence.
+func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int) (uint32, *os.File, pipeWirePortalSession, string, error) {
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return 0, nil, nil, "", fmt.Errorf("connect session bus: %w", err)
 	}
 
-	portal := conn.Object("org.freedesktop.portal.Desktop",
+	portalObject := conn.Object("org.freedesktop.portal.Desktop",
 		"/org/freedesktop/portal/desktop")
-	portalVersion := screenCastPortalVersion(portal)
+	portalVersion := screenCastPortalVersion(portalObject)
 	baseToken := newPortalHandleToken()
 
 	// Create session
@@ -1568,7 +2175,7 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	}
 
 	var requestHandle dbus.ObjectPath
-	call := portal.Call("org.freedesktop.portal.ScreenCast.CreateSession", 0, sessionOpts)
+	call := portalObject.Call("org.freedesktop.portal.ScreenCast.CreateSession", 0, sessionOpts)
 	if call.Err != nil {
 		conn.Close()
 		return 0, nil, nil, "", fmt.Errorf("CreateSession: %w", call.Err)
@@ -1612,7 +2219,7 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	}
 
 	requestHandle = ""
-	call = portal.Call("org.freedesktop.portal.ScreenCast.SelectSources", 0,
+	call = portalObject.Call("org.freedesktop.portal.ScreenCast.SelectSources", 0,
 		sessionPath, selectOpts)
 	if call.Err != nil {
 		conn.Close()
@@ -1634,7 +2241,7 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	}
 
 	requestHandle = ""
-	call = portal.Call("org.freedesktop.portal.ScreenCast.Start", 0,
+	call = portalObject.Call("org.freedesktop.portal.ScreenCast.Start", 0,
 		sessionPath, "", startOpts)
 	if call.Err != nil {
 		conn.Close()
@@ -1717,22 +2324,17 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 		}
 	}
 
-	// OpenPipeWireRemote returns a Unix fd for the portal's PipeWire remote.
-	// pipewiresrc MUST use this fd to connect; without it, it connects to the
-	// global PipeWire instance which does not have the portal node and returns EINVAL.
-	call = portal.Call("org.freedesktop.portal.ScreenCast.OpenPipeWireRemote", 0,
-		sessionPath, map[string]dbus.Variant{})
-	if call.Err != nil {
+	// Keep the original bus connection and session path together. Each failed
+	// GStreamer attempt consumes its PipeWire protocol connection, so retry by
+	// asking this same portal session for a fresh remote rather than duping an fd.
+	portalSession := &screenCastPortalSession{conn: conn, sessionPath: sessionPath}
+	pwFile, err := portalSession.openPipeWireRemote(ctx)
+	if err != nil {
 		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("OpenPipeWireRemote: %w", call.Err)
-	}
-	var pwFD dbus.UnixFD
-	if err := call.Store(&pwFD); err != nil {
-		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("store pipewire fd: %w", err)
+		return 0, nil, nil, "", err
 	}
 
-	return nodeID, os.NewFile(uintptr(pwFD), "pipewire-remote"), conn, newRestoreToken, nil
+	return nodeID, pwFile, portalSession, newRestoreToken, nil
 }
 
 func portalStreamDimensions(properties map[string]dbus.Variant) (int, int, bool) {

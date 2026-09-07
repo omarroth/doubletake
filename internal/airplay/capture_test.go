@@ -1,9 +1,11 @@
 package airplay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"reflect"
@@ -880,5 +882,477 @@ func TestVAWaylandPipelineSelection(t *testing.T) {
 				t.Fatalf("canBuildVAWaylandVideoPipeline() = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420", codec: VideoCodecH264}
+	pipeline := buildSystemWaylandVideoPipeline(
+		3, 42, 30, encoder, 1920, 1080, [2]int{1536, 960}, true,
+		func(element string) bool { return element == "compositor" })
+	joined := strings.Join(pipeline, " ")
+	for _, forbidden := range []string{"always-copy", "vapostproc", "memory:VAMemory"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("system-memory Wayland pipeline contains %q: %s", forbidden, joined)
+		}
+	}
+	wantOrder := []string{
+		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=33",
+		"!", "videoconvert", "!", "video/x-raw,format=NV12",
+		"!", "videoconvert", "!", "video/x-raw,format=I420",
+		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
+		"!", "video/x-raw,format=I420,width=1536,height=960,framerate=30/1",
+		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "openh264enc",
+	}
+	if !containsPipelineSequence(pipeline, wantOrder) {
+		t.Fatalf("system conversion must own the frame before compositing, scaling, queuing, and encoding:\n%s", joined)
+	}
+}
+
+func TestSystemWaylandStagingFormatsDifferFromEncoderInput(t *testing.T) {
+	for _, test := range []struct {
+		target string
+		want   string
+	}{
+		{target: "I420", want: "NV12"},
+		{target: "NV12", want: "I420"},
+		{target: "I420_10LE", want: "P010_10LE"},
+		{target: "P010_10LE", want: "I420_10LE"},
+	} {
+		t.Run(test.target, func(t *testing.T) {
+			got := systemMemoryStagingFormat(test.target)
+			if got != test.want {
+				t.Fatalf("systemMemoryStagingFormat(%q) = %q, want %q", test.target, got, test.want)
+			}
+			if got == test.target {
+				t.Fatalf("staging format %q permits a passthrough conversion", got)
+			}
+		})
+	}
+}
+
+func TestWaylandEncoderPathMatrix(t *testing.T) {
+	hasVA := func(element string) bool { return element == "vapostproc" }
+	encoders := []struct {
+		name    string
+		encoder encoderResult
+		wantVA  bool
+	}{
+		{name: "VA H264", encoder: encoderResult{parts: gstStage{"vah264enc"}, rawFormat: "NV12", inputMemory: encoderInputVAMemory}, wantVA: true},
+		{name: "OpenH264", encoder: encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420"}},
+		{name: "x264", encoder: encoderResult{parts: gstStage{"x264enc"}, rawFormat: "I420"}},
+		{name: "NVENC H264", encoder: encoderResult{parts: gstStage{"nvh264enc"}, rawFormat: "NV12"}},
+		{name: "Vulkan H264", encoder: encoderResult{parts: gstStage{"vulkanh264enc"}, rawFormat: "NV12", needsVulkan: true}},
+		{name: "NVENC HEVC", encoder: encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE", codec: VideoCodecHEVC}},
+		{name: "x265", encoder: encoderResult{parts: gstStage{"x265enc"}, rawFormat: "I420_10LE", codec: VideoCodecHEVC}},
+	}
+	for _, test := range encoders {
+		t.Run(test.name, func(t *testing.T) {
+			pipeline := buildWaylandVideoPipeline(3, 42, 30, test.encoder, 1280, 720, [2]int{3072, 1920}, true, hasVA)
+			joined := strings.Join(pipeline, " ")
+			gotVA := strings.Contains(joined, "vapostproc")
+			if gotVA != test.wantVA {
+				t.Fatalf("VA path = %t, want %t: %s", gotVA, test.wantVA, joined)
+			}
+			if !test.wantVA {
+				wantConversion := "videoconvert ! video/x-raw,format=" + systemMemoryStagingFormat(test.encoder.rawFormat) +
+					" ! videoconvert ! video/x-raw,format=" + test.encoder.rawFormat
+				if !strings.Contains(joined, wantConversion) {
+					t.Fatalf("system path did not force a distinct allocation before %s encoding: %s", test.encoder.rawFormat, joined)
+				}
+			}
+			if test.encoder.needsVulkan && !strings.Contains(joined, "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! vulkanupload ! vulkanh264enc") {
+				t.Fatalf("Vulkan upload is not immediately before its encoder: %s", joined)
+			}
+		})
+	}
+}
+
+func captureTestAnnexB(nals ...[]byte) []byte {
+	var out []byte
+	for _, nal := range nals {
+		out = append(out, 0, 0, 0, 1)
+		out = append(out, nal...)
+	}
+	return out
+}
+
+type queuedVideoAccessUnitReader struct {
+	units []VideoAccessUnit
+}
+
+func (r *queuedVideoAccessUnitReader) ReadVideoAccessUnit() (VideoAccessUnit, error) {
+	if len(r.units) == 0 {
+		return VideoAccessUnit{}, io.EOF
+	}
+	unit := r.units[0]
+	r.units = r.units[1:]
+	return unit, nil
+}
+
+type exitingVideoAccessUnitReader struct {
+	queuedVideoAccessUnitReader
+	waitCh chan struct{}
+}
+
+func (r *exitingVideoAccessUnitReader) ReadVideoAccessUnit() (VideoAccessUnit, error) {
+	unit, err := r.queuedVideoAccessUnitReader.ReadVideoAccessUnit()
+	if err == nil && len(r.units) == 0 {
+		close(r.waitCh)
+	}
+	return unit, err
+}
+
+func TestWaylandStartupProbeReplaysTimestampedAccessUnitsExactly(t *testing.T) {
+	base := time.Unix(1_700_000_000, 123_456_789)
+	want := []VideoAccessUnit{
+		{AnnexB: captureTestAnnexB([]byte{0x67, 1}, []byte{0x68, 2}, []byte{0x65, 0x80, 3}), PTS: base},
+		{AnnexB: captureTestAnnexB([]byte{0x61, 0x80, 4}), PTS: base.Add(time.Second / 30)},
+		{AnnexB: captureTestAnnexB([]byte{0x61, 0x80, 5}), PTS: base.Add(2 * time.Second / 30)},
+	}
+	capture := &ScreenCapture{
+		frames: &queuedVideoAccessUnitReader{units: append([]VideoAccessUnit(nil), want...)},
+		waitCh: make(chan struct{}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := probeWaylandCaptureStartup(ctx, capture, VideoCodecH264, true); err != nil {
+		t.Fatal(err)
+	}
+
+	for index, expected := range want {
+		got, err := capture.ReadVideoAccessUnit()
+		if err != nil {
+			t.Fatalf("read replayed access unit %d: %v", index, err)
+		}
+		if !bytes.Equal(got.AnnexB, expected.AnnexB) || got.PTS != expected.PTS {
+			t.Fatalf("replayed access unit %d = {%x %v}, want {%x %v}", index, got.AnnexB, got.PTS, expected.AnnexB, expected.PTS)
+		}
+	}
+}
+
+func TestWaylandStartupProbeRejectsProcessThatExitedAfterValidPrefix(t *testing.T) {
+	waitCh := make(chan struct{})
+	reader := &exitingVideoAccessUnitReader{
+		queuedVideoAccessUnitReader: queuedVideoAccessUnitReader{units: []VideoAccessUnit{
+			{AnnexB: captureTestAnnexB([]byte{0x67}, []byte{0x68}, []byte{0x65, 0x80})},
+			{AnnexB: captureTestAnnexB([]byte{0x61, 0x80})},
+		}},
+		waitCh: waitCh,
+	}
+	capture := &ScreenCapture{frames: reader, waitCh: waitCh, waitErr: errors.New("encoder stopped")}
+	err := probeWaylandCaptureStartup(context.Background(), capture, VideoCodecH264, true)
+	if err == nil || !strings.Contains(err.Error(), "exited after startup validation") || !strings.Contains(err.Error(), "encoder stopped") {
+		t.Fatalf("startup probe error = %v, want completed-child rejection", err)
+	}
+}
+
+func TestWaylandStartupProbeDrainsPrefetchedUnitsBeforeLaterExit(t *testing.T) {
+	waitCh := make(chan struct{})
+	want := []VideoAccessUnit{
+		{AnnexB: captureTestAnnexB([]byte{0x67}, []byte{0x68}, []byte{0x65, 0x80})},
+		{AnnexB: captureTestAnnexB([]byte{0x61, 0x80})},
+	}
+	capture := &ScreenCapture{
+		frames: &queuedVideoAccessUnitReader{units: append([]VideoAccessUnit(nil), want...)},
+		waitCh: waitCh,
+	}
+	if err := probeWaylandCaptureStartup(context.Background(), capture, VideoCodecH264, true); err != nil {
+		t.Fatal(err)
+	}
+	wantExit := errors.New("later encoder failure")
+	capture.waitErr = wantExit
+	close(waitCh)
+	for index, expected := range want {
+		got, err := capture.ReadVideoAccessUnit()
+		if err != nil || !bytes.Equal(got.AnnexB, expected.AnnexB) {
+			t.Fatalf("replayed access unit %d = (%x, %v), want (%x, nil)", index, got.AnnexB, err, expected.AnnexB)
+		}
+	}
+	if _, err := capture.ReadVideoAccessUnit(); !errors.Is(err, wantExit) {
+		t.Fatalf("post-prefix read error = %v, want %v", err, wantExit)
+	}
+}
+
+func TestWaylandStartupProbeRequiresCompleteRandomAccessSequence(t *testing.T) {
+	tests := []struct {
+		name  string
+		codec VideoCodec
+		units []VideoAccessUnit
+		want  string
+	}{
+		{
+			name:  "H264 missing following frame",
+			codec: VideoCodecH264,
+			units: []VideoAccessUnit{{AnnexB: captureTestAnnexB([]byte{0x67}, []byte{0x68}, []byte{0x65, 0x80})}},
+			want:  "following-VCL=false",
+		},
+		{
+			name:  "HEVC missing VPS",
+			codec: VideoCodecHEVC,
+			units: []VideoAccessUnit{
+				{AnnexB: captureTestAnnexB([]byte{33 << 1, 1}, []byte{34 << 1, 1}, []byte{19 << 1, 1})},
+				{AnnexB: captureTestAnnexB([]byte{1 << 1, 1})},
+			},
+			want: "VPS=false",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capture := &ScreenCapture{frames: &queuedVideoAccessUnitReader{units: test.units}, waitCh: make(chan struct{})}
+			err := probeWaylandCaptureStartup(context.Background(), capture, test.codec, true)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("startup probe error = %v, want evidence containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestWaylandRawStartupProbeReplaysEveryByte(t *testing.T) {
+	stream := captureTestAnnexB(
+		[]byte{0x67, 1}, []byte{0x68, 2}, []byte{0x09, 0xf0},
+		[]byte{0x65, 0x80, 3}, []byte{0x09, 0xf0},
+		[]byte{0x61, 0x80, 4}, []byte{0x09, 0xf0},
+		[]byte{0x61, 0x80, 5},
+	)
+	stdout := io.NopCloser(bytes.NewReader(stream))
+	capture := &ScreenCapture{stdout: stdout, waitCh: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := probeWaylandCaptureStartup(ctx, capture, VideoCodecH264, false); err != nil {
+		t.Fatal(err)
+	}
+	close(capture.waitCh)
+	got, err := io.ReadAll(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, stream) {
+		t.Fatalf("replayed raw prefix = %x, want %x", got, stream)
+	}
+	_ = capture.stdout.Close()
+}
+
+func TestWaylandStartupProbeTimeoutStopsBlockedReader(t *testing.T) {
+	waitCh := make(chan struct{})
+	reader := &blockingVideoReader{closed: make(chan struct{}), waitCh: waitCh}
+	capture := &ScreenCapture{stdout: reader, frames: reader, waitCh: waitCh}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := probeWaylandCaptureStartup(ctx, capture, VideoCodecH264, true)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("startup timeout error = %v, want deadline exceeded", err)
+	}
+	if !capture.stopped {
+		t.Fatal("startup timeout left the capture process active")
+	}
+	select {
+	case <-reader.closed:
+	default:
+		t.Fatal("startup timeout returned before its blocked reader was released")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("startup timeout cleanup took %v", elapsed)
+	}
+}
+
+type countingCloser struct {
+	closes int
+}
+
+func (c *countingCloser) Close() error {
+	c.closes++
+	return nil
+}
+
+func closedCaptureForStartupTest(stderr string) *ScreenCapture {
+	waitCh := make(chan struct{})
+	close(waitCh)
+	capture := &ScreenCapture{waitCh: waitCh}
+	if stderr != "" {
+		capture.stderr = newCaptureStderrTail()
+		capture.stderr.append(stderr)
+		capture.stderr.finish()
+	}
+	return capture
+}
+
+func TestWaylandCaptureFallbackReopensRemoteAndTransfersPortalOnce(t *testing.T) {
+	va := encoderResult{parts: gstStage{"vah264enc"}, rawFormat: "NV12", inputMemory: encoderInputVAMemory}
+	plans := []waylandCapturePlan{
+		{encoder: va, mode: waylandPipelineVAMemory},
+		{encoder: va, mode: waylandPipelineSystemMemory},
+	}
+	initial, initialPeer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer initialPeer.Close()
+	var remotePeers []*os.File
+	defer func() {
+		for _, peer := range remotePeers {
+			_ = peer.Close()
+		}
+	}()
+	portal := &countingCloser{}
+	var opened, attempted []*os.File
+	openRemote := func(context.Context) (*os.File, error) {
+		remote, peer, pipeErr := os.Pipe()
+		if pipeErr == nil {
+			opened = append(opened, remote)
+			remotePeers = append(remotePeers, peer)
+		}
+		return remote, pipeErr
+	}
+	startAttempt := func(_ context.Context, _ CaptureConfig, _ waylandCapturePlan, _ uint32, remote *os.File, _ [2]int, _ bool) (*ScreenCapture, error) {
+		attempted = append(attempted, remote)
+		return closedCaptureForStartupTest(""), nil
+	}
+	probes := 0
+	probeAttempt := func(context.Context, *ScreenCapture, VideoCodec, bool) error {
+		probes++
+		if probes == 1 {
+			return fmt.Errorf("not-negotiated")
+		}
+		return nil
+	}
+
+	capture, err := startPreparedWaylandCapturePlans(context.Background(), context.Background(), CaptureConfig{}, plans,
+		42, initial, portal, openRemote, [2]int{}, true, startAttempt, probeAttempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 1 || len(attempted) != 2 || attempted[0] != initial || attempted[1] != opened[0] {
+		t.Fatalf("attempt remotes = %p, reopened = %p; want initial then one fresh remote", attempted, opened)
+	}
+	for _, remote := range attempted {
+		if _, statErr := remote.Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Fatalf("attempt remote remained open: %v", statErr)
+		}
+	}
+	if portal.closes != 0 {
+		t.Fatalf("accepted capture portal closes = %d, want 0 before Stop", portal.closes)
+	}
+	capture.Stop()
+	capture.Stop()
+	if portal.closes != 1 {
+		t.Fatalf("accepted capture portal closes = %d, want exactly 1", portal.closes)
+	}
+}
+
+func TestWaylandCaptureFailureClosesPortalOnceAndReturnsStderrEvidence(t *testing.T) {
+	va := encoderResult{parts: gstStage{"vah264enc"}, rawFormat: "NV12", inputMemory: encoderInputVAMemory}
+	plans := []waylandCapturePlan{
+		{encoder: va, mode: waylandPipelineVAMemory},
+		{encoder: va, mode: waylandPipelineSystemMemory},
+	}
+	initial, initialPeer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer initialPeer.Close()
+	var reopenedPeer *os.File
+	defer func() {
+		if reopenedPeer != nil {
+			_ = reopenedPeer.Close()
+		}
+	}()
+	portal := &countingCloser{}
+	openRemote := func(context.Context) (*os.File, error) {
+		remote, peer, pipeErr := os.Pipe()
+		reopenedPeer = peer
+		return remote, pipeErr
+	}
+	startAttempt := func(context.Context, CaptureConfig, waylandCapturePlan, uint32, *os.File, [2]int, bool) (*ScreenCapture, error) {
+		return closedCaptureForStartupTest("streaming stopped, reason not-negotiated (-4)"), nil
+	}
+	probeAttempt := func(context.Context, *ScreenCapture, VideoCodec, bool) error {
+		return io.EOF
+	}
+
+	_, err = startPreparedWaylandCapturePlans(context.Background(), context.Background(), CaptureConfig{}, plans,
+		42, initial, portal, openRemote, [2]int{}, true, startAttempt, probeAttempt)
+	if err == nil {
+		t.Fatal("all failed Wayland plans returned no error")
+	}
+	for _, want := range []string{"native VA frame import", "system-memory frame staging", "not-negotiated (-4)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("startup error %q is missing %q", err, want)
+		}
+	}
+	if portal.closes != 1 {
+		t.Fatalf("failed capture portal closes = %d, want exactly 1", portal.closes)
+	}
+}
+
+func TestWaylandCapturePlansRetainSelectedEncoderBackend(t *testing.T) {
+	available := map[string]bool{"vulkanh264enc": true, "nvh264enc": true, "vah264enc": true, "openh264enc": true, "x264enc": true}
+	hasElement := func(name string) bool {
+		return name == "vapostproc" || available[name]
+	}
+	for _, test := range []struct {
+		method       string
+		wantElements []string
+		wantModes    []waylandPipelineMode
+	}{
+		{method: "auto", wantElements: []string{"vulkanh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineSystemMemory}},
+		{method: "vaapi", wantElements: []string{"vah264enc", "vah264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAMemory, waylandPipelineSystemMemory}},
+		{method: "none", wantElements: []string{"x264enc"}, wantModes: []waylandPipelineMode{waylandPipelineSystemMemory}},
+		{method: "openh264", wantElements: []string{"openh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineSystemMemory}},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			encoder, err := selectGstEncoderWithProbe(CaptureConfig{HWAccel: test.method}, hasElement, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plans := waylandCapturePlans(encoder, hasElement)
+			var elements []string
+			var modes []waylandPipelineMode
+			for _, plan := range plans {
+				elements = append(elements, plan.encoder.parts[0])
+				modes = append(modes, plan.mode)
+			}
+			if !reflect.DeepEqual(elements, test.wantElements) || !reflect.DeepEqual(modes, test.wantModes) {
+				t.Fatalf("plans = elements %v modes %v, want %v %v", elements, modes, test.wantElements, test.wantModes)
+			}
+		})
+	}
+}
+
+func TestH264TestCaptureStartupProbePreservesRealGStreamerOutput(t *testing.T) {
+	if !hasGstElement("x264enc") || !supportsTimestampedVideoOutput(VideoCodecH264) {
+		t.Skip("GStreamer H.264 timestamp pipeline is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	capture, err := StartTestCapture(ctx, CaptureConfig{
+		FPS: 10, Bitrate: 500, HWAccel: "none", VideoCodec: VideoCodecH264,
+		MaxWidth: 320, MaxHeight: 180,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Stop()
+	probeCtx, cancelProbe := context.WithTimeout(ctx, waylandCaptureAttemptTimeout)
+	defer cancelProbe()
+	if err := probeWaylandCaptureStartup(probeCtx, capture, VideoCodecH264, true); err != nil {
+		t.Fatal(err)
+	}
+	prefetched, ok := capture.frames.(*prefetchedVideoAccessUnitReader)
+	if !ok || len(prefetched.units) < 2 {
+		t.Fatalf("startup probe retained %#v, want at least two access units", capture.frames)
+	}
+	want := append([]VideoAccessUnit(nil), prefetched.units...)
+	for index, expected := range want {
+		got, readErr := capture.ReadVideoAccessUnit()
+		if readErr != nil {
+			t.Fatalf("read GStreamer startup access unit %d: %v", index, readErr)
+		}
+		if !bytes.Equal(got.AnnexB, expected.AnnexB) || got.PTS != expected.PTS {
+			t.Fatalf("GStreamer startup access unit %d changed during replay", index)
+		}
 	}
 }
