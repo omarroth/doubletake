@@ -239,6 +239,19 @@ func TestSetupMirrorDigestRetryReusesStartedVideoPreparation(t *testing.T) {
 					serverErr <- err
 					return
 				}
+				teardown, err := readRTSPTestRequest(reader)
+				if err != nil {
+					serverErr <- fmt.Errorf("read failed-setup TEARDOWN: %w", err)
+					return
+				}
+				if teardown.method != "TEARDOWN" || teardown.uri != control.uri {
+					serverErr <- fmt.Errorf("failed-setup cleanup = %s %s, want TEARDOWN %s", teardown.method, teardown.uri, control.uri)
+					return
+				}
+				if err := writeRTSPTestResponse(conn, 200, nil, nil); err != nil {
+					serverErr <- err
+					return
+				}
 				continue
 			}
 			if !strings.HasPrefix(record.headers["authorization"], "Digest ") {
@@ -301,6 +314,630 @@ func TestSetupMirrorDigestRetryReusesStartedVideoPreparation(t *testing.T) {
 	}
 	if startedWidth != 1920 || startedHeight != 1080 {
 		t.Fatalf("started canvas = %dx%d, want 1920x1080", startedWidth, startedHeight)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetupMirrorTearsDownAcceptedControlWhenVideoPreparationFails(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen RTSP: %v", err)
+	}
+	defer listener.Close()
+
+	controlBody, err := plist.Marshal(map[string]interface{}{
+		"skipRecord": true,
+		"info": map[string]interface{}{
+			"displays": []interface{}{map[string]interface{}{
+				"widthPixels":     int64(1920),
+				"heightPixels":    int64(1080),
+				"widthPixelsMax":  int64(3840),
+				"heightPixelsMax": int64(2160),
+			}},
+		},
+	}, plist.BinaryFormat)
+	if err != nil {
+		t.Fatalf("marshal control response: %v", err)
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+
+		control, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- fmt.Errorf("read control SETUP: %w", err)
+			return
+		}
+		if control.method != "SETUP" {
+			serverErr <- fmt.Errorf("first request = %s, want SETUP", control.method)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 200, nil, controlBody); err != nil {
+			serverErr <- err
+			return
+		}
+
+		teardown, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- fmt.Errorf("read failed-setup TEARDOWN: %w", err)
+			return
+		}
+		if teardown.method != "TEARDOWN" || teardown.uri != control.uri {
+			serverErr <- fmt.Errorf("cleanup = %s %s, want TEARDOWN %s", teardown.method, teardown.uri, control.uri)
+			return
+		}
+		// A cleanup failure is diagnostic only; it must not replace the video
+		// preparation error which caused rollback.
+		if err := writeRTSPTestResponse(conn, 500, nil, nil); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := NewAirPlayClient("127.0.0.1", listener.Addr().(*net.TCPAddr).Port)
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	client.info = &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: 0x800000}}
+
+	prepareErr := errors.New("production capture did not start")
+	_, setupErr := client.SetupMirrorWithVideoPreparation(ctx, StreamConfig{NoAudio: true}, func(int, int) error {
+		return prepareErr
+	})
+	if !errors.Is(setupErr, prepareErr) {
+		t.Fatalf("setup error = %v, want video preparation error", setupErr)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetupMirrorTearsDownAcceptedLegacyAudioOnResponseFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen RTSP: %v", err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+
+		control, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- fmt.Errorf("read control SETUP: %w", err)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 400, nil, nil); err != nil {
+			serverErr <- err
+			return
+		}
+		audio, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- fmt.Errorf("read legacy audio SETUP: %w", err)
+			return
+		}
+		if audio.method != "SETUP" || audio.uri != control.uri {
+			serverErr <- fmt.Errorf("legacy request = %s %s, want SETUP %s", audio.method, audio.uri, control.uri)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 200, nil, []byte("not a plist")); err != nil {
+			serverErr <- err
+			return
+		}
+		teardown, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- fmt.Errorf("read legacy cleanup: %w", err)
+			return
+		}
+		if teardown.method != "TEARDOWN" || teardown.uri != audio.uri {
+			serverErr <- fmt.Errorf("legacy cleanup = %s %s, want TEARDOWN %s", teardown.method, teardown.uri, audio.uri)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 200, nil, nil); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := NewAirPlayClient("127.0.0.1", listener.Addr().(*net.TCPAddr).Port)
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	client.info = &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: 0x800000}}
+
+	_, setupErr := client.SetupMirror(ctx, StreamConfig{NoAudio: true})
+	if setupErr == nil || !strings.Contains(setupErr.Error(), "unmarshal audio stream SETUP response") {
+		t.Fatalf("setup error = %v, want malformed accepted audio response", setupErr)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetupMirrorDoesNotTeardownRejectedControl(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen RTSP: %v", err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		request, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if request.method != "SETUP" {
+			serverErr <- fmt.Errorf("first request = %s, want SETUP", request.method)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 500, nil, nil); err != nil {
+			serverErr <- err
+			return
+		}
+		request, err = readRTSPTestRequest(reader)
+		if err == io.EOF {
+			serverErr <- nil
+			return
+		}
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- fmt.Errorf("request after rejected SETUP = %s, want connection close without TEARDOWN", request.method)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := NewAirPlayClient("127.0.0.1", listener.Addr().(*net.TCPAddr).Port)
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	client.info = &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: 0x800000}}
+
+	_, setupErr := client.SetupMirror(ctx, StreamConfig{NoAudio: true})
+	var statusErr *HTTPStatusError
+	if !errors.As(setupErr, &statusErr) || statusErr.StatusCode != 500 {
+		t.Fatalf("setup error = %v, want original HTTP 500", setupErr)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetupMirrorClosesTimedOutSequentialConnectionWithoutTeardown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen RTSP: %v", err)
+	}
+	defer listener.Close()
+
+	controlBody, err := plist.Marshal(map[string]interface{}{"skipRecord": true}, plist.BinaryFormat)
+	if err != nil {
+		t.Fatalf("marshal control response: %v", err)
+	}
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		control, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if control.method != "SETUP" {
+			serverErr <- fmt.Errorf("first request = %s, want SETUP", control.method)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 200, nil, controlBody); err != nil {
+			serverErr <- err
+			return
+		}
+		infoRequest, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- fmt.Errorf("read session GET /info: %w", err)
+			return
+		}
+		if infoRequest.method != "GET" || infoRequest.uri != "/info" {
+			serverErr <- fmt.Errorf("request after control SETUP = %s %s, want GET /info", infoRequest.method, infoRequest.uri)
+			return
+		}
+		// Leave GET /info unanswered. Its timeout poisons the sequential RTSP
+		// connection, which must be closed rather than reused for TEARDOWN.
+		next, err := readRTSPTestRequest(reader)
+		if err == io.EOF {
+			serverErr <- nil
+			return
+		}
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- fmt.Errorf("request after timed-out GET /info = %s, want connection close", next.method)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	client := NewAirPlayClient("127.0.0.1", listener.Addr().(*net.TCPAddr).Port)
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	client.info = &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: 0x800000}}
+
+	prepareCalls := 0
+	_, setupErr := client.SetupMirrorWithVideoPreparation(ctx, StreamConfig{NoAudio: true}, func(int, int) error {
+		prepareCalls++
+		return nil
+	})
+	var netErr net.Error
+	if !errors.As(setupErr, &netErr) || !netErr.Timeout() {
+		t.Fatalf("setup error = %v, want GET /info timeout", setupErr)
+	}
+	if prepareCalls != 0 {
+		t.Fatalf("video preparation calls = %d, want none before timed-out session info", prepareCalls)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetupMirrorClosesIncompleteSessionInfoResponsesWithoutTeardown(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		response []byte
+		wantText string
+	}{
+		{
+			name:     "oversized unterminated header",
+			response: []byte("RTSP/1.0 200 OK\r\nX-Fill: " + strings.Repeat("x", 17<<10)),
+			wantText: "response header too large",
+		},
+		{
+			name:     "invalid content length",
+			response: []byte("RTSP/1.0 200 OK\r\nContent-Length: -1\r\n\r\n"),
+			wantText: "invalid Content-Length",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setupErr := testMirrorSessionInfoFailure(t, test.response, false)
+			if setupErr == nil || !strings.Contains(setupErr.Error(), test.wantText) {
+				t.Fatalf("setup error = %v, want %q", setupErr, test.wantText)
+			}
+			if !hasIncompleteResponse(setupErr) {
+				t.Fatalf("unsafe session-info response was not marked incomplete: %v", setupErr)
+			}
+		})
+	}
+}
+
+func TestSetupMirrorTearsDownAfterCompleteMalformedSessionInfoPlist(t *testing.T) {
+	body := []byte("not a plist")
+	response := []byte(fmt.Sprintf("RTSP/1.0 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(body), body))
+	setupErr := testMirrorSessionInfoFailure(t, response, true)
+	if setupErr == nil || !strings.Contains(setupErr.Error(), "decode info plist") {
+		t.Fatalf("setup error = %v, want receiver-info plist decode failure", setupErr)
+	}
+	if hasIncompleteResponse(setupErr) {
+		t.Fatalf("complete malformed plist was classified as an incomplete response: %v", setupErr)
+	}
+}
+
+func testMirrorSessionInfoFailure(t *testing.T, infoResponse []byte, wantTeardown bool) error {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen RTSP: %v", err)
+	}
+	defer listener.Close()
+
+	controlBody, err := plist.Marshal(map[string]interface{}{"skipRecord": true}, plist.BinaryFormat)
+	if err != nil {
+		t.Fatalf("marshal control response: %v", err)
+	}
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		control, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if control.method != "SETUP" {
+			serverErr <- fmt.Errorf("first request = %s, want SETUP", control.method)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 200, nil, controlBody); err != nil {
+			serverErr <- err
+			return
+		}
+		infoRequest, err := readRTSPTestRequest(reader)
+		if err != nil {
+			serverErr <- fmt.Errorf("read session GET /info: %w", err)
+			return
+		}
+		if infoRequest.method != "GET" || infoRequest.uri != "/info" {
+			serverErr <- fmt.Errorf("request after control SETUP = %s %s, want GET /info", infoRequest.method, infoRequest.uri)
+			return
+		}
+		if _, err := conn.Write(infoResponse); err != nil {
+			serverErr <- fmt.Errorf("write session-info response: %w", err)
+			return
+		}
+
+		next, err := readRTSPTestRequest(reader)
+		if !wantTeardown {
+			if err != nil {
+				// Closing a TCP connection with unread oversized-header bytes can
+				// surface as either EOF or connection reset on the peer.
+				serverErr <- nil
+				return
+			}
+			serverErr <- fmt.Errorf("request after incomplete GET /info = %s, want connection close", next.method)
+			return
+		}
+		if err != nil {
+			serverErr <- fmt.Errorf("read failed-setup TEARDOWN: %w", err)
+			return
+		}
+		if next.method != "TEARDOWN" || next.uri != control.uri {
+			serverErr <- fmt.Errorf("cleanup = %s %s, want TEARDOWN %s", next.method, next.uri, control.uri)
+			return
+		}
+		if err := writeRTSPTestResponse(conn, 200, nil, nil); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := NewAirPlayClient("127.0.0.1", listener.Addr().(*net.TCPAddr).Port)
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	client.info = &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: 0x800000}}
+
+	prepareCalls := 0
+	_, setupErr := client.SetupMirrorWithVideoPreparation(ctx, StreamConfig{NoAudio: true}, func(int, int) error {
+		prepareCalls++
+		return nil
+	})
+	if prepareCalls != 0 {
+		t.Fatalf("video preparation calls = %d, want none before invalid session info", prepareCalls)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	return setupErr
+}
+
+func TestRequestSetupDigestResultClassification(t *testing.T) {
+	validBody, err := plist.Marshal(map[string]interface{}{"skipRecord": true}, plist.BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name           string
+		password       string
+		secondResponse string
+		wantAccepted   bool
+		wantUsable     bool
+		wantError      string
+		wantCredential bool
+	}{
+		{
+			name:           "challenge without password",
+			wantUsable:     true,
+			wantCredential: true,
+		},
+		{
+			name:           "authenticated success",
+			password:       "secret",
+			secondResponse: "valid",
+			wantAccepted:   true,
+			wantUsable:     true,
+		},
+		{
+			name:           "authenticated partial response",
+			password:       "secret",
+			secondResponse: "partial",
+			wantError:      "read body",
+		},
+		{
+			name:           "authenticated malformed plist",
+			password:       "secret",
+			secondResponse: "malformed plist",
+			wantAccepted:   true,
+			wantUsable:     true,
+			wantError:      "unmarshal control SETUP response",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			client := &AirPlayClient{conn: clientConn, authPassword: test.password}
+			serverErr := make(chan error, 1)
+			go func() {
+				defer serverConn.Close()
+				reader := bufio.NewReader(serverConn)
+				if _, err := readRTSPTestRequest(reader); err != nil {
+					serverErr <- err
+					return
+				}
+				if err := writeRTSPTestResponse(serverConn, 401, map[string]string{
+					"WWW-Authenticate": `Digest realm="airplay", nonce="nonce"`,
+				}, nil); err != nil {
+					serverErr <- err
+					return
+				}
+				if test.password == "" {
+					serverErr <- nil
+					return
+				}
+				retry, err := readRTSPTestRequest(reader)
+				if err != nil {
+					serverErr <- fmt.Errorf("read authenticated retry: %w", err)
+					return
+				}
+				if !strings.HasPrefix(retry.headers["authorization"], "Digest ") {
+					serverErr <- fmt.Errorf("authenticated retry omitted Digest authorization")
+					return
+				}
+				switch test.secondResponse {
+				case "valid":
+					err = writeRTSPTestResponse(serverConn, 200, nil, validBody)
+				case "partial":
+					_, err = serverConn.Write([]byte("RTSP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nno"))
+				case "malformed plist":
+					err = writeRTSPTestResponse(serverConn, 200, nil, []byte("not a plist"))
+				default:
+					err = fmt.Errorf("unknown scripted response %q", test.secondResponse)
+				}
+				serverErr <- err
+			}()
+
+			_, _, _, accepted, usable, requestErr := client.requestSetup("rtsp://receiver/session", "control", map[string]interface{}{"probe": true})
+			_ = clientConn.Close()
+			if accepted != test.wantAccepted || usable != test.wantUsable {
+				t.Fatalf("request result accepted/usable = %t/%t, want %t/%t (error: %v)", accepted, usable, test.wantAccepted, test.wantUsable, requestErr)
+			}
+			if test.wantCredential && !errors.Is(requestErr, ErrCredentialsRequired) {
+				t.Fatalf("request error = %v, want ErrCredentialsRequired", requestErr)
+			}
+			if test.wantError != "" && (requestErr == nil || !strings.Contains(requestErr.Error(), test.wantError)) {
+				t.Fatalf("request error = %v, want text %q", requestErr, test.wantError)
+			}
+			if test.wantError == "" && !test.wantCredential && requestErr != nil {
+				t.Fatalf("request error = %v, want nil", requestErr)
+			}
+			wantIncomplete := !test.wantUsable
+			if got := hasIncompleteResponse(requestErr); got != wantIncomplete {
+				t.Fatalf("incomplete classification = %t, want %t", got, wantIncomplete)
+			}
+			if err := <-serverErr; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestFailedMirrorSetupTeardownIsBoundedAndClosesOnTimeout(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+	client := &AirPlayClient{conn: clientConn}
+	serverErr := make(chan error, 1)
+	go func() {
+		request, err := readRTSPTestRequest(bufio.NewReader(serverConn))
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if request.method != "TEARDOWN" || request.uri != "rtsp://receiver/session" {
+			serverErr <- fmt.Errorf("cleanup request = %s %s", request.method, request.uri)
+			return
+		}
+		one := make([]byte, 1)
+		if _, err := serverConn.Read(one); err != io.EOF {
+			serverErr <- fmt.Errorf("read after cleanup timeout = %v, want EOF", err)
+			return
+		}
+		serverErr <- nil
+	}()
+
+	started := time.Now()
+	err := client.teardownFailedMirrorSetup("rtsp://receiver/session", 100*time.Millisecond)
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("cleanup error = %v, want timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded cleanup took %v, want less than 1s", elapsed)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFailedMirrorSetupTeardownClosesOnRejectedCleanup(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+	client := &AirPlayClient{conn: clientConn}
+	serverErr := make(chan error, 1)
+	go func() {
+		request, err := readRTSPTestRequest(bufio.NewReader(serverConn))
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if request.method != "TEARDOWN" || request.uri != "rtsp://receiver/session" {
+			serverErr <- fmt.Errorf("cleanup request = %s %s", request.method, request.uri)
+			return
+		}
+		if err := writeRTSPTestResponse(serverConn, 401, map[string]string{
+			"WWW-Authenticate": `Digest realm="airplay", nonce="nonce"`,
+		}, nil); err != nil {
+			serverErr <- err
+			return
+		}
+		one := make([]byte, 1)
+		if _, err := serverConn.Read(one); err != io.EOF {
+			serverErr <- fmt.Errorf("read after rejected cleanup = %v, want EOF", err)
+			return
+		}
+		serverErr <- nil
+	}()
+
+	err := client.teardownFailedMirrorSetup("rtsp://receiver/session", time.Second)
+	if !errors.Is(err, ErrCredentialsRequired) {
+		t.Fatalf("cleanup error = %v, want ErrCredentialsRequired", err)
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatal(err)

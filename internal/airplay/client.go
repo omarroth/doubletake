@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,6 +235,41 @@ type HTTPStatusError struct {
 
 func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d (body: %s)", e.StatusCode, string(e.Body))
+}
+
+// incompleteResponseError marks a request which did not consume one complete
+// response from the sequential RTSP connection. The wrapped cause may be a
+// network failure, a malformed response boundary, or a framing/decryption
+// error. In every case the connection must not carry another request because a
+// late or partially buffered response could be mistaken for that request's
+// response.
+type incompleteResponseError struct {
+	err error
+}
+
+func (e *incompleteResponseError) Error() string { return e.err.Error() }
+func (e *incompleteResponseError) Unwrap() error { return e.err }
+
+func markIncompleteResponse(err error) error {
+	if err == nil {
+		return nil
+	}
+	var incomplete *incompleteResponseError
+	if errors.As(err, &incomplete) {
+		return err
+	}
+	var statusErr *HTTPStatusError
+	if errors.As(err, &statusErr) {
+		// The response readers create HTTPStatusError only after consuming the
+		// complete body declared by the receiver.
+		return err
+	}
+	return &incompleteResponseError{err: err}
+}
+
+func hasIncompleteResponse(err error) bool {
+	var incomplete *incompleteResponseError
+	return errors.As(err, &incomplete)
 }
 
 // ErrCredentialsRequired identifies a Digest challenge that the client cannot
@@ -809,7 +845,7 @@ func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body [
 	}
 
 	if _, err := c.conn.Write(data); err != nil {
-		return nil, nil, fmt.Errorf("write request: %w", err)
+		return nil, nil, markIncompleteResponse(fmt.Errorf("write request: %w", err))
 	}
 	dbg("[HTTP] wrote %d bytes to socket, waiting for response...", len(data))
 
@@ -843,7 +879,7 @@ func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte
 	dbg("[RAW] -> %s %s (body=%d bytes, cseq=%d)", method, path, len(body), seq)
 
 	if _, err := c.conn.Write(data); err != nil {
-		return nil, fmt.Errorf("write request: %w", err)
+		return nil, markIncompleteResponse(fmt.Errorf("write request: %w", err))
 	}
 
 	resp, _, err := c.readHTTPResponse()
@@ -903,7 +939,7 @@ func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []
 	}
 
 	if _, err := c.conn.Write(data); err != nil {
-		return nil, nil, fmt.Errorf("write request: %w", err)
+		return nil, nil, markIncompleteResponse(fmt.Errorf("write request: %w", err))
 	}
 	dbg("[RTSP] wrote %d bytes to socket, waiting for response...", len(data))
 
@@ -927,15 +963,19 @@ func (c *AirPlayClient) readHTTPResponseWithTimeout(timeout time.Duration) ([]by
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	c.conn.SetReadDeadline(time.Now().Add(timeout))
+	if err := c.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, nil, markIncompleteResponse(fmt.Errorf("set response read deadline: %w", err))
+	}
 	defer c.conn.SetReadDeadline(time.Time{})
 
 	if c.encrypted {
 		dbg("[READ] reading encrypted response (readKey=%s, readNonce=%d)", hex.EncodeToString(c.encReadKey[:8]), c.encReadNonce)
-		return c.readEncryptedHTTPResponse()
+		body, headers, err := c.readEncryptedHTTPResponse()
+		return body, headers, markIncompleteResponse(err)
 	}
 	dbg("[READ] reading plaintext response")
-	return c.readPlaintextHTTPResponse()
+	body, headers, err := c.readPlaintextHTTPResponse()
+	return body, headers, markIncompleteResponse(err)
 }
 
 func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, map[string]string, error) {
@@ -959,7 +999,10 @@ func (c *AirPlayClient) readPlaintextHTTPResponse() ([]byte, map[string]string, 
 
 	header := headerBuf.String()
 	dbg("[READ] plaintext response header:\n%s", header)
-	statusCode, contentLength, headers := parseHTTPHeader(header)
+	statusCode, contentLength, headers, err := parseHTTPHeader(header)
+	if err != nil {
+		return nil, headers, err
+	}
 	dbg("[READ] status=%d content-length=%d", statusCode, contentLength)
 	if err := validateContentLength(contentLength); err != nil {
 		return nil, headers, err
@@ -1030,7 +1073,10 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, map[string]string, 
 	remaining := decrypted[headerEnd+4:]
 
 	dbg("[ENC-READ] decrypted response header:\n%s", header)
-	statusCode, contentLength, headers := parseHTTPHeader(header)
+	statusCode, contentLength, headers, err := parseHTTPHeader(header)
+	if err != nil {
+		return nil, headers, err
+	}
 	dbg("[ENC-READ] status=%d content-length=%d remaining=%d", statusCode, contentLength, len(remaining))
 	if err := validateContentLength(contentLength); err != nil {
 		return nil, headers, err
@@ -1072,13 +1118,14 @@ func (c *AirPlayClient) readEncryptedHTTPResponse() ([]byte, map[string]string, 
 	return remaining[:contentLength], headers, nil
 }
 
-func parseHTTPHeader(header string) (statusCode, contentLength int, headers map[string]string) {
+func parseHTTPHeader(header string) (statusCode, contentLength int, headers map[string]string, err error) {
 	headers = make(map[string]string)
 	fmt.Sscanf(header, "HTTP/1.1 %d", &statusCode)
 	if statusCode == 0 {
 		fmt.Sscanf(header, "RTSP/1.0 %d", &statusCode)
 	}
 
+	contentLengthSeen := false
 	for _, line := range strings.Split(header, "\r\n") {
 		key, value, ok := strings.Cut(line, ":")
 		if !ok {
@@ -1091,10 +1138,34 @@ func parseHTTPHeader(header string) (statusCode, contentLength int, headers map[
 		}
 		headers[key] = value
 		if key == "content-length" {
-			fmt.Sscanf(value, "%d", &contentLength)
+			parsed, parseErr := parseContentLength(value)
+			if parseErr != nil {
+				return statusCode, 0, headers, parseErr
+			}
+			if contentLengthSeen && parsed != contentLength {
+				return statusCode, 0, headers, fmt.Errorf("conflicting Content-Length values %d and %d", contentLength, parsed)
+			}
+			contentLength = parsed
+			contentLengthSeen = true
 		}
 	}
 	return
+}
+
+func parseContentLength(value string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("invalid Content-Length %q: value is empty", value)
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, fmt.Errorf("invalid Content-Length %q: value must contain only decimal digits", value)
+		}
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid Content-Length %q: %w", value, err)
+	}
+	return parsed, nil
 }
 
 func (c *AirPlayClient) encrypt(data []byte) []byte {

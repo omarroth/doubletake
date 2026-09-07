@@ -5,7 +5,10 @@ import "testing"
 func TestParseHTTPHeaderReturnsHeaders(t *testing.T) {
 	header := "RTSP/1.0 200 OK\r\nAudio-Latency: 11025\r\nContent-Length: 12\r\nServer: AirTunes/220.68\r\n\r\n"
 
-	statusCode, contentLength, headers := parseHTTPHeader(header)
+	statusCode, contentLength, headers, err := parseHTTPHeader(header)
+	if err != nil {
+		t.Fatalf("parseHTTPHeader: %v", err)
+	}
 	if statusCode != 200 {
 		t.Fatalf("statusCode = %d, want 200", statusCode)
 	}

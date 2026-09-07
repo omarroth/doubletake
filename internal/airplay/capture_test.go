@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -224,6 +226,53 @@ func TestMeasureVideoCaptureLatencyCancellationInterruptsRead(t *testing.T) {
 	}
 	if !capture.stopped {
 		t.Fatal("canceled measurement left its capture reader active")
+	}
+}
+
+type atomicCountingCloser struct {
+	closes atomic.Int32
+}
+
+func (c *atomicCountingCloser) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *atomicCountingCloser) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+func TestScreenCaptureStopIsConcurrentAndIdempotent(t *testing.T) {
+	stdout := &atomicCountingCloser{}
+	portal := &atomicCountingCloser{}
+	var cancels atomic.Int32
+	capture := &ScreenCapture{
+		stdout: stdout,
+		portal: portal,
+		cancel: func() { cancels.Add(1) },
+	}
+
+	var callers sync.WaitGroup
+	for range 32 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			capture.Stop()
+		}()
+	}
+	callers.Wait()
+
+	if !capture.stopped {
+		t.Fatal("concurrent Stop calls did not mark capture stopped")
+	}
+	if got := stdout.closes.Load(); got != 1 {
+		t.Fatalf("stdout Close calls = %d, want 1", got)
+	}
+	if got := portal.closes.Load(); got != 1 {
+		t.Fatalf("portal Close calls = %d, want 1", got)
+	}
+	if got := cancels.Load(); got != 1 {
+		t.Fatalf("capture context cancellations = %d, want 1", got)
 	}
 }
 
@@ -1018,7 +1067,7 @@ func TestWaylandStartupProbeReplaysTimestampedAccessUnitsExactly(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := probeWaylandCaptureStartup(ctx, capture, VideoCodecH264, true); err != nil {
+	if err := probeVideoCaptureStartup(ctx, capture, VideoCodecH264, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1043,7 +1092,7 @@ func TestWaylandStartupProbeRejectsProcessThatExitedAfterValidPrefix(t *testing.
 		waitCh: waitCh,
 	}
 	capture := &ScreenCapture{frames: reader, waitCh: waitCh, waitErr: errors.New("encoder stopped")}
-	err := probeWaylandCaptureStartup(context.Background(), capture, VideoCodecH264, true)
+	err := probeVideoCaptureStartup(context.Background(), capture, VideoCodecH264, true)
 	if err == nil || !strings.Contains(err.Error(), "exited after startup validation") || !strings.Contains(err.Error(), "encoder stopped") {
 		t.Fatalf("startup probe error = %v, want completed-child rejection", err)
 	}
@@ -1059,7 +1108,7 @@ func TestWaylandStartupProbeDrainsPrefetchedUnitsBeforeLaterExit(t *testing.T) {
 		frames: &queuedVideoAccessUnitReader{units: append([]VideoAccessUnit(nil), want...)},
 		waitCh: waitCh,
 	}
-	if err := probeWaylandCaptureStartup(context.Background(), capture, VideoCodecH264, true); err != nil {
+	if err := probeVideoCaptureStartup(context.Background(), capture, VideoCodecH264, true); err != nil {
 		t.Fatal(err)
 	}
 	wantExit := errors.New("later encoder failure")
@@ -1102,7 +1151,7 @@ func TestWaylandStartupProbeRequiresCompleteRandomAccessSequence(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			capture := &ScreenCapture{frames: &queuedVideoAccessUnitReader{units: test.units}, waitCh: make(chan struct{})}
-			err := probeWaylandCaptureStartup(context.Background(), capture, test.codec, true)
+			err := probeVideoCaptureStartup(context.Background(), capture, test.codec, true)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("startup probe error = %v, want evidence containing %q", err, test.want)
 			}
@@ -1121,7 +1170,7 @@ func TestWaylandRawStartupProbeReplaysEveryByte(t *testing.T) {
 	capture := &ScreenCapture{stdout: stdout, waitCh: make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := probeWaylandCaptureStartup(ctx, capture, VideoCodecH264, false); err != nil {
+	if err := probeVideoCaptureStartup(ctx, capture, VideoCodecH264, false); err != nil {
 		t.Fatal(err)
 	}
 	close(capture.waitCh)
@@ -1142,7 +1191,7 @@ func TestWaylandStartupProbeTimeoutStopsBlockedReader(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	err := probeWaylandCaptureStartup(ctx, capture, VideoCodecH264, true)
+	err := probeVideoCaptureStartup(ctx, capture, VideoCodecH264, true)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("startup timeout error = %v, want deadline exceeded", err)
 	}
@@ -1336,9 +1385,9 @@ func TestH264TestCaptureStartupProbePreservesRealGStreamerOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer capture.Stop()
-	probeCtx, cancelProbe := context.WithTimeout(ctx, waylandCaptureAttemptTimeout)
+	probeCtx, cancelProbe := context.WithTimeout(ctx, captureStartupProbeTimeout(10))
 	defer cancelProbe()
-	if err := probeWaylandCaptureStartup(probeCtx, capture, VideoCodecH264, true); err != nil {
+	if err := probeVideoCaptureStartup(probeCtx, capture, VideoCodecH264, true); err != nil {
 		t.Fatal(err)
 	}
 	prefetched, ok := capture.frames.(*prefetchedVideoAccessUnitReader)

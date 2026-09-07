@@ -32,6 +32,8 @@ const (
 
 	legacyAirPlaySourceVersion = "280.33"
 	modernAirPlaySourceVersion = "980.71.1"
+
+	failedMirrorSetupTeardownTimeout = 2 * time.Second
 )
 
 // mediaClock maps local monotonic time onto the receiver's PTP timeline. The
@@ -349,22 +351,109 @@ func audioLayoutName(layout audioConnectionLayout) string {
 	return "controlPort"
 }
 
-func (c *AirPlayClient) requestSetup(uri, phase string, request map[string]interface{}) (map[string]interface{}, map[string]string, time.Time, error) {
+func (c *AirPlayClient) requestSetup(uri, phase string, request map[string]interface{}) (map[string]interface{}, map[string]string, time.Time, bool, bool, error) {
 	body, err := plist.Marshal(request, plist.BinaryFormat)
 	if err != nil {
-		return nil, nil, time.Time{}, fmt.Errorf("marshal %s SETUP: %w", phase, err)
+		return nil, nil, time.Time{}, false, true, fmt.Errorf("marshal %s SETUP: %w", phase, err)
 	}
 	responseBody, headers, err := c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body, nil)
 	receivedAt := time.Now()
 	if err != nil {
-		return nil, nil, receivedAt, fmt.Errorf("%s SETUP: %w", phase, err)
+		return nil, nil, receivedAt, false, !hasIncompleteResponse(err), fmt.Errorf("%s SETUP: %w", phase, err)
 	}
 	var response map[string]interface{}
 	if _, err := plist.Unmarshal(responseBody, &response); err != nil {
-		return nil, nil, receivedAt, fmt.Errorf("unmarshal %s SETUP response: %w", phase, err)
+		// The receiver accepted this SETUP even though its response body was not
+		// usable. The caller must still release the session it just created.
+		return nil, headers, receivedAt, true, true, fmt.Errorf("unmarshal %s SETUP response: %w", phase, err)
 	}
 	dbg("[SETUP] %s response: %+v", phase, response)
-	return response, headers, receivedAt, nil
+	return response, headers, receivedAt, true, true, nil
+}
+
+// teardownFailedMirrorSetup releases receiver state created by the first
+// accepted SETUP. It has its own short deadline because cleanup must not turn a
+// local startup error into another 30-second wait. Any failed cleanup closes
+// the control connection: an incomplete response may arrive late, while a
+// complete rejection leaves the receiver session's state uncertain.
+func (c *AirPlayClient) teardownFailedMirrorSetup(uri string, timeout time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return fmt.Errorf("control connection is nil")
+	}
+	deadline := time.Now().Add(timeout)
+	extraHeaders := map[string]string(nil)
+	if authHeader, ok := c.preemptiveAuthHeader("TEARDOWN", uri); ok {
+		extraHeaders = map[string]string{"Authorization": authHeader}
+	}
+
+	responseHeaders, responseConsumed, err := c.failedSetupTeardownOnce(uri, extraHeaders, deadline)
+	if responseConsumed {
+		authHeader, retry, authErr := c.digestRetryHeader("TEARDOWN", uri, responseHeaders, err)
+		err = authErr
+		if retry {
+			_, responseConsumed, err = c.failedSetupTeardownOnce(uri, withHeader(extraHeaders, "Authorization", authHeader), deadline)
+			c.logIfAuthRejected("TEARDOWN", uri, err)
+		}
+	}
+	if err != nil || !responseConsumed {
+		// net.Conn permits Close concurrently with blocked I/O. At this point the
+		// request has returned, but closing still isolates an incomplete response or
+		// receiver state which the rejected TEARDOWN did not release.
+		_ = c.conn.Close()
+	}
+	return err
+}
+
+// failedSetupTeardownOnce is the bounded counterpart of rtspRequestOnce for
+// the single cleanup request above. The absolute deadline is shared by a
+// possible Digest retry.
+func (c *AirPlayClient) failedSetupTeardownOnce(uri string, extraHeaders map[string]string, deadline time.Time) (map[string]string, bool, error) {
+	seq := c.cseq.Add(1)
+	var request bytes.Buffer
+	fmt.Fprintf(&request, "TEARDOWN %s RTSP/1.0\r\n", uri)
+	fmt.Fprintf(&request, "CSeq: %d\r\n", seq)
+	fmt.Fprintf(&request, "User-Agent: AirPlay/935.7.1\r\n")
+	for key, value := range extraHeaders {
+		fmt.Fprintf(&request, "%s: %s\r\n", key, value)
+	}
+	fmt.Fprintf(&request, "Content-Length: 0\r\n\r\n")
+
+	data := request.Bytes()
+	if c.encrypted {
+		data = c.encrypt(data)
+	}
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		return nil, false, fmt.Errorf("set TEARDOWN write deadline: %w", err)
+	}
+	_, writeErr := c.conn.Write(data)
+	clearWriteErr := c.conn.SetWriteDeadline(time.Time{})
+	if writeErr != nil {
+		return nil, false, fmt.Errorf("write TEARDOWN: %w", writeErr)
+	}
+	if clearWriteErr != nil {
+		return nil, false, fmt.Errorf("clear TEARDOWN write deadline: %w", clearWriteErr)
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return nil, false, context.DeadlineExceeded
+	}
+	_, responseHeaders, err := c.readHTTPResponseWithTimeout(remaining)
+	if err != nil {
+		return responseHeaders, !hasIncompleteResponse(err), err
+	}
+	return responseHeaders, true, nil
+}
+
+func (c *AirPlayClient) closeUnsafeMirrorControlConnection() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
 }
 
 // setupMirrorSession negotiates the mirroring stream with the Apple TV.
@@ -437,9 +526,22 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	sessionCtx, cancelSession := context.WithCancel(ctx)
 	var receiverEventConn, dataConn net.Conn
 	setupSucceeded := false
+	controlConnectionUsable := true
+	acceptedSessionURI := ""
 	defer func() {
 		if setupSucceeded {
 			return
+		}
+		// Match Apple's screen-stream cleanup boundary: once SETUP has created
+		// receiver state, release it before closing the local media transports.
+		if !controlConnectionUsable {
+			c.closeUnsafeMirrorControlConnection()
+		} else if acceptedSessionURI != "" {
+			if err := c.teardownFailedMirrorSetup(acceptedSessionURI, failedMirrorSetupTeardownTimeout); err != nil {
+				dbg("[TEARDOWN] failed setup cleanup for %s: %v", acceptedSessionURI, err)
+			} else {
+				dbg("[TEARDOWN] released failed setup for %s", acceptedSessionURI)
+			}
 		}
 		cancelSession()
 		if dataConn != nil {
@@ -530,8 +632,18 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 
 	firstSetup := true
 	sendSetup := func(uri, phase string, request map[string]interface{}) (map[string]interface{}, map[string]string, time.Time, error) {
+		perform := func() (map[string]interface{}, map[string]string, time.Time, error) {
+			response, headers, receivedAt, accepted, connectionUsable, requestErr := c.requestSetup(uri, phase, request)
+			if !connectionUsable {
+				controlConnectionUsable = false
+			}
+			if accepted && acceptedSessionURI == "" {
+				acceptedSessionURI = uri
+			}
+			return response, headers, receivedAt, requestErr
+		}
 		if !firstSetup {
-			return c.requestSetup(uri, phase, request)
+			return perform()
 		}
 		firstSetup = false
 		setupHintDone := make(chan struct{})
@@ -548,7 +660,14 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			}
 		}()
 		defer close(setupHintDone)
-		return c.requestSetup(uri, phase, request)
+		return perform()
+	}
+	setupRTSPRequest := func(method, uri, contentType string, body []byte, headers map[string]string) ([]byte, map[string]string, error) {
+		responseBody, responseHeaders, requestErr := c.rtspRequest(method, uri, contentType, body, headers)
+		if hasIncompleteResponse(requestErr) {
+			controlConnectionUsable = false
+		}
+		return responseBody, responseHeaders, requestErr
 	}
 
 	recordSession := func() error {
@@ -557,7 +676,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			"Range":    "npt=0-",
 			"RTP-Info": "seq=0;rtptime=0",
 		}
-		_, responseHeaders, err := c.rtspRequest("RECORD", audioURI, "", nil, recordHeaders)
+		_, responseHeaders, err := setupRTSPRequest("RECORD", audioURI, "", nil, recordHeaders)
 		if err != nil {
 			return fmt.Errorf("RECORD: %w", err)
 		}
@@ -690,6 +809,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		if errors.As(refreshErr, &statusErr) {
 			dbg("[SETUP] %s GET /info fallback was declined: %v", phase, refreshErr)
 			return c.info, nil
+		}
+		if hasIncompleteResponse(refreshErr) {
+			controlConnectionUsable = false
 		}
 		return nil, fmt.Errorf("%s GET /info fallback: %w", phase, refreshErr)
 	}
@@ -977,13 +1099,18 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		// interpret them as zero gain. Real senders send the sender's own
 		// slider value; 0 dB is this sender's fixed choice.
 		volumeBody := audioVolumeBody(false)
-		if _, _, err := c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil); err != nil {
+		if _, _, err := setupRTSPRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil); err != nil {
+			if !controlConnectionUsable {
+				return nil, fmt.Errorf("SET_PARAMETER volume: %w", err)
+			}
 			dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)
 		} else {
 			dbg("[SETUP] SET_PARAMETER volume=0 sent")
 		}
 		// Send volume twice (pcap shows real senders do this)
-		_, _, _ = c.rtspRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil)
+		if _, _, err := setupRTSPRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil); err != nil && !controlConnectionUsable {
+			return nil, fmt.Errorf("repeat SET_PARAMETER volume: %w", err)
+		}
 	}
 
 	if timingProtocol == timingProtocolPTP {

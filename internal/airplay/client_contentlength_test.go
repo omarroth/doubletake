@@ -11,18 +11,24 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// A receiver answering with a negative Content-Length used to crash the sender:
-// the value reached make([]byte, n) and panicked with "makeslice: len out of
-// range". It is now rejected as a parse error.
+// Hostile Content-Length values must be rejected before they can allocate a
+// body or leave unframed bytes on the sequential control connection.
 func TestReadResponseRejectsHostileContentLength(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		header string
 		want   string
 	}{
-		{"negative", "Content-Length: -1", "negative"},
-		{"large negative", "Content-Length: -2147483648", "negative"},
+		{"negative", "Content-Length: -1", "invalid Content-Length"},
+		{"negative zero", "Content-Length: -0", "invalid Content-Length"},
+		{"explicit positive", "Content-Length: +5", "invalid Content-Length"},
+		{"large negative", "Content-Length: -2147483648", "invalid Content-Length"},
 		{"absurdly large", "Content-Length: 2147483647", "exceeds"},
+		{"empty", "Content-Length:", "invalid Content-Length"},
+		{"not a number", "Content-Length: nope", "invalid Content-Length"},
+		{"trailing junk", "Content-Length: 5junk", "invalid Content-Length"},
+		{"integer overflow", "Content-Length: 9999999999999999999999999999", "invalid Content-Length"},
+		{"conflicting duplicates", "Content-Length: 0\r\nContent-Length: 5", "conflicting Content-Length"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := net.Pipe()
@@ -43,7 +49,7 @@ func TestReadResponseRejectsHostileContentLength(t *testing.T) {
 						done <- nil
 					}
 				}()
-				_, _, err := c.readPlaintextHTTPResponse()
+				_, _, err := c.readHTTPResponseWithTimeout(time.Second)
 				done <- err
 			}()
 
@@ -55,10 +61,32 @@ func TestReadResponseRejectsHostileContentLength(t *testing.T) {
 				if !strings.Contains(err.Error(), tc.want) {
 					t.Fatalf("error %q does not mention %q", err, tc.want)
 				}
+				if !hasIncompleteResponse(err) {
+					t.Fatalf("invalid response boundary was not marked incomplete: %v", err)
+				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("timed out")
 			}
 		})
+	}
+}
+
+func TestReadResponseAcceptsMatchingDuplicateContentLength(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		_, _ = server.Write([]byte("RTSP/1.0 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello"))
+	}()
+
+	c := &AirPlayClient{conn: client}
+	body, _, err := c.readPlaintextHTTPResponse()
+	if err != nil {
+		t.Fatalf("matching Content-Length values were rejected: %v", err)
+	}
+	if string(body) != "hello" {
+		t.Fatalf("body = %q, want hello", body)
 	}
 }
 

@@ -4,12 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -76,6 +80,7 @@ type ScreenCapture struct {
 	waitCh   chan struct{} // closed when process exits
 	waitErr  error         // set before waitCh is closed
 	stopped  bool
+	stopOnce sync.Once
 	stderr   *captureStderrTail
 }
 
@@ -138,6 +143,73 @@ func StartCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, error
 	return capture, nil
 }
 
+const displaySourceProbeTimeout = 3 * time.Second
+
+// probeWaylandDisplay verifies the compositor endpoint before invoking a
+// portal backend. A long-lived service may retain WAYLAND_DISPLAY after the
+// desktop session has removed its socket, in which case the portal chooser can
+// otherwise wait forever for a display that no longer exists.
+func probeWaylandDisplay(ctx context.Context, display string) error {
+	address := display
+	if !filepath.IsAbs(address) {
+		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		if runtimeDir == "" {
+			return fmt.Errorf("WAYLAND_DISPLAY=%q is set but XDG_RUNTIME_DIR is empty", display)
+		}
+		address = filepath.Join(runtimeDir, address)
+	}
+	probeCtx, cancel := context.WithTimeout(normalizeContext(ctx), displaySourceProbeTimeout)
+	defer cancel()
+	conn, err := (&net.Dialer{}).DialContext(probeCtx, "unix", address)
+	if err != nil {
+		return fmt.Errorf("WAYLAND_DISPLAY=%q does not identify a reachable compositor at %s: %w", display, address, err)
+	}
+	if err := conn.Close(); err != nil {
+		return fmt.Errorf("close Wayland display probe for %s: %w", address, err)
+	}
+	return nil
+}
+
+// probeX11CaptureSource lets ximagesrc perform the actual X11 handshake rather
+// than duplicating DISPLAY parsing or authentication. It runs before receiver
+// SETUP so a stale display cannot leave a remote media session half-created.
+func probeX11CaptureSource(ctx context.Context, display string, cfg CaptureConfig) error {
+	probeCtx, cancel := context.WithTimeout(normalizeContext(ctx), displaySourceProbeTimeout)
+	defer cancel()
+	source := gstStage{
+		"ximagesrc",
+		fmt.Sprintf("display-name=%s", display),
+		"num-buffers=1",
+		"use-damage=false",
+	}
+	if cfg.X11WindowID != 0 {
+		source = append(source, fmt.Sprintf("xid=%d", cfg.X11WindowID))
+	} else if cfg.X11WindowName != "" {
+		source = append(source, fmt.Sprintf("xname=%s", cfg.X11WindowName))
+	}
+	args := append([]string{"--quiet"}, source...)
+	args = appendGstStage(args, gstStage{"fakesink", "sync=false", "async=false"})
+	cmd := exec.CommandContext(probeCtx, "gst-launch-1.0", args...)
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if probeCtx.Err() != nil {
+		return fmt.Errorf("validate X11 capture source on DISPLAY=%q: %w", display, probeCtx.Err())
+	}
+	if err == nil {
+		return nil
+	}
+	diagnostic := strings.TrimSpace(stderr.String())
+	if len(diagnostic) > maxCaptureStderrTailBytes {
+		diagnostic = diagnostic[len(diagnostic)-maxCaptureStderrTailBytes:]
+	}
+	if diagnostic == "" {
+		return fmt.Errorf("validate X11 capture source on DISPLAY=%q: %w", display, err)
+	}
+	return fmt.Errorf("validate X11 capture source on DISPLAY=%q: %w; GStreamer stderr: %s", display, err, diagnostic)
+}
+
 // PrepareCapture selects and validates the capture path. Wayland portal access
 // is acquired immediately; X11 needs no external session and is merely
 // validated until Start is called.
@@ -193,11 +265,17 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		if err := exec.Command("gst-inspect-1.0", "ximagesrc").Run(); err != nil {
 			return nil, fmt.Errorf("GStreamer 'ximagesrc' plugin not found; install gst-plugins-good")
 		}
+		if err := probeX11CaptureSource(ctx, os.Getenv("DISPLAY"), cfg); err != nil {
+			return nil, err
+		}
 		return preparation, nil
 	}
 
 	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
 		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
+	}
+	if err := probeWaylandDisplay(ctx, os.Getenv("WAYLAND_DISPLAY")); err != nil {
+		return nil, err
 	}
 	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
 	if err != nil {
@@ -373,7 +451,7 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 	case capturePreparationWayland:
 		return startPreparedWaylandCapture(startupCtx, captureCtx, cfg, encoder, nodeID, pwFd, portal, streamSize, timestampedOutput)
 	case capturePreparationX11:
-		return startPreparedX11Capture(captureCtx, cfg, encoder, timestampedOutput)
+		return startPreparedX11Capture(startupCtx, captureCtx, cfg, encoder, timestampedOutput)
 	case capturePreparationTest:
 		return startPreparedTestCapture(captureCtx, cfg, encoder, timestampedOutput)
 	default:
@@ -994,11 +1072,26 @@ func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan wayla
 }
 
 const (
-	waylandCaptureAttemptTimeout = 3 * time.Second
-	waylandCaptureStartupBudget  = 10 * time.Second
-	maxStartupProbeUnits         = 256
-	maxStartupProbeBytes         = 64 << 20
+	minimumCaptureStartupProbeTimeout = 3 * time.Second
+	captureStartupBudget              = 10 * time.Second
+	maxStartupProbeUnits              = 256
+	maxStartupProbeBytes              = 64 << 20
 )
+
+// captureStartupProbeTimeout waits through a complete two-second keyframe
+// interval plus enough source frames to prove that the encoder continues after
+// its random-access point. Slow configured frame rates therefore get more time
+// without making normal 30/60 fps startup sluggish.
+func captureStartupProbeTimeout(fps int) time.Duration {
+	if fps <= 0 {
+		fps = 30
+	}
+	timeout := 2*time.Second + 3*time.Second/time.Duration(fps)
+	if timeout < minimumCaptureStartupProbeTimeout {
+		return minimumCaptureStartupProbeTimeout
+	}
+	return timeout
+}
 
 type waylandCaptureAttemptStarter func(context.Context, CaptureConfig, waylandCapturePlan, uint32, *os.File, [2]int, bool) (*ScreenCapture, error)
 type waylandCaptureProber func(context.Context, *ScreenCapture, VideoCodec, bool) error
@@ -1014,7 +1107,7 @@ func startPreparedWaylandCapture(startupCtx, captureCtx context.Context, cfg Cap
 	return startPreparedWaylandCapturePlans(startupCtx, captureCtx, cfg,
 		waylandCapturePlans(encoder, hasGstElement), nodeID, pwFd, portal,
 		portal.openPipeWireRemote, streamSize, timestampedOutput,
-		startWaylandCaptureAttempt, probeWaylandCaptureStartup)
+		startWaylandCaptureAttempt, probeVideoCaptureStartup)
 }
 
 func startPreparedWaylandCapturePlans(
@@ -1052,7 +1145,7 @@ func startPreparedWaylandCapturePlans(
 		return nil, fmt.Errorf("prepared Wayland capture has no encoder plans")
 	}
 
-	startupCtx, cancelStartup := context.WithTimeout(startupCtx, waylandCaptureStartupBudget)
+	startupCtx, cancelStartup := context.WithTimeout(startupCtx, captureStartupBudget)
 	defer cancelStartup()
 	remote := initialRemote
 	portalTransferred := false
@@ -1096,7 +1189,7 @@ func startPreparedWaylandCapturePlans(
 			continue
 		}
 
-		probeCtx, cancelProbe := context.WithTimeout(startupCtx, waylandCaptureAttemptTimeout)
+		probeCtx, cancelProbe := context.WithTimeout(startupCtx, captureStartupProbeTimeout(cfg.FPS))
 		err = probeAttempt(probeCtx, capture, plan.encoder.codec, timestampedOutput)
 		cancelProbe()
 		if err != nil {
@@ -1424,10 +1517,11 @@ func captureStartupExitError(capture *ScreenCapture) error {
 	}
 }
 
-func probeWaylandCaptureStartup(ctx context.Context, capture *ScreenCapture, codec VideoCodec, timestampedOutput bool) error {
+func probeVideoCaptureStartup(ctx context.Context, capture *ScreenCapture, codec VideoCodec, timestampedOutput bool) error {
 	if capture == nil {
 		return fmt.Errorf("startup probe received a nil capture")
 	}
+	ctx = normalizeContext(ctx)
 	type probeResult struct {
 		units []VideoAccessUnit
 		raw   []byte
@@ -1483,8 +1577,11 @@ func probeWaylandCaptureStartup(ctx context.Context, capture *ScreenCapture, cod
 	}
 }
 
-func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder encoderResult, timestampedOutput bool) (*ScreenCapture, error) {
-	captureCtx, cancel := context.WithCancel(ctx)
+func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg CaptureConfig, encoder encoderResult, timestampedOutput bool) (*ScreenCapture, error) {
+	startupCtx, cancelStartup := context.WithTimeout(normalizeContext(startupCtx), captureStartupBudget)
+	defer cancelStartup()
+	lifetimeCtx = normalizeContext(lifetimeCtx)
+	captureCtx, cancel := context.WithCancel(lifetimeCtx)
 
 	fps := cfg.FPS
 	if fps <= 0 {
@@ -1511,7 +1608,7 @@ func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder enc
 		// (all monitors combined). On multi-monitor setups this wastes CPU on pixels
 		// we don't need, so crop to the primary monitor. The encoded resolution is
 		// then the primary monitor's native resolution (no rescaling).
-		startX, startY, endX, endY := detectPrimaryMonitor(display)
+		startX, startY, endX, endY := detectPrimaryMonitor(startupCtx, display)
 		if endX > startX && endY > startY {
 			ximageSrcArgs = append(ximageSrcArgs,
 				fmt.Sprintf("startx=%d", startX),
@@ -1521,6 +1618,10 @@ func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder enc
 			)
 			dbg("[CAPTURE] cropping ximagesrc to x=%d..%d y=%d..%d", startX, endX-1, startY, endY-1)
 		}
+	}
+	if err := startupCtx.Err(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("prepare X11 capture: %w", err)
 	}
 
 	beforeConvert := []gstStage{frameRateStage(fps), lowLatencyVideoQueueStage()}
@@ -1534,21 +1635,30 @@ func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder enc
 		cancel()
 		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
-	stderr, _ := cmd.StderrPipe()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		_ = stdout.Close()
+		return nil, fmt.Errorf("gst stderr pipe: %w", err)
+	}
 
 	waitResult, err := startGStreamerCommand(cmd)
 	if err != nil {
 		cancel()
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
 
-	go logStderr("GST", stderr)
+	stderrTail := newCaptureStderrTail()
+	go logStderr("GST", stderr, stderrTail)
 
 	capture := &ScreenCapture{
 		cmd:    cmd,
 		stdout: stdout,
 		cancel: cancel,
 		waitCh: make(chan struct{}),
+		stderr: stderrTail,
 	}
 	if timestampedOutput {
 		capture.frames = newRTPVideoAccessUnitReader(stdout, encoder.codec)
@@ -1557,6 +1667,18 @@ func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder enc
 		capture.waitErr = <-waitResult
 		close(capture.waitCh)
 	}()
+
+	probeCtx, cancelProbe := context.WithTimeout(startupCtx, captureStartupProbeTimeout(fps))
+	err = probeVideoCaptureStartup(probeCtx, capture, encoder.codec, timestampedOutput)
+	cancelProbe()
+	if err != nil {
+		capture.Stop()
+		result := fmt.Errorf("X11 capture on DISPLAY=%q failed startup validation: %w", display, err)
+		if stderr := capture.stderrText(); stderr != "" {
+			result = fmt.Errorf("%w; GStreamer stderr: %s", result, stderr)
+		}
+		return nil, result
+	}
 
 	return capture, nil
 }
@@ -1598,44 +1720,47 @@ func (sc *ScreenCapture) ReadVideoAccessUnit() (VideoAccessUnit, error) {
 }
 
 func (sc *ScreenCapture) Stop() {
-	if sc.stopped {
+	if sc == nil {
 		return
 	}
-	sc.stopped = true
-	if sc.cancel != nil {
-		sc.cancel()
-	}
-
-	// Close stdout to unblock any pending Read() call.
-	if sc.stdout != nil {
-		sc.stdout.Close()
-	}
-
-	if sc.portal != nil {
-		_ = sc.portal.Close()
-	}
-
-	if sc.cmd != nil && sc.cmd.Process != nil {
-		_ = sc.cmd.Process.Signal(os.Interrupt)
-	}
-
-	select {
-	case <-sc.waitCh:
-	case <-time.After(2 * time.Second):
-		if sc.cmd != nil && sc.cmd.Process != nil {
-			_ = sc.cmd.Process.Kill()
+	sc.stopOnce.Do(func() {
+		sc.stopped = true
+		if sc.cancel != nil {
+			sc.cancel()
 		}
-		<-sc.waitCh
-	}
+
+		// Close stdout to unblock any pending Read() call.
+		if sc.stdout != nil {
+			_ = sc.stdout.Close()
+		}
+
+		if sc.cmd != nil && sc.cmd.Process != nil {
+			_ = sc.cmd.Process.Signal(os.Interrupt)
+			if sc.waitCh != nil {
+				select {
+				case <-sc.waitCh:
+				case <-time.After(2 * time.Second):
+					_ = sc.cmd.Process.Kill()
+					<-sc.waitCh
+				}
+			}
+		}
+
+		// Keep the portal session alive until its consumer has stopped, then
+		// close it exactly once as the final ownership transition.
+		if sc.portal != nil {
+			_ = sc.portal.Close()
+		}
+	})
 }
 
 // detectPrimaryMonitor queries xrandr to find the primary monitor's geometry.
 // Returns (startX, startY, endX, endY) bounding the primary monitor, where
 // endX = startX + monitor_width and endY = startY + monitor_height. If
 // detection fails it returns all zeros, meaning no cropping should be applied.
-func detectPrimaryMonitor(display string) (startX, startY, endX, endY int) {
+func detectPrimaryMonitor(ctx context.Context, display string) (startX, startY, endX, endY int) {
 	// Run xrandr to get connected outputs with geometry
-	out, err := exec.Command("xrandr", "--display", display, "--query").Output()
+	out, err := exec.CommandContext(normalizeContext(ctx), "xrandr", "--display", display, "--query").Output()
 	if err != nil {
 		dbg("[CAPTURE] xrandr failed: %v, skipping monitor crop", err)
 		return 0, 0, 0, 0
@@ -2127,21 +2252,41 @@ func vbvBufferKbit(bitrateKbps, fps int) int {
 type screenCastPortalSession struct {
 	conn        *dbus.Conn
 	sessionPath dbus.ObjectPath
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 func (s *screenCastPortalSession) Close() error {
 	if s == nil || s.conn == nil {
 		return nil
 	}
-	return s.conn.Close()
+	s.closeOnce.Do(func() {
+		var closeErrors []error
+		if s.sessionPath.IsValid() && s.conn.Connected() {
+			ctx, cancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
+			call := s.conn.Object(portalBusName, s.sessionPath).CallWithContext(
+				ctx, portalSessionInterface+".Close", 0)
+			cancel()
+			if call.Err != nil {
+				closeErrors = append(closeErrors, fmt.Errorf("close screencast portal session: %w", call.Err))
+			}
+		}
+		if err := s.conn.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf("close screencast portal connection: %w", err))
+		}
+		s.closeErr = errors.Join(closeErrors...)
+	})
+	return s.closeErr
 }
 
 func (s *screenCastPortalSession) openPipeWireRemote(ctx context.Context) (*os.File, error) {
 	if s == nil || s.conn == nil || !s.sessionPath.IsValid() {
 		return nil, fmt.Errorf("invalid screencast portal session")
 	}
-	portal := s.conn.Object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
-	call := portal.CallWithContext(ctx, "org.freedesktop.portal.ScreenCast.OpenPipeWireRemote", 0,
+	callCtx, cancel := context.WithTimeout(normalizeContext(ctx), portalMethodTimeout)
+	defer cancel()
+	portal := s.conn.Object(portalBusName, portalObjectPath)
+	call := portal.CallWithContext(callCtx, portalScreenCastInterface+".OpenPipeWireRemote", 0,
 		s.sessionPath, map[string]dbus.Variant{})
 	if call.Err != nil {
 		return nil, fmt.Errorf("OpenPipeWireRemote: %w", call.Err)
@@ -2153,49 +2298,103 @@ func (s *screenCastPortalSession) openPipeWireRemote(ctx context.Context) (*os.F
 	return os.NewFile(uintptr(pwFD), "pipewire-remote"), nil
 }
 
+const (
+	portalBusName             = "org.freedesktop.portal.Desktop"
+	portalObjectPath          = dbus.ObjectPath("/org/freedesktop/portal/desktop")
+	portalRequestPathPrefix   = dbus.ObjectPath("/org/freedesktop/portal/desktop/request")
+	portalSessionPathPrefix   = dbus.ObjectPath("/org/freedesktop/portal/desktop/session")
+	portalRequestInterface    = "org.freedesktop.portal.Request"
+	portalSessionInterface    = "org.freedesktop.portal.Session"
+	portalScreenCastInterface = "org.freedesktop.portal.ScreenCast"
+
+	// Portal methods return a Request object promptly and leave user interaction
+	// to its Response signal. The portal API documents a 25-second upper bound
+	// for that method-dispatch phase; the chooser itself remains caller-bounded.
+	portalMethodTimeout       = 25 * time.Second
+	portalControlPhaseTimeout = 25 * time.Second
+	portalCleanupTimeout      = 2 * time.Second
+)
+
+type portalRequestDispatch func(context.Context) (dbus.ObjectPath, error)
+
+func normalizeContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
 // requestScreencast uses the xdg-desktop-portal D-Bus API to request screen capture
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
 // the retained portal session (which must stay open for capture and retries), and a
 // fresh restore token when the portal grants persistence.
 func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int) (uint32, *os.File, pipeWirePortalSession, string, error) {
+	ctx = normalizeContext(ctx)
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return 0, nil, nil, "", fmt.Errorf("connect session bus: %w", err)
 	}
+	connTransferred := false
+	defer func() {
+		if !connTransferred {
+			_ = conn.Close()
+		}
+	}()
 
-	portalObject := conn.Object("org.freedesktop.portal.Desktop",
-		"/org/freedesktop/portal/desktop")
-	portalVersion := screenCastPortalVersion(portalObject)
-	baseToken := newPortalHandleToken()
+	portalObject := conn.Object(portalBusName, portalObjectPath)
+	portalVersion := screenCastPortalVersion(ctx, portalObject)
+	baseToken, err := newPortalHandleToken()
+	if err != nil {
+		return 0, nil, nil, "", err
+	}
+	createPath, err := portalPathForToken(conn, portalRequestPathPrefix, baseToken)
+	if err != nil {
+		return 0, nil, nil, "", err
+	}
+	sessionToken := baseToken + "_session"
+	expectedSessionPath, err := portalPathForToken(conn, portalSessionPathPrefix, sessionToken)
+	if err != nil {
+		return 0, nil, nil, "", err
+	}
 
 	// Create session
 	sessionOpts := map[string]dbus.Variant{
 		"handle_token":         dbus.MakeVariant(baseToken),
-		"session_handle_token": dbus.MakeVariant(baseToken + "_session"),
+		"session_handle_token": dbus.MakeVariant(sessionToken),
 	}
-
-	var requestHandle dbus.ObjectPath
-	call := portalObject.Call("org.freedesktop.portal.ScreenCast.CreateSession", 0, sessionOpts)
-	if call.Err != nil {
-		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("CreateSession: %w", call.Err)
-	}
-	if err := call.Store(&requestHandle); err != nil {
-		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("store create-session request handle: %w", err)
-	}
-
-	createResult, err := waitForResponseWithResult(ctx, conn, requestHandle)
+	createCtx, cancelCreate := context.WithTimeout(ctx, portalControlPhaseTimeout)
+	createResult, err := performPortalRequest(createCtx, conn, createPath, portalMethodTimeout,
+		func(callCtx context.Context) (dbus.ObjectPath, error) {
+			var handle dbus.ObjectPath
+			call := portalObject.CallWithContext(callCtx, portalScreenCastInterface+".CreateSession", 0, sessionOpts)
+			if call.Err != nil {
+				return "", call.Err
+			}
+			if err := call.Store(&handle); err != nil {
+				return "", fmt.Errorf("store request handle: %w", err)
+			}
+			return handle, nil
+		})
+	cancelCreate()
 	if err != nil {
-		conn.Close()
 		return 0, nil, nil, "", fmt.Errorf("session response: %w", err)
 	}
 
 	sessionPath, err := sessionHandleFromResult(createResult)
 	if err != nil {
-		conn.Close()
 		return 0, nil, nil, "", fmt.Errorf("session handle: %w", err)
 	}
+	if sessionPath != expectedSessionPath {
+		dbg("[CAPTURE] portal returned session handle %s instead of predicted %s", sessionPath, expectedSessionPath)
+	}
+	portalSession := &screenCastPortalSession{conn: conn, sessionPath: sessionPath}
+	connTransferred = true
+	sessionTransferred := false
+	defer func() {
+		if !sessionTransferred {
+			_ = portalSession.Close()
+		}
+	}()
 
 	// cursor_mode: HIDDEN=1, EMBEDDED=2 (cursor baked into the stream)
 	cursorMode := uint32(1)
@@ -2204,8 +2403,13 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	}
 
 	// Select sources (screen)
+	selectToken := baseToken + "_select"
+	selectPath, err := portalPathForToken(conn, portalRequestPathPrefix, selectToken)
+	if err != nil {
+		return 0, nil, nil, "", err
+	}
 	selectOpts := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(baseToken + "_select"),
+		"handle_token": dbus.MakeVariant(selectToken),
 		"types":        dbus.MakeVariant(uint32(1)), // MONITOR=1, WINDOW=2
 		"multiple":     dbus.MakeVariant(false),
 		"cursor_mode":  dbus.MakeVariant(cursorMode),
@@ -2218,43 +2422,51 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 		}
 	}
 
-	requestHandle = ""
-	call = portalObject.Call("org.freedesktop.portal.ScreenCast.SelectSources", 0,
-		sessionPath, selectOpts)
-	if call.Err != nil {
-		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("SelectSources: %w", call.Err)
-	}
-	if err := call.Store(&requestHandle); err != nil {
-		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("store select-sources request handle: %w", err)
-	}
-
-	if _, err = waitForResponseWithResult(ctx, conn, requestHandle); err != nil {
-		conn.Close()
+	selectCtx, cancelSelect := context.WithTimeout(ctx, portalControlPhaseTimeout)
+	_, err = performPortalRequest(selectCtx, conn, selectPath, portalMethodTimeout,
+		func(callCtx context.Context) (dbus.ObjectPath, error) {
+			var handle dbus.ObjectPath
+			call := portalObject.CallWithContext(callCtx, portalScreenCastInterface+".SelectSources", 0,
+				sessionPath, selectOpts)
+			if call.Err != nil {
+				return "", call.Err
+			}
+			if err := call.Store(&handle); err != nil {
+				return "", fmt.Errorf("store request handle: %w", err)
+			}
+			return handle, nil
+		})
+	cancelSelect()
+	if err != nil {
 		return 0, nil, nil, "", fmt.Errorf("select response: %w", err)
 	}
 
 	// Start the screencast
-	startOpts := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(baseToken + "_start"),
-	}
-
-	requestHandle = ""
-	call = portalObject.Call("org.freedesktop.portal.ScreenCast.Start", 0,
-		sessionPath, "", startOpts)
-	if call.Err != nil {
-		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("Start: %w", call.Err)
-	}
-	if err := call.Store(&requestHandle); err != nil {
-		conn.Close()
-		return 0, nil, nil, "", fmt.Errorf("store start request handle: %w", err)
-	}
-
-	startResult, err := waitForResponseWithResult(ctx, conn, requestHandle)
+	startToken := baseToken + "_start"
+	startPath, err := portalPathForToken(conn, portalRequestPathPrefix, startToken)
 	if err != nil {
-		conn.Close()
+		return 0, nil, nil, "", err
+	}
+	startOpts := map[string]dbus.Variant{
+		"handle_token": dbus.MakeVariant(startToken),
+	}
+
+	// Only the dispatch is internally bounded here. Start owns the interactive
+	// chooser, so its Response remains governed by the caller's lifetime context.
+	startResult, err := performPortalRequest(ctx, conn, startPath, portalMethodTimeout,
+		func(callCtx context.Context) (dbus.ObjectPath, error) {
+			var handle dbus.ObjectPath
+			call := portalObject.CallWithContext(callCtx, portalScreenCastInterface+".Start", 0,
+				sessionPath, "", startOpts)
+			if call.Err != nil {
+				return "", call.Err
+			}
+			if err := call.Store(&handle); err != nil {
+				return "", fmt.Errorf("store request handle: %w", err)
+			}
+			return handle, nil
+		})
+	if err != nil {
 		return 0, nil, nil, "", fmt.Errorf("start response: %w", err)
 	}
 
@@ -2262,7 +2474,6 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	if variant, ok := startResult["restore_token"]; ok {
 		value, ok := variant.Value().(string)
 		if !ok {
-			conn.Close()
 			return 0, nil, nil, "", fmt.Errorf("unexpected restore token type: %T", variant.Value())
 		}
 		newRestoreToken = value
@@ -2271,7 +2482,6 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	// Extract PipeWire node ID from the result
 	streams, ok := startResult["streams"]
 	if !ok {
-		conn.Close()
 		return 0, nil, nil, "", fmt.Errorf("no streams in start response")
 	}
 
@@ -2285,28 +2495,23 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 				if nid, ok4 := tuple[0].(uint32); ok4 {
 					nodeID = nid
 				} else {
-					conn.Close()
 					return 0, nil, nil, "", fmt.Errorf("unexpected node ID type: %T", tuple[0])
 				}
 				if len(tuple) > 1 {
 					streamProperties, _ = tuple[1].(map[string]dbus.Variant)
 				}
 			} else {
-				conn.Close()
 				return 0, nil, nil, "", fmt.Errorf("unexpected streams format: %T", streams.Value())
 			}
 		} else {
-			conn.Close()
 			return 0, nil, nil, "", fmt.Errorf("unexpected streams format: %T", streams.Value())
 		}
 	} else {
 		if len(streamList) == 0 || len(streamList[0]) == 0 {
-			conn.Close()
 			return 0, nil, nil, "", fmt.Errorf("empty streams list")
 		}
 		nid, ok2 := streamList[0][0].(uint32)
 		if !ok2 {
-			conn.Close()
 			return 0, nil, nil, "", fmt.Errorf("unexpected node ID type: %T", streamList[0][0])
 		}
 		nodeID = nid
@@ -2327,13 +2532,12 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	// Keep the original bus connection and session path together. Each failed
 	// GStreamer attempt consumes its PipeWire protocol connection, so retry by
 	// asking this same portal session for a fresh remote rather than duping an fd.
-	portalSession := &screenCastPortalSession{conn: conn, sessionPath: sessionPath}
 	pwFile, err := portalSession.openPipeWireRemote(ctx)
 	if err != nil {
-		conn.Close()
 		return 0, nil, nil, "", err
 	}
 
+	sessionTransferred = true
 	return nodeID, pwFile, portalSession, newRestoreToken, nil
 }
 
@@ -2375,52 +2579,142 @@ func portalDimension(value interface{}) (int, bool) {
 	}
 }
 
-func waitForResponseWithResult(ctx context.Context, conn *dbus.Conn, requestHandle dbus.ObjectPath) (map[string]dbus.Variant, error) {
-	ch := make(chan *dbus.Signal, 1)
-	conn.Signal(ch)
-	defer conn.RemoveSignal(ch)
-
-	matchRule := "type='signal',interface='org.freedesktop.portal.Request',member='Response'"
-	if call := conn.BusObject().Call("org.freedesktop.DBus.AddMatch", 0, matchRule); call.Err != nil {
-		return nil, fmt.Errorf("add portal response match: %w", call.Err)
+func performPortalRequest(ctx context.Context, conn *dbus.Conn, expectedPath dbus.ObjectPath, dispatchTimeout time.Duration, dispatch portalRequestDispatch) (map[string]dbus.Variant, error) {
+	ctx = normalizeContext(ctx)
+	if conn == nil || !expectedPath.IsValid() || dispatch == nil {
+		return nil, fmt.Errorf("invalid portal request")
 	}
-	defer conn.BusObject().Call("org.freedesktop.DBus.RemoveMatch", 0, matchRule)
+	if dispatchTimeout <= 0 {
+		dispatchTimeout = portalMethodTimeout
+	}
+
+	// Request handles are predictable from handle_token. Subscribe before the
+	// method call so a backend which responds before returning the handle cannot
+	// race past us. The namespace match also preserves compatibility with older
+	// portals which return a different handle under the standard request tree.
+	signals := make(chan *dbus.Signal, 4)
+	conn.Signal(signals)
+	matchOptions := []dbus.MatchOption{
+		dbus.WithMatchSender(portalBusName),
+		dbus.WithMatchInterface(portalRequestInterface),
+		dbus.WithMatchMember("Response"),
+		dbus.WithMatchPathNamespace(portalRequestPathPrefix),
+	}
+	matchCtx, cancelMatch := context.WithTimeout(ctx, dispatchTimeout)
+	err := conn.AddMatchSignalContext(matchCtx, matchOptions...)
+	cancelMatch()
+	if err != nil {
+		conn.RemoveSignal(signals)
+		return nil, fmt.Errorf("subscribe to portal response: %w", err)
+	}
+	defer func() {
+		conn.RemoveSignal(signals)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
+		_ = conn.RemoveMatchSignalContext(cleanupCtx, matchOptions...)
+		cancel()
+	}()
+
+	dispatchCtx, cancelDispatch := context.WithTimeout(ctx, dispatchTimeout)
+	requestHandle, err := dispatch(dispatchCtx)
+	cancelDispatch()
+	if err != nil {
+		closePortalRequest(conn, expectedPath)
+		return nil, fmt.Errorf("dispatch portal request: %w", err)
+	}
+	if !requestHandle.IsValid() {
+		closePortalRequest(conn, expectedPath)
+		return nil, fmt.Errorf("portal returned invalid request handle %q", requestHandle)
+	}
+	if requestHandle != expectedPath {
+		dbg("[CAPTURE] portal returned request handle %s instead of predicted %s", requestHandle, expectedPath)
+		if !portalPathWithinNamespace(requestHandle, portalRequestPathPrefix) {
+			closePortalRequest(conn, requestHandle)
+			return nil, fmt.Errorf("portal returned request handle outside its request namespace: %s", requestHandle)
+		}
+	}
 
 	for {
 		select {
-		case sig := <-ch:
-			if sig == nil || sig.Path != requestHandle {
+		case signal, ok := <-signals:
+			if !ok {
+				return nil, fmt.Errorf("portal connection closed before request %s responded", requestHandle)
+			}
+			if signal == nil || signal.Name != portalRequestInterface+".Response" || signal.Path != requestHandle {
 				continue
 			}
-			if len(sig.Body) < 2 {
-				return nil, fmt.Errorf("signal body too short")
-			}
-			status, ok := sig.Body[0].(uint32)
-			if !ok {
-				return nil, fmt.Errorf("unexpected status type")
-			}
-			if status != 0 {
-				return nil, fmt.Errorf("portal request failed with status %d", status)
-			}
-			result, ok := sig.Body[1].(map[string]dbus.Variant)
-			if !ok {
-				return nil, fmt.Errorf("unexpected result type: %T", sig.Body[1])
-			}
-			return result, nil
-
+			return decodePortalResponse(signal)
 		case <-ctx.Done():
-			return nil, fmt.Errorf("timeout waiting for portal response: %w", ctx.Err())
+			closePortalRequest(conn, requestHandle)
+			return nil, fmt.Errorf("wait for portal response: %w", ctx.Err())
 		}
 	}
 }
 
-func newPortalHandleToken() string {
-	return fmt.Sprintf("airplay_cast_%d", time.Now().UnixNano())
+func decodePortalResponse(signal *dbus.Signal) (map[string]dbus.Variant, error) {
+	if signal == nil || len(signal.Body) < 2 {
+		return nil, fmt.Errorf("portal response body is too short")
+	}
+	status, ok := signal.Body[0].(uint32)
+	if !ok {
+		return nil, fmt.Errorf("unexpected portal response status type: %T", signal.Body[0])
+	}
+	if status != 0 {
+		if status == 1 {
+			return nil, fmt.Errorf("portal request was canceled")
+		}
+		return nil, fmt.Errorf("portal request failed with status %d", status)
+	}
+	result, ok := signal.Body[1].(map[string]dbus.Variant)
+	if !ok {
+		return nil, fmt.Errorf("unexpected portal response result type: %T", signal.Body[1])
+	}
+	return result, nil
 }
 
-func screenCastPortalVersion(portal dbus.BusObject) uint32 {
-	variant, err := portal.GetProperty("org.freedesktop.portal.ScreenCast.version")
-	if err != nil {
+func closePortalRequest(conn *dbus.Conn, requestPath dbus.ObjectPath) {
+	if conn == nil || !requestPath.IsValid() || !conn.Connected() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), portalCleanupTimeout)
+	_ = conn.Object(portalBusName, requestPath).CallWithContext(ctx, portalRequestInterface+".Close", 0).Err
+	cancel()
+}
+
+func portalPathWithinNamespace(path, namespace dbus.ObjectPath) bool {
+	return path == namespace || strings.HasPrefix(string(path), string(namespace)+"/")
+}
+
+func portalPathForToken(conn *dbus.Conn, prefix dbus.ObjectPath, token string) (dbus.ObjectPath, error) {
+	if conn == nil || !prefix.IsValid() || token == "" || strings.Contains(token, "/") {
+		return "", fmt.Errorf("invalid portal path input")
+	}
+	names := conn.Names()
+	if len(names) == 0 || !strings.HasPrefix(names[0], ":") {
+		return "", fmt.Errorf("session bus did not assign a unique connection name")
+	}
+	sender := strings.ReplaceAll(strings.TrimPrefix(names[0], ":"), ".", "_")
+	path := dbus.ObjectPath(string(prefix) + "/" + sender + "/" + token)
+	if !path.IsValid() {
+		return "", fmt.Errorf("generated invalid portal path %q", path)
+	}
+	return path, nil
+}
+
+func newPortalHandleToken() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate portal handle token: %w", err)
+	}
+	return "doubletake_" + hex.EncodeToString(random[:]), nil
+}
+
+func screenCastPortalVersion(ctx context.Context, portal dbus.BusObject) uint32 {
+	callCtx, cancel := context.WithTimeout(normalizeContext(ctx), portalMethodTimeout)
+	defer cancel()
+	call := portal.CallWithContext(callCtx, "org.freedesktop.DBus.Properties.Get", 0,
+		portalScreenCastInterface, "version")
+	var variant dbus.Variant
+	if err := call.Store(&variant); err != nil {
 		dbg("[CAPTURE] unable to read ScreenCast portal version: %v", err)
 		return 0
 	}
@@ -2438,9 +2732,16 @@ func sessionHandleFromResult(result map[string]dbus.Variant) (dbus.ObjectPath, e
 		return "", fmt.Errorf("missing session_handle in portal response")
 	}
 	if sessionHandle, ok := variant.Value().(string); ok {
-		return dbus.ObjectPath(sessionHandle), nil
+		path := dbus.ObjectPath(sessionHandle)
+		if !path.IsValid() {
+			return "", fmt.Errorf("invalid session handle %q", sessionHandle)
+		}
+		return path, nil
 	}
 	if sessionHandle, ok := variant.Value().(dbus.ObjectPath); ok {
+		if !sessionHandle.IsValid() {
+			return "", fmt.Errorf("invalid session handle %q", sessionHandle)
+		}
 		return sessionHandle, nil
 	}
 	return "", fmt.Errorf("unexpected session_handle type: %T", variant.Value())
