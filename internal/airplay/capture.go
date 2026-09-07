@@ -804,6 +804,10 @@ func buildGstVideoPipeline(source gstStage, beforeConvert, afterScale []gstStage
 	if encoder.needsVulkan {
 		args = appendGstStage(args, gstStage{"vulkanupload"})
 	}
+	return appendGstVideoEncoding(args, encoder, timestampedOutput)
+}
+
+func appendGstVideoEncoding(args []string, encoder encoderResult, timestampedOutput bool) []string {
 	args = appendGstStage(args, encoder.parts)
 	parser, mediaType, payloader := "h264parse", "video/x-h264", "rtph264pay"
 	if encoder.codec == VideoCodecHEVC {
@@ -825,6 +829,30 @@ func buildGstVideoPipeline(source gstStage, beforeConvert, afterScale []gstStage
 		args = appendGstStage(args, gstStage{"rtpstreampay"})
 	}
 	return appendGstStage(args, gstStage{"fdsink", "fd=1", "sync=false", "async=false"})
+}
+
+// buildVAWaylandVideoPipeline imports portal buffers without a CPU copy, then
+// keeps conversion, scaling, and encoding in VA memory. PipeWire keepalives
+// supply idle frames; videorate limits them to the requested output rate.
+func buildVAWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
+	source := gstStage{"pipewiresrc", fmt.Sprintf("fd=%d", fd), fmt.Sprintf("path=%d", nodeID),
+		"do-timestamp=true", fmt.Sprintf("keepalive-time=%d", frameIntervalMillis(fps)), "always-copy=false"}
+	args := append([]string{"--quiet"}, source...)
+	// Desktop pixels are square. Without this constraint, the VA transform can
+	// negotiate the minimum of its PAR range and fail to calculate borders.
+	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
+	// Force a fresh surface even when the source already matches the output.
+	// Downstream retains the converted surface instead of another portal buffer.
+	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true"})
+	caps := "video/x-raw(memory:VAMemory),format=NV12"
+	if maxWidth > 1 && maxHeight > 1 {
+		caps += fmt.Sprintf(",width=%d,height=%d,pixel-aspect-ratio=1/1", maxWidth&^1, maxHeight&^1)
+	}
+	args = appendGstStage(args, gstStage{caps})
+	args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
+	args = appendGstStage(args, gstStage{caps + fmt.Sprintf(",framerate=%d/1", fps)})
+	args = appendGstStage(args, lowLatencyVideoQueueStage())
+	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
 func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoderParts encoderResult, nodeID uint32, pwFd *os.File, dbusConn *dbus.Conn, streamSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
@@ -853,36 +881,41 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 	// The encoded dimensions are capped to the receiver's advertised display size
 	// when available. The actual result is read back from the codec SPS downstream.
 	const pwFdNum = 3
-	source := pipeWireVideoSourceStage(pwFdNum, nodeID, fps)
-
-	hasCompositor := streamSize[0] > 0 && streamSize[1] > 0 && hasGstElement("compositor")
-
-	var beforeConvert []gstStage
-	if hasGstElement("vapostproc") {
-		beforeConvert = append(beforeConvert, gstStage{"vapostproc"})
+	var gstArgs []string
+	if len(encoderParts.parts) > 0 && encoderParts.parts[0] == "vah264enc" && hasGstElement("vapostproc") {
+		gstArgs = buildVAWaylandVideoPipeline(pwFdNum, nodeID, fps, encoderParts, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 	} else {
-		log.Printf("[CAPTURE] vapostproc unavailable, using software conversion")
-	}
+		source := pipeWireVideoSourceStage(pwFdNum, nodeID, fps)
 
-	var afterScale []gstStage
-	if hasCompositor {
-		beforeConvert = append(beforeConvert,
-			gstStage{"compositor", "force-live=true", "ignore-inactive-pads=true", "background=black"},
-			gstStage{fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", streamSize[0], streamSize[1], fps)},
-		)
-	} else {
-		log.Printf("[CAPTURE] idle-frame compositor unavailable; using portal frame timing")
+		hasCompositor := streamSize[0] > 0 && streamSize[1] > 0 && hasGstElement("compositor")
+
+		var beforeConvert []gstStage
+		if hasGstElement("vapostproc") {
+			beforeConvert = append(beforeConvert, gstStage{"vapostproc"})
+		} else {
+			log.Printf("[CAPTURE] vapostproc unavailable, using software conversion")
+		}
+
+		var afterScale []gstStage
+		if hasCompositor {
+			beforeConvert = append(beforeConvert,
+				gstStage{"compositor", "force-live=true", "ignore-inactive-pads=true", "background=black"},
+				gstStage{fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", streamSize[0], streamSize[1], fps)},
+			)
+		} else {
+			log.Printf("[CAPTURE] idle-frame compositor unavailable; using portal frame timing")
+		}
+		if hasCompositor {
+			afterScale = append(afterScale, lowLatencyVideoQueueStage())
+		} else {
+			afterScale = append(afterScale,
+				gstStage{"videorate", "drop-only=true", "skip-to-first=true"},
+				frameRateStage(fps),
+				lowLatencyVideoQueueStage(),
+			)
+		}
+		gstArgs = buildGstVideoPipeline(source, beforeConvert, afterScale, encoderParts, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 	}
-	if hasCompositor {
-		afterScale = append(afterScale, lowLatencyVideoQueueStage())
-	} else {
-		afterScale = append(afterScale,
-			gstStage{"videorate", "drop-only=true", "skip-to-first=true"},
-			frameRateStage(fps),
-			lowLatencyVideoQueueStage(),
-		)
-	}
-	gstArgs := buildGstVideoPipeline(source, beforeConvert, afterScale, encoderParts, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
 	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
