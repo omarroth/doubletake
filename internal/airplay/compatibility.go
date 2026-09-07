@@ -85,6 +85,12 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 	// mirroring session.
 	if encrypted && info.HasFeature(featurePTP) && supportsPTPSourceVersion(info.SourceVersion) {
 		policy.timing = timingProtocolPTP
+		// Samsung AU9000 with this AirPlay version advertises PTP but omits
+		// timingPeerInfo.ClockID in SETUP. NTP works on the same receiver.
+		// Keep the exception limited to the observed model/version pair.
+		if info.Model == "UAU9000" && info.SourceVersion == "377.25.06" {
+			policy.timing = timingProtocolNTP
+		}
 	}
 
 	return policy, nil

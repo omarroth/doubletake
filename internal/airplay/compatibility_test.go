@@ -259,3 +259,30 @@ func TestHybridAudioDescriptorLayouts(t *testing.T) {
 		t.Fatalf("plaintext streamConnections encryption flag = %#v, want false", rtp["streamConnectionKeyUseStreamEncryptionKey"])
 	}
 }
+
+func TestSamsungAU9000TimingException(t *testing.T) {
+	for _, test := range []struct {
+		name, model, version, want string
+	}{
+		{"observed receiver", "UAU9000", "377.25.06", timingProtocolNTP},
+		{"different model", "another model", "377.25.06", timingProtocolPTP},
+		{"missing model", "", "377.25.06", timingProtocolPTP},
+		{"different version", "UAU9000", "377.25.07", timingProtocolPTP},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info := receiverWithFeatures(featurePTP, featureAudioStreamConnectionSetup)
+			info.SourceVersion = test.version
+			baseline := mustCompatibility(t, &info, true)
+			info.Model = test.model
+			got := mustCompatibility(t, &info, true)
+			if got.timing != test.want {
+				t.Fatalf("timing = %q, want %q", got.timing, test.want)
+			}
+			// The quirk must not change audio negotiation or key placement.
+			got.timing = baseline.timing
+			if !reflect.DeepEqual(got, baseline) {
+				t.Fatalf("timing exception changed another policy field: got %+v, want %+v", got, baseline)
+			}
+		})
+	}
+}
