@@ -936,11 +936,9 @@ func TestVAWaylandPipelineSelection(t *testing.T) {
 
 func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420", codec: VideoCodecH264}
-	pipeline := buildSystemWaylandVideoPipeline(
-		3, 42, 30, encoder, 1920, 1080, [2]int{1536, 960}, true,
-		func(element string) bool { return element == "compositor" })
+	pipeline := buildSystemWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
 	joined := strings.Join(pipeline, " ")
-	for _, forbidden := range []string{"always-copy", "vapostproc", "memory:VAMemory"} {
+	for _, forbidden := range []string{"always-copy", "vapostproc", "compositor", "memory:VAMemory"} {
 		if strings.Contains(joined, forbidden) {
 			t.Errorf("system-memory Wayland pipeline contains %q: %s", forbidden, joined)
 		}
@@ -948,15 +946,109 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 	wantOrder := []string{
 		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=33",
 		"!", "videoconvert", "!", "video/x-raw,format=NV12",
-		"!", "videoconvert", "!", "video/x-raw,format=I420",
-		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
-		"!", "video/x-raw,format=I420,width=1536,height=960,framerate=30/1",
 		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
+		"!", "videoconvert", "!", "video/x-raw,format=I420",
+		"!", "videorate", "drop-only=true", "skip-to-first=true", "!", "video/x-raw,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
 		"!", "openh264enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
-		t.Fatalf("system conversion must own the frame before compositing, scaling, queuing, and encoding:\n%s", joined)
+		t.Fatalf("system conversion must own the frame before scaling, cadence, queuing, and encoding:\n%s", joined)
+	}
+}
+
+func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE", codec: VideoCodecHEVC}
+	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
+	joined := strings.Join(pipeline, " ")
+	for _, forbidden := range []string{"always-copy", "memory:VAMemory", "videoconvert", "videoscale", "compositor", "width=1536", "height=960"} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("VA-to-system Wayland pipeline contains %q: %s", forbidden, joined)
+		}
+	}
+	wantOrder := []string{
+		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=33",
+		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
+		"!", "vapostproc", "disable-passthrough=true", "add-borders=true",
+		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
+		"!", "videorate", "drop-only=true", "skip-to-first=true",
+		"!", "video/x-raw,framerate=30/1",
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "nvh265enc",
+	}
+	if !containsPipelineSequence(pipeline, wantOrder) {
+		t.Fatalf("VA postprocessing must scale and own system memory before cadence, queue, and encoding:\n%s", joined)
+	}
+}
+
+func TestVAPostprocPlainRawWaylandPipelineConvertsX265LayoutAfterScale(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"x265enc"}, rawFormat: "I420_10LE", codec: VideoCodecHEVC}
+	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
+	wantOrder := []string{
+		"vapostproc", "disable-passthrough=true", "add-borders=true",
+		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
+		"!", "videoconvert", "!", "video/x-raw,format=I420_10LE",
+		"!", "videorate", "drop-only=true", "skip-to-first=true",
+		"!", "video/x-raw,framerate=30/1",
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "x265enc",
+	}
+	if !containsPipelineSequence(pipeline, wantOrder) {
+		t.Fatalf("x265 layout conversion must run after VA scaling and before retention:\n%s", strings.Join(pipeline, " "))
+	}
+	if strings.Count(strings.Join(pipeline, " "), "width=1920,height=1080") != 1 {
+		t.Fatalf("pipeline must request the receiver canvas exactly once: %s", strings.Join(pipeline, " "))
+	}
+}
+
+func TestVAPostprocPlainRawWaylandPipelineRejectsUnknownFormat(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"futureenc"}, rawFormat: "FUTURE", inputMemory: encoderInputSystemMemory}
+	if canBuildVAPostprocPlainRawWaylandVideoPipeline(encoder, func(string) bool { return true }) {
+		t.Fatal("unknown vapostproc output format was treated as supported")
+	}
+	pipeline := buildWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, [2]int{}, true, func(string) bool { return true })
+	if strings.Contains(strings.Join(pipeline, " "), "vapostproc") {
+		t.Fatalf("unknown format did not use the validated CPU fallback: %s", strings.Join(pipeline, " "))
+	}
+}
+
+func TestVAPostprocPlainRawWaylandPipelineSelection(t *testing.T) {
+	hasVA := func(element string) bool { return element == "vapostproc" }
+	noVA := func(string) bool { return false }
+	for _, test := range []struct {
+		name       string
+		encoder    encoderResult
+		hasElement func(string) bool
+		want       bool
+	}{
+		{name: "software H264", encoder: encoderResult{parts: gstStage{"x264enc"}, rawFormat: "I420"}, hasElement: hasVA, want: true},
+		{name: "NVENC HEVC", encoder: encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE"}, hasElement: hasVA, want: true},
+		{name: "x265 converted layout", encoder: encoderResult{parts: gstStage{"x265enc"}, rawFormat: "I420_10LE"}, hasElement: hasVA, want: true},
+		{name: "missing postprocessor", encoder: encoderResult{parts: gstStage{"x264enc"}, rawFormat: "I420"}, hasElement: noVA},
+		{name: "nil element probe", encoder: encoderResult{parts: gstStage{"x264enc"}, rawFormat: "I420"}},
+		{name: "native VA input", encoder: encoderResult{parts: gstStage{"vah264enc"}, rawFormat: "NV12", inputMemory: encoderInputVAMemory}, hasElement: hasVA},
+		{name: "unknown format", encoder: encoderResult{parts: gstStage{"futureenc"}, rawFormat: "FUTURE"}, hasElement: hasVA},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := canBuildVAPostprocPlainRawWaylandVideoPipeline(test.encoder, test.hasElement); got != test.want {
+				t.Fatalf("canBuildVAPostprocPlainRawWaylandVideoPipeline() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestVAPostprocPlainRawWaylandPipelineSanitizesReceiverDimensions(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420"}
+	for _, size := range [][2]int{{0, 0}, {1279, 719}, {1, 1}} {
+		pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, size[0], size[1], true)
+		joined := strings.Join(pipeline, " ")
+		if size[0] > 1 && size[1] > 1 {
+			if want := "width=1278,height=718,pixel-aspect-ratio=1/1"; !strings.Contains(joined, want) {
+				t.Fatalf("odd receiver size was not made safe for 4:2:0: %s", joined)
+			}
+		} else if strings.Contains(joined, "width=") || strings.Contains(joined, "height=") {
+			t.Fatalf("invalid receiver size constrained accelerated capture: %s", joined)
+		}
 	}
 }
 
@@ -1001,21 +1093,38 @@ func TestWaylandEncoderPathMatrix(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			pipeline := buildWaylandVideoPipeline(3, 42, 30, test.encoder, 1280, 720, [2]int{3072, 1920}, true, hasVA)
 			joined := strings.Join(pipeline, " ")
-			gotVA := strings.Contains(joined, "vapostproc")
-			if gotVA != test.wantVA {
-				t.Fatalf("VA path = %t, want %t: %s", gotVA, test.wantVA, joined)
+			gotNativeVA := strings.Contains(joined, "memory:VAMemory")
+			if gotNativeVA != test.wantVA {
+				t.Fatalf("native VA path = %t, want %t: %s", gotNativeVA, test.wantVA, joined)
 			}
 			if !test.wantVA {
-				wantConversion := "videoconvert ! video/x-raw,format=" + systemMemoryStagingFormat(test.encoder.rawFormat) +
-					" ! videoconvert ! video/x-raw,format=" + test.encoder.rawFormat
-				if !strings.Contains(joined, wantConversion) {
-					t.Fatalf("system path did not force a distinct allocation before %s encoding: %s", test.encoder.rawFormat, joined)
+				for _, required := range []string{"vapostproc disable-passthrough=true add-borders=true", "video/x-raw,format=" + test.encoder.rawFormat} {
+					if !strings.Contains(joined, required) {
+						t.Fatalf("accelerated system path is missing %q before %s encoding: %s", required, test.encoder.rawFormat, joined)
+					}
 				}
 			}
 			if test.encoder.needsVulkan && !strings.Contains(joined, "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! vulkanupload ! vulkanh264enc") {
 				t.Fatalf("Vulkan upload is not immediately before its encoder: %s", joined)
 			}
 		})
+	}
+}
+
+func TestWaylandPipelineIgnoresPortalCoordinateSize(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420"}
+	pipeline := buildWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, [2]int{1536, 960}, false, func(string) bool { return true })
+	joined := strings.Join(pipeline, " ")
+	for _, portalDimension := range []string{"width=1536", "height=960"} {
+		if strings.Contains(joined, portalDimension) {
+			t.Fatalf("pipeline incorrectly constrains pixels from portal coordinates %q: %s", portalDimension, joined)
+		}
+	}
+	if strings.Count(joined, "width=1920,height=1080") != 1 {
+		t.Fatalf("pipeline must fit the negotiated stream to the receiver exactly once: %s", joined)
+	}
+	if strings.Contains(joined, "compositor") || !strings.Contains(joined, "keepalive-time=33") {
+		t.Fatalf("idle cadence must come from pipewiresrc keepalive, without compositor: %s", joined)
 	}
 }
 
@@ -1231,64 +1340,86 @@ func closedCaptureForStartupTest(stderr string) *ScreenCapture {
 
 func TestWaylandCaptureFallbackReopensRemoteAndTransfersPortalOnce(t *testing.T) {
 	va := encoderResult{parts: gstStage{"vah264enc"}, rawFormat: "NV12", inputMemory: encoderInputVAMemory}
-	plans := []waylandCapturePlan{
-		{encoder: va, mode: waylandPipelineVAMemory},
-		{encoder: va, mode: waylandPipelineSystemMemory},
-	}
-	initial, initialPeer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer initialPeer.Close()
-	var remotePeers []*os.File
-	defer func() {
-		for _, peer := range remotePeers {
-			_ = peer.Close()
-		}
-	}()
-	portal := &countingCloser{}
-	var opened, attempted []*os.File
-	openRemote := func(context.Context) (*os.File, error) {
-		remote, peer, pipeErr := os.Pipe()
-		if pipeErr == nil {
-			opened = append(opened, remote)
-			remotePeers = append(remotePeers, peer)
-		}
-		return remote, pipeErr
-	}
-	startAttempt := func(_ context.Context, _ CaptureConfig, _ waylandCapturePlan, _ uint32, remote *os.File, _ [2]int, _ bool) (*ScreenCapture, error) {
-		attempted = append(attempted, remote)
-		return closedCaptureForStartupTest(""), nil
-	}
-	probes := 0
-	probeAttempt := func(context.Context, *ScreenCapture, VideoCodec, bool) error {
-		probes++
-		if probes == 1 {
-			return fmt.Errorf("not-negotiated")
-		}
-		return nil
-	}
+	system := encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE", codec: VideoCodecHEVC, inputMemory: encoderInputSystemMemory}
+	for _, test := range []struct {
+		name  string
+		plans []waylandCapturePlan
+	}{
+		{
+			name: "native VA import",
+			plans: []waylandCapturePlan{
+				{encoder: va, mode: waylandPipelineVAMemory},
+				{encoder: va, mode: waylandPipelineSystemMemory},
+			},
+		},
+		{
+			name:  "VA scale to system memory",
+			plans: waylandCapturePlans(system, func(name string) bool { return name == "vapostproc" }),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			initial, initialPeer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer initialPeer.Close()
+			var remotePeers []*os.File
+			defer func() {
+				for _, peer := range remotePeers {
+					_ = peer.Close()
+				}
+			}()
+			portal := &countingCloser{}
+			var opened, attempted []*os.File
+			var attemptedModes []waylandPipelineMode
+			openRemote := func(context.Context) (*os.File, error) {
+				remote, peer, pipeErr := os.Pipe()
+				if pipeErr == nil {
+					opened = append(opened, remote)
+					remotePeers = append(remotePeers, peer)
+				}
+				return remote, pipeErr
+			}
+			startAttempt := func(_ context.Context, _ CaptureConfig, plan waylandCapturePlan, _ uint32, remote *os.File, _ [2]int, _ bool) (*ScreenCapture, error) {
+				attempted = append(attempted, remote)
+				attemptedModes = append(attemptedModes, plan.mode)
+				return closedCaptureForStartupTest(""), nil
+			}
+			probes := 0
+			probeAttempt := func(context.Context, *ScreenCapture, VideoCodec, bool) error {
+				probes++
+				if probes == 1 {
+					return fmt.Errorf("not-negotiated")
+				}
+				return nil
+			}
 
-	capture, err := startPreparedWaylandCapturePlans(context.Background(), context.Background(), CaptureConfig{}, plans,
-		42, initial, portal, openRemote, [2]int{}, true, startAttempt, probeAttempt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(opened) != 1 || len(attempted) != 2 || attempted[0] != initial || attempted[1] != opened[0] {
-		t.Fatalf("attempt remotes = %p, reopened = %p; want initial then one fresh remote", attempted, opened)
-	}
-	for _, remote := range attempted {
-		if _, statErr := remote.Stat(); !errors.Is(statErr, os.ErrClosed) {
-			t.Fatalf("attempt remote remained open: %v", statErr)
-		}
-	}
-	if portal.closes != 0 {
-		t.Fatalf("accepted capture portal closes = %d, want 0 before Stop", portal.closes)
-	}
-	capture.Stop()
-	capture.Stop()
-	if portal.closes != 1 {
-		t.Fatalf("accepted capture portal closes = %d, want exactly 1", portal.closes)
+			capture, err := startPreparedWaylandCapturePlans(context.Background(), context.Background(), CaptureConfig{}, test.plans,
+				42, initial, portal, openRemote, [2]int{}, true, startAttempt, probeAttempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(opened) != 1 || len(attempted) != 2 || attempted[0] != initial || attempted[1] != opened[0] {
+				t.Fatalf("attempt remotes = %p, reopened = %p; want initial then one fresh remote", attempted, opened)
+			}
+			wantModes := []waylandPipelineMode{test.plans[0].mode, waylandPipelineSystemMemory}
+			if !reflect.DeepEqual(attemptedModes, wantModes) {
+				t.Fatalf("attempt modes = %v, want %v", attemptedModes, wantModes)
+			}
+			for _, remote := range attempted {
+				if _, statErr := remote.Stat(); !errors.Is(statErr, os.ErrClosed) {
+					t.Fatalf("attempt remote remained open: %v", statErr)
+				}
+			}
+			if portal.closes != 0 {
+				t.Fatalf("accepted capture portal closes = %d, want 0 before Stop", portal.closes)
+			}
+			capture.Stop()
+			capture.Stop()
+			if portal.closes != 1 {
+				t.Fatalf("accepted capture portal closes = %d, want exactly 1", portal.closes)
+			}
+		})
 	}
 }
 
@@ -1347,10 +1478,10 @@ func TestWaylandCapturePlansRetainSelectedEncoderBackend(t *testing.T) {
 		wantElements []string
 		wantModes    []waylandPipelineMode
 	}{
-		{method: "auto", wantElements: []string{"vulkanh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineSystemMemory}},
+		{method: "auto", wantElements: []string{"vulkanh264enc", "vulkanh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},
 		{method: "vaapi", wantElements: []string{"vah264enc", "vah264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAMemory, waylandPipelineSystemMemory}},
-		{method: "none", wantElements: []string{"x264enc"}, wantModes: []waylandPipelineMode{waylandPipelineSystemMemory}},
-		{method: "openh264", wantElements: []string{"openh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineSystemMemory}},
+		{method: "none", wantElements: []string{"x264enc", "x264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},
+		{method: "openh264", wantElements: []string{"openh264enc", "openh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},
 	} {
 		t.Run(test.method, func(t *testing.T) {
 			encoder, err := selectGstEncoderWithProbe(CaptureConfig{HWAccel: test.method}, hasElement, false)

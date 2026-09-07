@@ -826,6 +826,7 @@ type waylandPipelineMode uint8
 const (
 	waylandPipelineSystemMemory waylandPipelineMode = iota
 	waylandPipelineVAMemory
+	waylandPipelineVAPostprocPlainRaw
 )
 
 type waylandCapturePlan struct {
@@ -838,10 +839,14 @@ func (p waylandCapturePlan) String() string {
 	if len(p.encoder.parts) != 0 {
 		encoder = p.encoder.parts[0]
 	}
-	if p.mode == waylandPipelineVAMemory {
+	switch p.mode {
+	case waylandPipelineVAMemory:
 		return encoder + " with native VA frame import"
+	case waylandPipelineVAPostprocPlainRaw:
+		return encoder + " with VA scaling to plain raw video"
+	default:
+		return encoder + " with system-memory frame staging"
 	}
-	return encoder + " with system-memory frame staging"
 }
 
 func frameRateStage(fps int) gstStage {
@@ -987,13 +992,39 @@ func buildVAWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoder
 }
 
 func canBuildVAWaylandVideoPipeline(encoder encoderResult, hasElement func(string) bool) bool {
-	return encoder.inputMemory == encoderInputVAMemory && hasElement("vapostproc")
+	return encoder.inputMemory == encoderInputVAMemory && hasElement != nil && hasElement("vapostproc")
+}
+
+func canBuildVAPostprocPlainRawWaylandVideoPipeline(encoder encoderResult, hasElement func(string) bool) bool {
+	_, supportedFormat := vaPostprocSystemFormat(encoder.rawFormat)
+	return encoder.inputMemory == encoderInputSystemMemory && supportedFormat && hasElement != nil && hasElement("vapostproc")
+}
+
+// vaPostprocSystemFormat returns a format exposed by vapostproc's ordinary
+// video/x-raw source pad. Most selected encoders accept one directly. x265's
+// planar 10-bit input is not exposed by vapostproc, so download P010 and do the
+// final layout conversion only after the frame has been scaled down.
+func vaPostprocSystemFormat(encoderFormat string) (string, bool) {
+	switch encoderFormat {
+	case "NV12", "I420", "P010_10LE":
+		return encoderFormat, true
+	case "I420_10LE":
+		return "P010_10LE", true
+	default:
+		return "", false
+	}
 }
 
 func waylandCapturePlans(encoder encoderResult, hasElement func(string) bool) []waylandCapturePlan {
 	plans := make([]waylandCapturePlan, 0, 2)
 	if canBuildVAWaylandVideoPipeline(encoder, hasElement) {
 		plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineVAMemory})
+	} else if canBuildVAPostprocPlainRawWaylandVideoPipeline(encoder, hasElement) {
+		// Scale while the frame is still handled by the VA postprocessor, then
+		// request fresh plain-raw output suitable for a software, NVENC, or
+		// Vulkan encoder. Runtime validation falls back below when a driver
+		// cannot import the portal's DMA-BUF or map its new output.
+		plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineVAPostprocPlainRaw})
 	}
 	// vah264enc accepts both VAMemory and ordinary NV12. A failed VA import
 	// can therefore fall back to a CPU-owned frame without changing the selected
@@ -1028,28 +1059,20 @@ func systemMemoryStagingFormat(target string) string {
 // pipewiresrc, before any element which may retain a portal buffer. Two
 // deliberately different raw layouts make the second videoconvert allocate a
 // fresh buffer even when the portal already supplies the encoder's format.
-func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
+func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
 	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
 	stagingFormat := systemMemoryStagingFormat(encoder.rawFormat)
 	args = appendGstStage(args, gstStage{"videoconvert"})
 	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", stagingFormat)})
-	args = appendGstStage(args, gstStage{"videoconvert"})
-	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
-
-	hasCompositor := portalSize[0] > 0 && portalSize[1] > 0 && hasElement != nil && hasElement("compositor")
-	if hasCompositor {
-		args = appendGstStage(args, gstStage{"compositor", "force-live=true", "ignore-inactive-pads=true", "background=black"})
-		args = appendGstStage(args, gstStage{fmt.Sprintf(
-			"video/x-raw,format=%s,width=%d,height=%d,framerate=%d/1",
-			encoder.rawFormat, portalSize[0], portalSize[1], fps)})
-	}
+	// Scale in the staging layout so the forced final conversion runs at the
+	// receiver canvas rather than at a potentially much larger HiDPI source size.
 	for _, stage := range receiverScaleStages(maxWidth, maxHeight) {
 		args = appendGstStage(args, stage)
 	}
-	if !hasCompositor {
-		args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
-		args = appendGstStage(args, frameRateStage(fps))
-	}
+	args = appendGstStage(args, gstStage{"videoconvert"})
+	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
+	args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
+	args = appendGstStage(args, frameRateStage(fps))
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
 	if encoder.needsVulkan {
 		args = appendGstStage(args, gstStage{"vulkanupload"})
@@ -1057,18 +1080,59 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
-func buildWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
+// buildVAPostprocPlainRawWaylandVideoPipeline imports and scales a portal frame
+// with VA, then requests a freshly allocated plain video/x-raw result. Drivers
+// may expose that result as ordinary memory or a CPU-mappable VA allocation;
+// either way, downstream never retains the portal-owned source buffer.
+func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
+	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
+	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
+	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true"})
+	postprocFormat, ok := vaPostprocSystemFormat(encoder.rawFormat)
+	if !ok {
+		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
+	}
+	caps := fmt.Sprintf("video/x-raw,format=%s", postprocFormat)
+	if maxWidth > 1 && maxHeight > 1 {
+		caps += fmt.Sprintf(",width=%d,height=%d,pixel-aspect-ratio=1/1", maxWidth&^1, maxHeight&^1)
+	}
+	args = appendGstStage(args, gstStage{caps})
+	if postprocFormat != encoder.rawFormat {
+		args = appendGstStage(args, gstStage{"videoconvert"})
+		args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
+	}
+	args = appendGstStage(args, gstStage{"videorate", "drop-only=true", "skip-to-first=true"})
+	args = appendGstStage(args, frameRateStage(fps))
+	args = appendGstStage(args, lowLatencyVideoQueueStage())
+	if encoder.needsVulkan {
+		args = appendGstStage(args, gstStage{"vulkanupload"})
+	}
+	return appendGstVideoEncoding(args, encoder, timestampedOutput)
+}
+
+// buildWaylandVideoPipeline deliberately ignores portalSize. The ScreenCast
+// portal reports it in compositor coordinates, which may differ from the
+// negotiated pixel dimensions under fractional scaling. Both branches instead
+// fit the actual video stream directly to the receiver's canvas.
+func buildWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, _ [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
 	if canBuildVAWaylandVideoPipeline(encoder, hasElement) {
 		return buildVAWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
 	}
-	return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, portalSize, timestampedOutput, hasElement)
+	if canBuildVAPostprocPlainRawWaylandVideoPipeline(encoder, hasElement) {
+		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
+	}
+	return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
 }
 
-func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan waylandCapturePlan, maxWidth, maxHeight int, portalSize [2]int, timestampedOutput bool, hasElement func(string) bool) []string {
-	if plan.mode == waylandPipelineVAMemory {
+func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan waylandCapturePlan, maxWidth, maxHeight int, timestampedOutput bool) []string {
+	switch plan.mode {
+	case waylandPipelineVAMemory:
 		return buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+	case waylandPipelineVAPostprocPlainRaw:
+		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+	default:
+		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	}
-	return buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, portalSize, timestampedOutput, hasElement)
 }
 
 const (
@@ -1212,7 +1276,7 @@ func startPreparedWaylandCapturePlans(
 	return nil, fmt.Errorf("no Wayland capture pipeline produced a decodable startup sequence:\n  %s", strings.Join(attemptErrors, "\n  "))
 }
 
-func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan waylandCapturePlan, nodeID uint32, pwFd *os.File, streamSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
+func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan waylandCapturePlan, nodeID uint32, pwFd *os.File, _ [2]int, timestampedOutput bool) (*ScreenCapture, error) {
 	captureCtx, cancel := context.WithCancel(ctx)
 
 	fps := cfg.FPS
@@ -1220,12 +1284,12 @@ func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan way
 		fps = 30
 	}
 
-	// Capture from the PipeWire portal. Every plan establishes ownership of its
-	// output before a compositor, queue, or encoder can retain a portal buffer.
+	// Capture from the negotiated PipeWire pixel stream. pipewiresrc keepalives
+	// provide fresh timestamps for an idle desktop; downstream videorate caps
+	// that cadence without pinning output to portal compositor coordinates.
 	const pwFdNum = 3
 	gstArgs := buildWaylandVideoPipelineForPlan(
-		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight,
-		streamSize, timestampedOutput, hasGstElement)
+		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
 	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
