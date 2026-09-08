@@ -81,10 +81,10 @@ type BroadcastSink struct {
 
 	maxQueuedBytes  int
 	maxQueuedChunks int
-	// Apple's ordinary virtual-display source bounds its upstream frame queue to
-	// 67 ms and drops an incoming source frame at that limit. Doubletake derives
-	// a downstream encoded-relay ceiling from that value and counts configured
-	// sample durations. The byte and chunk limits remain independent safeguards.
+	// Apple's vdsink_ShouldDropFrame checks whether the existing encoded sample
+	// queue has reached 67 ms before signaling the producer to skip a frame.
+	// Match that admission boundary using configured sample durations. Shared
+	// relay overflow still detaches the sink; byte and chunk limits are separate.
 	maxFrameQueueDuration time.Duration
 	backpressure          bool
 	blockedProducers      int // number waiting for queue handoff; guarded by mu
@@ -379,7 +379,7 @@ func (s *BroadcastSink) frameQueueExceedsLimitsLocked(frame VideoAccessUnit) boo
 		return true
 	}
 	return len(s.frameQueue) > 0 && s.maxFrameQueueDuration > 0 &&
-		s.queuedFrameDuration+s.frameDuration > s.maxFrameQueueDuration
+		s.queuedFrameDuration >= s.maxFrameQueueDuration
 }
 
 // enqueueFrame appends an immutable complete access unit without copying it.
@@ -387,8 +387,8 @@ func (s *BroadcastSink) frameQueueExceedsLimitsLocked(frame VideoAccessUnit) boo
 // An explicitly single-destination sink waits once one AU is pending, rather
 // than accumulating encoded references which cannot safely be dropped. Shared
 // fan-out is nonblocking and detaches only the sink which exceeds Doubletake's
-// nominal-duration relay budget. This policy is distinct from Apple's upstream
-// source-frame dropping behavior.
+// nominal-duration relay budget. Detachment is distinct from Apple's producer
+// admission signal and does not discard individual encoded references.
 func (s *BroadcastSink) enqueueFrame(frame VideoAccessUnit) error {
 	if len(frame.AnnexB) == 0 {
 		return nil

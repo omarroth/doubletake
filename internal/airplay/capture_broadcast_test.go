@@ -192,15 +192,15 @@ func TestBroadcastSinkNonblockingFrameQueueUsesNominalDuration(t *testing.T) {
 	base := time.Now()
 	// A large or backward PTS gap can be caused by the upstream leaky queue; it
 	// must not turn one queued picture into an artificial duration overflow.
-	for i, offset := range []time.Duration{0, time.Second} {
+	for i, offset := range []time.Duration{0, time.Second, -time.Second} {
 		frame := VideoAccessUnit{AnnexB: []byte{byte(i + 1)}, PTS: base.Add(offset)}
 		if err := sink.enqueueFrame(frame); err != nil {
 			t.Fatalf("enqueue frame %d at %v: %v", i, offset, err)
 		}
 	}
-	third := VideoAccessUnit{AnnexB: []byte{3}, PTS: base.Add(-time.Second)}
-	if err := sink.enqueueFrame(third); !errors.Is(err, errBroadcastSinkBacklog) {
-		t.Fatalf("enqueue third nominal 30fps frame = %v, want backlog error", err)
+	fourth := VideoAccessUnit{AnnexB: []byte{4}, PTS: base.Add(2 * time.Second)}
+	if err := sink.enqueueFrame(fourth); !errors.Is(err, errBroadcastSinkBacklog) {
+		t.Fatalf("enqueue fourth nominal 30fps frame = %v, want backlog error", err)
 	}
 }
 
@@ -210,8 +210,9 @@ func TestBroadcastSinkNominalDurationUsesConfiguredFrameRate(t *testing.T) {
 		acceptedFrames  int
 		rejectedOrdinal int
 	}{
-		{fps: 20, acceptedFrames: 1, rejectedOrdinal: 2},
-		{fps: 60, acceptedFrames: 4, rejectedOrdinal: 5},
+		{fps: 20, acceptedFrames: 2, rejectedOrdinal: 3},
+		{fps: 30, acceptedFrames: 3, rejectedOrdinal: 4},
+		{fps: 60, acceptedFrames: 5, rejectedOrdinal: 6},
 	} {
 		t.Run(fmt.Sprintf("%dfps", test.fps), func(t *testing.T) {
 			broadcast := NewBroadcastCaptureWithFrameRate(nil, test.fps)
@@ -224,6 +225,63 @@ func TestBroadcastSinkNominalDurationUsesConfiguredFrameRate(t *testing.T) {
 			}
 			if err := sink.enqueueFrame(VideoAccessUnit{AnnexB: []byte{0xff}}); !errors.Is(err, errBroadcastSinkBacklog) {
 				t.Fatalf("enqueue nominal frame %d = %v, want backlog error", test.rejectedOrdinal, err)
+			}
+		})
+	}
+}
+
+func TestBroadcastSinkRejectsFrameAtExactDurationThreshold(t *testing.T) {
+	sink := newBroadcastSink(nil)
+	defer sink.Close()
+	// Apple's admission check compares the existing queue to the threshold.
+	// Two samples land exactly on 67 ms; equality must reject the next sample.
+	sink.frameDuration = sink.maxFrameQueueDuration / 2
+	for _, value := range []byte{1, 2} {
+		if err := sink.enqueueFrame(VideoAccessUnit{AnnexB: []byte{value}}); err != nil {
+			t.Fatalf("enqueue frame %d: %v", value, err)
+		}
+	}
+	third := VideoAccessUnit{AnnexB: []byte{3}}
+	if err := sink.enqueueFrame(third); !errors.Is(err, errBroadcastSinkBacklog) {
+		t.Fatalf("enqueue at exact threshold = %v, want backlog error", err)
+	}
+	first, err := sink.ReadVideoAccessUnit()
+	if err != nil || !bytes.Equal(first.AnnexB, []byte{1}) {
+		t.Fatalf("first queued frame after rejected enqueue = (%x, %v), want 01", first.AnnexB, err)
+	}
+	if err := sink.enqueueFrame(third); err != nil {
+		t.Fatalf("enqueue after draining below threshold: %v", err)
+	}
+	for _, want := range []byte{2, 3} {
+		frame, err := sink.ReadVideoAccessUnit()
+		if err != nil || !bytes.Equal(frame.AnnexB, []byte{want}) {
+			t.Fatalf("queued frame = (%x, %v), want %02x", frame.AnnexB, err, want)
+		}
+	}
+}
+
+func TestBroadcastSinkFrameQueueRetainsByteAndChunkLimits(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		maxBytes, maxChunks int
+		prefill             bool
+	}{
+		{name: "bytes", maxBytes: 3, maxChunks: 10, prefill: true},
+		{name: "chunks", maxBytes: 100, maxChunks: 1, prefill: true},
+		{name: "oversized first frame", maxBytes: 1, maxChunks: 10},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sink := newBroadcastSink(nil)
+			defer sink.Close()
+			sink.maxQueuedBytes, sink.maxQueuedChunks = test.maxBytes, test.maxChunks
+			frame := VideoAccessUnit{AnnexB: []byte{1, 2}}
+			if test.prefill {
+				if err := sink.enqueueFrame(frame); err != nil {
+					t.Fatalf("enqueue initial frame: %v", err)
+				}
+			}
+			if err := sink.enqueueFrame(frame); !errors.Is(err, errBroadcastSinkBacklog) {
+				t.Fatalf("enqueue below duration threshold = %v, want capacity error", err)
 			}
 		})
 	}
