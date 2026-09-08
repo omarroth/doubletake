@@ -3,6 +3,7 @@ package airplay
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,6 +25,151 @@ func TestUseAudioFECDefaults(t *testing.T) {
 	}
 	if useAudioFEC(AudioCodecAACELD, false) {
 		t.Fatal("AAC-ELD must not use ALAC-style redundant retransmits")
+	}
+}
+
+func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
+	for _, security := range []string{"plaintext", "AES", "ChaCha"} {
+		t.Run(security, func(t *testing.T) {
+			stream, packets := streamAudioPacketsForTest(t, security, nil, 12)
+			var wantSequences []uint16
+			for seq := uint16(1); seq <= 12; seq++ {
+				first := seq
+				if security != "ChaCha" {
+					first = 1
+					if seq > 2 {
+						first = seq - 2
+					}
+				}
+				for redundant := first; redundant <= seq; redundant++ {
+					wantSequences = append(wantSequences, redundant)
+				}
+			}
+			assertAudioPacketSequences(t, packets, wantSequences)
+
+			// Repeated packets and requested retransmissions must retain the exact
+			// encoded/encrypted datagram, including its original sample position.
+			originals := make(map[uint16][]byte)
+			for _, packet := range packets {
+				seq := binary.BigEndian.Uint16(packet[2:4])
+				if original := originals[seq]; original != nil && !bytes.Equal(packet, original) {
+					t.Fatalf("redundant sequence %d differs from its original datagram", seq)
+				}
+				originals[seq] = packet
+				if !bytes.Equal(stream.audioPacketForRetransmit(seq), packet) {
+					t.Fatalf("requested retransmit history differs for sequence %d", seq)
+				}
+			}
+			for seq := uint16(2); seq <= 12; seq++ {
+				rtp := binary.BigEndian.Uint32(originals[seq][4:8])
+				previous := binary.BigEndian.Uint32(originals[seq-1][4:8])
+				if rtp-previous != 352 {
+					t.Fatalf("sequence %d RTP delta = %d, want 352", seq, rtp-previous)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamAudioRedundancyPreservesCaptureGapsAndResets(t *testing.T) {
+	base := time.Now()
+	positions := []audioPCMFramePosition{
+		{PTS: base, SourceRTP: 1000, HasSourceRTP: true},
+		{PTS: base.Add(audioSamplesDuration(352)), SourceRTP: 1352, HasSourceRTP: true},
+		{PTS: base.Add(audioSamplesDuration(704)), SourceRTP: 1704, HasSourceRTP: true},
+		{PTS: base.Add(audioSamplesDuration(5466)), SourceRTP: 6466, HasSourceRTP: true},
+		{PTS: base.Add(audioSamplesDuration(5818)), SourceRTP: 6818, HasSourceRTP: true},
+		// A source reset reanchors outgoing RTP to the previous frame's end.
+		{PTS: base.Add(audioSamplesDuration(6170)), SourceRTP: 0, HasSourceRTP: true},
+	}
+	_, packets := streamAudioPacketsForTest(t, "AES", &positionedPCMFramesForTest{positions: positions}, len(positions))
+	assertAudioPacketSequences(t, packets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6})
+	firstRTP := binary.BigEndian.Uint32(packets[0][4:8])
+	wantOffsets := []uint32{0, 352, 704, 5466, 5818, 6170}
+	for _, packet := range packets {
+		seq := binary.BigEndian.Uint16(packet[2:4])
+		offset := binary.BigEndian.Uint32(packet[4:8]) - firstRTP
+		if want := wantOffsets[seq-1]; offset != want {
+			t.Fatalf("sequence %d RTP offset = %d, want original source offset %d", seq, offset, want)
+		}
+	}
+}
+
+type positionedPCMFramesForTest struct {
+	positions []audioPCMFramePosition
+}
+
+func (r *positionedPCMFramesForTest) ReadPCMFrame(dst []byte) (time.Time, error) {
+	position, err := r.ReadPCMFramePosition(dst)
+	return position.PTS, err
+}
+
+func (r *positionedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (audioPCMFramePosition, error) {
+	if len(r.positions) == 0 {
+		return audioPCMFramePosition{}, io.EOF
+	}
+	position := r.positions[0]
+	r.positions = r.positions[1:]
+	clear(dst)
+	return position, nil
+}
+
+func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFrameReader, count int) (*AudioStream, [][]byte) {
+	t.Helper()
+	ctrlConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ctrlConn.Close() })
+	ctrlPeer, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ctrlPeer.Close() })
+	dataConn := &recordingPacketConn{}
+	stream := &AudioStream{
+		conn: dataConn, ctrlConn: ctrlConn, remoteAddr: &netUDPAddrForAudioTest,
+		ctrlAddr: ctrlPeer.LocalAddr().(*net.UDPAddr), spf: 352,
+		// This fixture tests packet order, independent of scheduler latency.
+		ct: byte(AudioCodecALAC), latencySamples: audioSampleRate,
+	}
+	switch security {
+	case "AES":
+		stream.cipher, err = aes.NewCipher(bytes.Repeat([]byte{0x42}, 16))
+		stream.aesIV = bytes.Repeat([]byte{0x24}, 16)
+	case "ChaCha":
+		stream.chachaCipher, err = newAudioChaCha64AEAD(bytes.Repeat([]byte{0x42}, 32))
+		stream.chachaNonceMode = defaultAudioChaChaNonceMode()
+		stream.chachaAADMode = defaultAudioChaChaAADMode()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcm := make([]byte, count*352*audioBytesPerSampleFrame)
+	for i := range pcm {
+		pcm[i] = byte(i)
+	}
+	capture := &AudioCapture{
+		pcmPipe: io.NopCloser(bytes.NewReader(pcm)), pcmFrames: frames,
+		waitCh: make(chan struct{}), codec: AudioCodecALAC,
+	}
+	firstVideo := make(chan struct{})
+	close(firstVideo)
+	session := &MirrorSession{firstFrameSent: firstVideo, timingProtocol: timingProtocolNTP}
+	if err := session.StreamAudio(context.Background(), capture, stream); !errors.Is(err, io.EOF) {
+		t.Fatalf("StreamAudio = %v, want EOF after %d source frames", err, count)
+	}
+	return stream, dataConn.packets
+}
+
+func assertAudioPacketSequences(t *testing.T, packets [][]byte, want []uint16) {
+	t.Helper()
+	got := make([]uint16, len(packets))
+	for i, packet := range packets {
+		got[i] = binary.BigEndian.Uint16(packet[2:4])
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("audio wire sequences = %v, want %v", got, want)
 	}
 }
 

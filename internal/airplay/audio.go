@@ -1240,7 +1240,7 @@ videoReady:
 	if !useFEC {
 		dbg("[AUDIO] FEC disabled for ChaCha-encrypted sessions: each frame sent once")
 	} else {
-		dbg("[AUDIO] FEC enabled: burst-8 + interleaved retransmit")
+		dbg("[AUDIO] FEC enabled: current frame plus two recent frames")
 	}
 	var burstLimiter audioSendBurstLimiter
 	sendPacket := func(payload []byte, rtpTime uint32, seq uint16, reuseNonce *uint64) (uint64, error) {
@@ -1250,7 +1250,11 @@ videoReady:
 		return audioStream.sendAudioPacketWithSeqAndNonce(payload, rtpTime, seq, reuseNonce)
 	}
 
-	const retransmitDepth = 8
+	// AirPlaySender's APMessageRingCopyNextBurst walks backward from the next
+	// unsent packet, includes redundancyCount prior packets, then reverses the
+	// array. Match our SETUP redundantAudio=2 with [N-2, N-1, N]; an eight-frame
+	// interleave sends unrelated older packets outside that negotiated window.
+	const retransmitDepth = 3
 	type audioFrame struct {
 		payload []byte
 		rtpTime uint32
@@ -1261,7 +1265,6 @@ videoReady:
 	var frameSeq uint16 = 1 // first frame = seq 1
 	var frameCount int
 	retransmitIdx := 0
-	burstDone := false
 	useFirstFrame := true
 	framePosition := firstFramePosition
 	framePTS := firstFramePosition.PTS
@@ -1340,33 +1343,23 @@ videoReady:
 			if _, err := sendPacket(payload, frameRTP, frameSeq, nil); err != nil {
 				return fmt.Errorf("audio send: %w", err)
 			}
-		} else if !burstDone {
-			// Initial burst phase: send frames immediately, fill retransmit buffer
-			nonce, err := sendPacket(payload, frameRTP, frameSeq, nil)
-			if err != nil {
-				return fmt.Errorf("audio send: %w", err)
-			}
-			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: frameRTP, seq: frameSeq, nonce: nonce}
-			retransmitIdx++
-			if retransmitIdx >= retransmitDepth {
-				burstDone = true
-				retransmitIdx = 0
-				dbg("[AUDIO] initial burst of %d frames complete", retransmitDepth)
-			}
 		} else {
-			// Steady state: send retransmit of old frame, then new frame
-			old := retransmitBuf[retransmitIdx]
-			if _, err := sendPacket(old.payload, old.rtpTime, old.seq, &old.nonce); err != nil {
-				return fmt.Errorf("audio retransmit: %w", err)
-			}
-
-			// Store and send new frame
-			nonce, err := sendPacket(payload, frameRTP, frameSeq, nil)
-			if err != nil {
-				return fmt.Errorf("audio send: %w", err)
-			}
-			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: frameRTP, seq: frameSeq, nonce: nonce}
+			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: frameRTP, seq: frameSeq}
 			retransmitIdx = (retransmitIdx + 1) % retransmitDepth
+			available := min(frameCount, retransmitDepth)
+			start := (retransmitIdx - available + retransmitDepth) % retransmitDepth
+			for i := 0; i < available; i++ {
+				frame := &retransmitBuf[(start+i)%retransmitDepth]
+				var reuseNonce *uint64
+				if i < available-1 {
+					reuseNonce = &frame.nonce
+				}
+				nonce, err := sendPacket(frame.payload, frame.rtpTime, frame.seq, reuseNonce)
+				if err != nil {
+					return fmt.Errorf("audio send: %w", err)
+				}
+				frame.nonce = nonce
+			}
 		}
 
 		frameSeq++
