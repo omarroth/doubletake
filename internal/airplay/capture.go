@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -830,14 +831,18 @@ const (
 )
 
 type waylandCapturePlan struct {
-	encoder encoderResult
-	mode    waylandPipelineMode
+	encoder         encoderResult
+	mode            waylandPipelineMode
+	limitSourceRate bool
 }
 
 func (p waylandCapturePlan) String() string {
 	encoder := "GStreamer encoder"
 	if len(p.encoder.parts) != 0 {
 		encoder = p.encoder.parts[0]
+	}
+	if p.limitSourceRate {
+		encoder += " with source frame-rate negotiation"
 	}
 	switch p.mode {
 	case waylandPipelineVAMemory:
@@ -857,7 +862,9 @@ func frameIntervalMillis(fps int) int {
 	if fps <= 0 {
 		fps = 30
 	}
-	return max(1, 1000/fps)
+	// PipeWire's timer has millisecond precision. Round up so idle repeats
+	// cannot outrun the requested source rate (33 ms is faster than 30 fps).
+	return 1 + 999/fps
 }
 
 func pipeWireVideoSourceStage(fd int, nodeID uint32, fps int, alwaysCopy bool) gstStage {
@@ -1030,7 +1037,19 @@ func waylandCapturePlans(encoder encoderResult, hasElement func(string) bool) []
 	// can therefore fall back to a CPU-owned frame without changing the selected
 	// encoder backend. Every other encoder has only its normal system-memory plan.
 	plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineSystemMemory})
-	return plans
+	// Apple programs VSyncRate and defaultFramerate on its virtual display
+	// source (AirPlaySender screenstream_createVirtualDisplayActivationOptions).
+	// A downstream videorate cap alone never requests PipeWire maxFramerate:
+	// a 60/120 Hz compositor can still capture/convert at full speed and produce
+	// uneven frame selection. Ask the producer for the target rate first.
+	// Retain unrestricted plans for producers whose advertised maximum is lower
+	// than our requested rate, or which cannot negotiate this optional field.
+	limited := make([]waylandCapturePlan, 0, 2*len(plans))
+	for _, plan := range plans {
+		plan.limitSourceRate = true
+		limited = append(limited, plan)
+	}
+	return append(limited, plans...)
 }
 
 // systemMemoryStagingFormat deliberately differs from every encoder input
@@ -1125,14 +1144,25 @@ func buildWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderRe
 }
 
 func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan waylandCapturePlan, maxWidth, maxHeight int, timestampedOutput bool) []string {
+	var args []string
 	switch plan.mode {
 	case waylandPipelineVAMemory:
-		return buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+		args = buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	case waylandPipelineVAPostprocPlainRaw:
-		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+		args = buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	default:
-		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+		args = buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	}
+	if plan.limitSourceRate {
+		// ANY preserves DMA-BUF/VA import negotiation. This capsfilter does not
+		// retain frames; the existing ownership boundary still precedes videorate.
+		if fps <= 0 {
+			fps = 30
+		}
+		args = slices.Insert(args, slices.Index(args, "!"), "!",
+			fmt.Sprintf("video/x-raw(ANY),max-framerate=%d/1", fps))
+	}
+	return args
 }
 
 const (

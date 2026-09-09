@@ -402,9 +402,9 @@ func TestFrameIntervalMillis(t *testing.T) {
 		fps  int
 		want int
 	}{
-		{fps: 30, want: 33},
-		{fps: 60, want: 16},
-		{fps: 0, want: 33},
+		{fps: 30, want: 34},
+		{fps: 60, want: 17},
+		{fps: 0, want: 34},
 		{fps: 2000, want: 1},
 	} {
 		if got := frameIntervalMillis(tt.fps); got != tt.want {
@@ -419,7 +419,7 @@ func TestPipeWireVideoSourceBufferPoolPolicy(t *testing.T) {
 		"fd=3",
 		"path=42",
 		"do-timestamp=true",
-		"keepalive-time=33",
+		"keepalive-time=34",
 	}
 	for _, test := range []struct {
 		name       string
@@ -888,7 +888,7 @@ func TestVAWaylandPipelineKeepsFramesInVAMemory(t *testing.T) {
 				t.Errorf("VA pipeline must not copy or process portal frames on the CPU: %s", joined)
 			}
 		}
-		for _, required := range []string{"keepalive-time=33", "disable-passthrough=true", "add-borders=true", "video/x-raw(ANY),pixel-aspect-ratio=1/1", "video/x-raw(memory:VAMemory),format=NV12"} {
+		for _, required := range []string{"keepalive-time=34", "disable-passthrough=true", "add-borders=true", "video/x-raw(ANY),pixel-aspect-ratio=1/1", "video/x-raw(memory:VAMemory),format=NV12"} {
 			if !strings.Contains(joined, required) {
 				t.Errorf("VA pipeline is missing %q: %s", required, joined)
 			}
@@ -944,7 +944,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 		}
 	}
 	wantOrder := []string{
-		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=33",
+		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34",
 		"!", "videoconvert", "!", "video/x-raw,format=NV12",
 		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=I420",
@@ -967,7 +967,7 @@ func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 		}
 	}
 	wantOrder := []string{
-		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=33",
+		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34",
 		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
 		"!", "vapostproc", "disable-passthrough=true", "add-borders=true",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
@@ -1123,7 +1123,7 @@ func TestWaylandPipelineIgnoresPortalCoordinateSize(t *testing.T) {
 	if strings.Count(joined, "width=1920,height=1080") != 1 {
 		t.Fatalf("pipeline must fit the negotiated stream to the receiver exactly once: %s", joined)
 	}
-	if strings.Contains(joined, "compositor") || !strings.Contains(joined, "keepalive-time=33") {
+	if strings.Contains(joined, "compositor") || !strings.Contains(joined, "keepalive-time=34") {
 		t.Fatalf("idle cadence must come from pipewiresrc keepalive, without compositor: %s", joined)
 	}
 }
@@ -1489,16 +1489,43 @@ func TestWaylandCapturePlansRetainSelectedEncoderBackend(t *testing.T) {
 				t.Fatal(err)
 			}
 			plans := waylandCapturePlans(encoder, hasElement)
+			// Try each ownership path with a source-rate request, then retain
+			// those same paths for producers that reject the optional constraint.
+			wantElements := append(append([]string{}, test.wantElements...), test.wantElements...)
+			wantModes := append(append([]waylandPipelineMode{}, test.wantModes...), test.wantModes...)
 			var elements []string
 			var modes []waylandPipelineMode
-			for _, plan := range plans {
+			for i, plan := range plans {
 				elements = append(elements, plan.encoder.parts[0])
 				modes = append(modes, plan.mode)
+				if plan.limitSourceRate != (i < len(test.wantModes)) {
+					t.Fatalf("plan %d source-rate constraint = %t", i, plan.limitSourceRate)
+				}
 			}
-			if !reflect.DeepEqual(elements, test.wantElements) || !reflect.DeepEqual(modes, test.wantModes) {
-				t.Fatalf("plans = elements %v modes %v, want %v %v", elements, modes, test.wantElements, test.wantModes)
+			if !reflect.DeepEqual(elements, wantElements) || !reflect.DeepEqual(modes, wantModes) {
+				t.Fatalf("plans = elements %v modes %v, want %v %v", elements, modes, wantElements, wantModes)
 			}
 		})
+	}
+}
+
+func TestWaylandSourceRateRequestPrecedesConversionAndPreservesFallback(t *testing.T) {
+	encoder := encoderResult{parts: gstStage{"nvh264enc"}, rawFormat: "NV12"}
+	for _, mode := range []waylandPipelineMode{waylandPipelineSystemMemory, waylandPipelineVAMemory, waylandPipelineVAPostprocPlainRaw} {
+		for _, fps := range []int{24, 30, 60} {
+			plan := waylandCapturePlan{encoder: encoder, mode: mode, limitSourceRate: true}
+			args := buildWaylandVideoPipelineForPlan(3, 42, fps, plan, 1920, 1080, true)
+			pipeline := strings.Join(args, " ")
+			want := fmt.Sprintf("keepalive-time=%d ! video/x-raw(ANY),max-framerate=%d/1 !", frameIntervalMillis(fps), fps)
+			if !strings.Contains(pipeline, want) {
+				t.Fatalf("source rate was not requested before conversion: %s", pipeline)
+			}
+			plan.limitSourceRate = false
+			fallback := strings.Join(buildWaylandVideoPipelineForPlan(3, 42, fps, plan, 1920, 1080, true), " ")
+			if strings.Contains(fallback, "max-framerate") || !strings.Contains(fallback, fmt.Sprintf("framerate=%d/1", fps)) {
+				t.Fatalf("fallback must retain output rate without constraining producer: %s", fallback)
+			}
+		}
 	}
 }
 
