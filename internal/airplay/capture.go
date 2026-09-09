@@ -2058,9 +2058,12 @@ func selectGstHEVCEncoder(cfg CaptureConfig, hasElement func(string) bool, annou
 	candidates := []candidate{
 		{
 			method: "nvenc", element: "nvh265enc", label: "NVENC HEVC Main10 hardware encoding (nvh265enc)",
+			// NVENC defaults to zero B-frames. On GPUs without HEVC B-frame
+			// support GStreamer omits the bframes property entirely, so even
+			// setting it to zero prevents the pipeline from starting.
 			result: encoderResult{codec: VideoCodecHEVC, rawFormat: "P010_10LE", parts: gstStage{
 				"nvh265enc", fmt.Sprintf("bitrate=%d", bitrate), fmt.Sprintf("gop-size=%d", keyframeInterval),
-				"bframes=0", "rc-mode=cbr", "preset=p3", "tune=ultra-low-latency", "zerolatency=true", "aud=true",
+				"rc-mode=cbr", "preset=p3", "tune=ultra-low-latency", "zerolatency=true", "aud=true",
 			}},
 		},
 		{
