@@ -16,14 +16,11 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-func TestUseAudioFECDefaults(t *testing.T) {
-	if !useAudioFEC(AudioCodecALAC, false) {
-		t.Fatal("expected legacy/plaintext sessions to keep FEC by default")
+func TestUseAudioRedundancyDefaults(t *testing.T) {
+	if !useAudioRedundancy(AudioCodecALAC) {
+		t.Fatal("expected ALAC screen sessions to use recent-packet redundancy")
 	}
-	if useAudioFEC(AudioCodecALAC, true) {
-		t.Fatal("expected modern encrypted sessions to disable FEC by default")
-	}
-	if useAudioFEC(AudioCodecAACELD, false) {
+	if useAudioRedundancy(AudioCodecAACELD) {
 		t.Fatal("AAC-ELD must not use ALAC-style redundant retransmits")
 	}
 }
@@ -34,12 +31,9 @@ func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
 			stream, packets := streamAudioPacketsForTest(t, security, nil, 12)
 			var wantSequences []uint16
 			for seq := uint16(1); seq <= 12; seq++ {
-				first := seq
-				if security != "ChaCha" {
-					first = 1
-					if seq > 2 {
-						first = seq - 2
-					}
+				first := uint16(1)
+				if seq > 2 {
+					first = seq - 2
 				}
 				for redundant := first; redundant <= seq; redundant++ {
 					wantSequences = append(wantSequences, redundant)
@@ -68,6 +62,40 @@ func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEncryptedAudioRedundancyRecoversTwoLostBursts(t *testing.T) {
+	const frames = 12
+	stream, packets := streamAudioPacketsForTest(t, "ChaCha", nil, frames)
+	// Lose both startup bursts: [1] and [1,2]. The next burst must recover
+	// both frames, without a retransmission round trip or a new nonce.
+	if len(packets) < 6 {
+		t.Fatalf("only %d packets sent", len(packets))
+	}
+	recovered := make(map[uint16][]byte)
+	for _, packet := range packets[3:] {
+		seq := binary.BigEndian.Uint16(packet[2:4])
+		tail := packet[len(packet)-8:]
+		if got := binary.LittleEndian.Uint64(tail); got != uint64(seq-1) {
+			t.Fatalf("sequence %d nonce = %d, want original nonce %d", seq, got, seq-1)
+		}
+		plain, err := stream.chachaCipher.Open(nil, tail, packet[12:len(packet)-8], packet[4:12])
+		if err != nil {
+			t.Fatalf("authenticate recovered sequence %d: %v", seq, err)
+		}
+		if previous := recovered[seq]; previous != nil && !bytes.Equal(previous, plain) {
+			t.Fatalf("sequence %d changed its decoded payload", seq)
+		}
+		recovered[seq] = plain
+	}
+	for seq := uint16(1); seq <= frames; seq++ {
+		if recovered[seq] == nil {
+			t.Fatalf("sequence %d was not recovered after two lost bursts", seq)
+		}
+	}
+	if stream.chachaNonce != frames {
+		t.Fatalf("nonce counter = %d, want one increment per source frame (%d)", stream.chachaNonce, frames)
 	}
 }
 

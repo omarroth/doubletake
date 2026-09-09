@@ -886,7 +886,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		"latencyMin":         latMin,
 		"latencyMax":         latMax,
 	}
-	if useAudioFEC(selectedAudioCodec, audioMode == audioSecurityChaCha) {
+	if useAudioRedundancy(selectedAudioCodec) {
 		audioStreamBase["redundantAudio"] = int64(2)
 	}
 

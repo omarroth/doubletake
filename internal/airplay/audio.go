@@ -68,8 +68,12 @@ func newAudioChaCha64AEAD(key []byte) (cipher.AEAD, error) {
 	return aeadchacha20poly1305.NewCipher(key)
 }
 
-func useAudioFEC(codec AudioCodec, chachaEncrypted bool) bool {
-	return codec == AudioCodecALAC && !chachaEncrypted
+func useAudioRedundancy(codec AudioCodec) bool {
+	// AirPlaySender's APEndpointCreateAudioStreamOptions selects two recent
+	// packets for screen audio independently of its cryptor selection. Repeated
+	// packets retain their original nonce and ciphertext; encryption does not
+	// remove the need to recover UDP loss before the render deadline.
+	return codec == AudioCodecALAC
 }
 
 func defaultAudioChaChaNonceMode() audioChaChaNonceMode {
@@ -1236,11 +1240,11 @@ videoReady:
 
 	// Redundant audio is kept for legacy/plaintext sessions, but modern
 	// ChaCha-encrypted receivers decode more reliably when each frame is sent once.
-	useFEC := useAudioFEC(AudioCodec(audioStream.ct), audioStream.chachaCipher != nil)
+	useFEC := useAudioRedundancy(AudioCodec(audioStream.ct))
 	if !useFEC {
-		dbg("[AUDIO] FEC disabled for ChaCha-encrypted sessions: each frame sent once")
+		dbg("[AUDIO] packet redundancy disabled for codec %d: each frame sent once", audioStream.ct)
 	} else {
-		dbg("[AUDIO] FEC enabled: current frame plus two recent frames")
+		dbg("[AUDIO] packet redundancy enabled: current frame plus two recent frames")
 	}
 	var burstLimiter audioSendBurstLimiter
 	sendPacket := func(payload []byte, rtpTime uint32, seq uint16, reuseNonce *uint64) (uint64, error) {
