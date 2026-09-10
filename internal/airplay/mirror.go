@@ -755,7 +755,6 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		if videoPrepared {
 			return nil
 		}
-		videoPrepared = true
 		selection, selectionErr := info.selectVideo(cfg.VideoCodec, cfg.AutomaticHEVCAvailable)
 		if selectionErr != nil {
 			return selectionErr
@@ -772,22 +771,47 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			}
 			selection.reason = "media-first audio latency was committed before HEVC calibration"
 		}
+		prepareSelection := func(selected videoSelection) (time.Duration, error) {
+			canvasW, canvasH := selected.width, selected.height
+			maxW, maxH := info.MaxVideoSize()
+			dbg("[SETUP] receiver video canvas: %dx%d (maximum %dx%d, codec=%s, requested=%s: %s)", canvasW, canvasH, maxW, maxH, selected.codec, normalizeVideoCodec(cfg.VideoCodec), selected.reason)
+			minimumVideoLead := time.Duration(0)
+			if selected.codec == VideoCodecHEVC {
+				minimumVideoLead = cfg.MeasuredVideoLatency
+			}
+			if prepareVideoCapture == nil {
+				return minimumVideoLead, nil
+			}
+			result, err := prepareVideoCapture(canvasW, canvasH, selected.codec)
+			if err != nil {
+				return 0, fmt.Errorf("prepare %dx%d video capture: %w", canvasW, canvasH, err)
+			}
+			if result.MinimumVideoLead > minimumVideoLead {
+				minimumVideoLead = result.MinimumVideoLead
+			}
+			return minimumVideoLead, nil
+		}
+
+		minimumVideoLead, prepareErr := prepareSelection(selection)
+		if prepareErr != nil && cfg.VideoCodec == VideoCodecAuto && selection.codec == VideoCodecHEVC &&
+			errors.Is(prepareErr, ErrAutomaticVideoCodecUnavailable) {
+			dbg("[SETUP] automatic high-resolution capture failed; retrying the nominal H.264 canvas: %v", prepareErr)
+			selection, selectionErr = info.selectVideo(VideoCodecH264, false)
+			if selectionErr != nil {
+				return selectionErr
+			}
+			selection.reason = "production high-resolution capture unavailable"
+			minimumVideoLead, prepareErr = prepareSelection(selection)
+		}
+		if prepareErr != nil {
+			return prepareErr
+		}
 		videoCodec = selection.codec
-		canvasW, canvasH := selection.width, selection.height
-		maxW, maxH := info.MaxVideoSize()
-		dbg("[SETUP] receiver video canvas: %dx%d (maximum %dx%d, codec=%s, requested=%s: %s)", canvasW, canvasH, maxW, maxH, videoCodec, normalizeVideoCodec(cfg.VideoCodec), selection.reason)
-		minimumVideoLead := cfg.MeasuredVideoLatency
-		if prepareVideoCapture == nil {
-			return applyMeasuredCaptureLatency(videoCodec, minimumVideoLead)
+		if err := applyMeasuredCaptureLatency(videoCodec, minimumVideoLead); err != nil {
+			return err
 		}
-		result, err := prepareVideoCapture(canvasW, canvasH, videoCodec)
-		if err != nil {
-			return fmt.Errorf("prepare %dx%d video capture: %w", canvasW, canvasH, err)
-		}
-		if result.MinimumVideoLead > minimumVideoLead {
-			minimumVideoLead = result.MinimumVideoLead
-		}
-		return applyMeasuredCaptureLatency(videoCodec, minimumVideoLead)
+		videoPrepared = true
+		return nil
 	}
 	refreshSessionInfo := func(phase string) (*ReceiverInfo, error) {
 		refreshed, refreshErr := c.getInfoWithTimeout(sessionInfoFallbackTimeout)

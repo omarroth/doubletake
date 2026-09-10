@@ -347,25 +347,28 @@ func main() {
 		X11WindowName: *x11WindowName,
 		ShowCursor:    !*noCursor,
 	}
-	var capturePreparation *airplay.CapturePreparation
 	if *testMode {
 		if *noAudio {
 			log.Println("using synthetic video (videotestsrc) for debugging")
 		} else {
 			log.Println("using synthetic video (videotestsrc) and audio test tone for debugging")
 		}
-		capturePreparation, err = airplay.PrepareTestCapture(ctx, captureCfg)
-	} else {
+	}
+	prepareCapture := func(cfg airplay.CaptureConfig) (*airplay.CapturePreparation, error) {
+		if *testMode {
+			return airplay.PrepareTestCapture(ctx, cfg)
+		}
 		restoreToken := ""
 		if creds := credStore.Lookup(info.DeviceID); creds != nil {
 			restoreToken = creds.RestoreToken
 		}
-		captureCfg.RestoreToken = restoreToken
-		captureCfg.SaveRestoreToken = func(token string) error {
+		cfg.RestoreToken = restoreToken
+		cfg.SaveRestoreToken = func(token string) error {
 			return credStore.SaveRestoreToken(info.DeviceID, token)
 		}
-		capturePreparation, err = airplay.PrepareCapture(ctx, captureCfg)
+		return airplay.PrepareCapture(ctx, cfg)
 	}
+	capturePreparation, err := prepareCapture(captureCfg)
 	if err != nil {
 		log.Fatalf("prepare screen capture: %v", err)
 	}
@@ -378,6 +381,18 @@ func main() {
 	startedWidth, startedHeight := -1, -1
 	startedCodec := airplay.VideoCodec("")
 	var liveVideoLead time.Duration
+	prepareH264Fallback := func(cause error) error {
+		fallbackCfg := captureCfg
+		fallbackCfg.VideoCodec = airplay.VideoCodecH264
+		replacement, fallbackErr := prepareCapture(fallbackCfg)
+		if fallbackErr != nil {
+			return fmt.Errorf("%v; prepare H.264 fallback: %w", cause, fallbackErr)
+		}
+		capturePreparation.Close()
+		capturePreparation = replacement
+		liveVideoLead = 0
+		return fmt.Errorf("%w: %v", airplay.ErrAutomaticVideoCodecUnavailable, cause)
+	}
 	prepareVideo := func(width, height int, codec airplay.VideoCodec) (airplay.VideoPreparationResult, error) {
 		if capture != nil {
 			if codec == startedCodec {
@@ -390,13 +405,20 @@ func main() {
 		}
 		startedCapture, startErr := capturePreparation.StartWithCodec(width, height, codec)
 		if startErr != nil {
+			if captureCfg.VideoCodec == airplay.VideoCodecAuto && codec == airplay.VideoCodecHEVC {
+				return airplay.VideoPreparationResult{}, prepareH264Fallback(startErr)
+			}
 			return airplay.VideoPreparationResult{}, startErr
 		}
 		if codec == airplay.VideoCodecHEVC && !airplay.HasExplicitTargetLatency() {
 			liveVideoLead, startErr = airplay.MeasureVideoCaptureLatency(ctx, startedCapture, *fps)
 			if startErr != nil {
 				startedCapture.Stop()
-				return airplay.VideoPreparationResult{}, fmt.Errorf("measure production HEVC timing: %w", startErr)
+				measurementErr := fmt.Errorf("measure production HEVC timing: %w", startErr)
+				if captureCfg.VideoCodec == airplay.VideoCodecAuto {
+					return airplay.VideoPreparationResult{}, prepareH264Fallback(measurementErr)
+				}
+				return airplay.VideoPreparationResult{}, measurementErr
 			}
 			log.Printf("[CAPTURE] production HEVC timing requires at least %v video lead", liveVideoLead)
 		}

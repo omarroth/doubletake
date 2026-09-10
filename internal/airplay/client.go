@@ -760,6 +760,11 @@ type VideoPreparationResult struct {
 	MinimumVideoLead time.Duration
 }
 
+// ErrAutomaticVideoCodecUnavailable tells automatic negotiation that the
+// selected high-resolution capture path failed its production check. The
+// session may retry the same preparation hook with its nominal H.264 path.
+var ErrAutomaticVideoCodecUnavailable = errors.New("automatic video codec is unavailable for this capture source")
+
 // SetupMirrorWithVideoCodecPreparation is the automatic-codec variant of
 // SetupMirrorWithVideoPreparation. Its hook receives the concrete codec chosen
 // from final session-time receiver information, so capture and wire framing use

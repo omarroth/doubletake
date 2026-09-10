@@ -1120,7 +1120,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		removeStream(fmt.Sprintf("prepare capture failed: %v", err))
 		return
 	}
-	defer capturePreparation.Close()
+	defer func() { capturePreparation.Close() }()
 	streamCfg := d.mirrorStreamConfig()
 	streamCfg.AutomaticHEVCAvailable = capturePreparation.AutomaticHEVCAvailable()
 	streamCfg.MeasuredVideoLatency = capturePreparation.MeasuredVideoLatency()
@@ -1148,6 +1148,19 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		}
 		resolved, minimumVideoLead, startErr := d.getOrStartPreparedCaptureGroup(ctx, entry, capturePreparation, width, height, codec)
 		if startErr != nil {
+			if streamCfg.VideoCodec == airplay.VideoCodecAuto && codec == airplay.VideoCodecHEVC {
+				restoreToken := screenCastRestoreToken
+				if saved := d.credStore.Lookup(deviceID); saved != nil && saved.RestoreToken != "" {
+					restoreToken = saved.RestoreToken
+				}
+				replacement, fallbackErr := d.prepareVideoCapture(ctx, restoreToken, deviceID, airplay.VideoCodecH264)
+				if fallbackErr != nil {
+					return airplay.VideoPreparationResult{}, fmt.Errorf("%v; prepare H.264 fallback: %w", startErr, fallbackErr)
+				}
+				capturePreparation.Close()
+				capturePreparation = replacement
+				return airplay.VideoPreparationResult{}, fmt.Errorf("%w: %v", airplay.ErrAutomaticVideoCodecUnavailable, startErr)
+			}
 			return airplay.VideoPreparationResult{}, startErr
 		}
 		broadcast = resolved
@@ -1302,15 +1315,19 @@ func normalizedVideoCaptureKey(maxW, maxH int, codecs ...airplay.VideoCodec) vid
 // reveals the session-time display canvas. Portal serialization is deliberately
 // separate from captureStartMu: a different user prompt must not block an
 // already-negotiated receiver from starting its encoder before its deadline.
-func (d *Daemon) prepareVideoCapture(ctx context.Context, restoreToken, deviceID string) (*airplay.CapturePreparation, error) {
+func (d *Daemon) prepareVideoCapture(ctx context.Context, restoreToken, deviceID string, codecs ...airplay.VideoCodec) (*airplay.CapturePreparation, error) {
 	d.capturePortalMu.Lock()
 	defer d.capturePortalMu.Unlock()
 
+	codec := d.cfg.VideoCodec
+	if len(codecs) != 0 {
+		codec = codecs[0]
+	}
 	cfg := airplay.CaptureConfig{
 		FPS:          d.cfg.FPS,
 		Bitrate:      d.cfg.Bitrate,
 		HWAccel:      d.cfg.HWAccel,
-		VideoCodec:   d.cfg.VideoCodec,
+		VideoCodec:   codec,
 		ShowCursor:   d.cfg.ShowCursor,
 		RestoreToken: restoreToken,
 	}
