@@ -2,13 +2,14 @@
 
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
+AAC_ELD_FLAGS ?= $(shell test "$$(go env CGO_ENABLED)" = 1 && pkg-config --exists fdk-aac 2>/dev/null && printf '%s' '-tags=fdk_aac')
 
 all: doubletake doubletake-ctl doubletake-test-receiver
 
 build: all
 
 doubletake:
-	go build -o bin/doubletake ./cmd/doubletake
+	go build $(AAC_ELD_FLAGS) -o bin/doubletake ./cmd/doubletake
 
 doubletake-ctl:
 	go build -o bin/doubletake-ctl ./cmd/doubletake-ctl
@@ -29,7 +30,7 @@ manpages-release:
 	tar -czf doubletake-manpages.tar.gz -C man man1
 
 test:
-	go test ./...
+	go test $(AAC_ELD_FLAGS) ./...
 
 install: all install-man
 	install -m 755 bin/doubletake $(PREFIX)/bin/

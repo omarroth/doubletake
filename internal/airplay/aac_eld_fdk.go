@@ -13,7 +13,7 @@ static AACENC_ERROR doubletake_eld_open(HANDLE_AACENCODER *enc) {
 	if ((err = aacEncoder_SetParam(*enc, AACENC_SAMPLERATE, 44100)) != AACENC_OK) return err;
 	if ((err = aacEncoder_SetParam(*enc, AACENC_CHANNELMODE, MODE_2)) != AACENC_OK) return err;
 	if ((err = aacEncoder_SetParam(*enc, AACENC_CHANNELORDER, 1)) != AACENC_OK) return err;
-	if ((err = aacEncoder_SetParam(*enc, AACENC_BITRATE, 128000)) != AACENC_OK) return err;
+	if ((err = aacEncoder_SetParam(*enc, AACENC_BITRATE, 256000)) != AACENC_OK) return err;
 	if ((err = aacEncoder_SetParam(*enc, AACENC_TRANSMUX, TT_MP4_RAW)) != AACENC_OK) return err;
 	if ((err = aacEncoder_SetParam(*enc, AACENC_SBR_MODE, 0)) != AACENC_OK) return err;
 	if ((err = aacEncoder_SetParam(*enc, AACENC_GRANULE_LENGTH, 480)) != AACENC_OK) return err;
@@ -57,6 +57,8 @@ import (
 	"fmt"
 	"unsafe"
 )
+
+const aacELDEncoderAvailable = true
 
 type eldEncoder struct {
 	enc      C.HANDLE_AACENCODER

@@ -104,21 +104,21 @@ make test
 
 ### Optional AAC-ELD support
 
-Doubletake selects screen audio from the receiver's advertised
-`supportedFormats.screenStream` mask, preferring its built-in ALAC encoder when
-available. AAC-ELD is enabled explicitly because it depends on the system
-`libfdk-aac` development files and cgo:
+Doubletake selects screen audio from the receiver's advertised capabilities,
+preferring AAC-ELD and falling back to its built-in ALAC encoder. `make`
+automatically enables AAC-ELD when cgo is active and `pkg-config` finds the
+system `libfdk-aac` development files. A direct build can enable it explicitly:
 
 ```sh
 CGO_ENABLED=1 go build -tags fdk_aac -o bin/doubletake ./cmd/doubletake
 ```
 
 Install the package that provides the `fdk-aac` pkg-config file and headers for
-your distribution before running that command. A default build reports a clear
-error if advertised capabilities select AAC-ELD. A nonzero screen-audio mask
-which advertises neither ALAC nor AAC-ELD is also rejected instead of silently
-sending an unadvertised format. Use `-no-audio` to keep testing pairing, timing,
-and video when the advertised audio format is unavailable.
+your distribution before running that command. Builds without it use ALAC when
+the receiver advertises ALAC; an AAC-ELD-only receiver reports a clear error. A
+nonzero screen-audio mask which advertises neither implemented format is also
+rejected. Use `-no-audio` to keep testing pairing, timing, and video when the
+advertised audio format is unavailable.
 
 ## Firewall
 

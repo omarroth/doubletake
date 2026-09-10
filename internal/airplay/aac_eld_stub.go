@@ -4,6 +4,8 @@ package airplay
 
 import "fmt"
 
+const aacELDEncoderAvailable = false
+
 // eldEncoder is present in every build so codec negotiation remains portable.
 // The actual encoder is deliberately opt-in: libfdk-aac is not available on
 // every supported distribution and doubletake's release binaries are static.

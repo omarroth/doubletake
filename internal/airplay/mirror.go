@@ -911,7 +911,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 		"latencyMax":         latMax,
 	}
 	if useAudioRedundancy(selectedAudioCodec) {
-		audioStreamBase["redundantAudio"] = int64(2)
+		audioStreamBase["redundantAudio"] = int64(audioRedundancyCount)
 	}
 
 	// Audio encryption and descriptor shape are separate protocol axes. The
@@ -1215,7 +1215,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	// Set up audio stream if the receiver provided audio ports
 	if audioDataPort > 0 {
 		audioCT := byte(selectedAudioCodec) // ALAC=2 (matches SETUP descriptor)
-		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, audioCtrlConn, audioDataConn)
+		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, policy.audioRFC2198, audioCtrlConn, audioDataConn)
 		if err != nil {
 			audioCtrlConn.Close()
 			audioDataConn.Close()

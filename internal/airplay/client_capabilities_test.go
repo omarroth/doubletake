@@ -281,6 +281,31 @@ func TestApplyReceiverInfoUpdatePreservesOmittedCapabilities(t *testing.T) {
 	}
 }
 
+func TestApplyReceiverInfoUpdateDerivesLegacyFeaturesFromFeaturesEx(t *testing.T) {
+	client := NewAirPlayClient("192.0.2.10", 7000)
+	client.info = &ReceiverInfo{Features: 1}
+	features := make(FeatureSet, 8)
+	features[featureRFC2198Redundancy/8] = 1 << (featureRFC2198Redundancy % 8)
+
+	updated, err := client.applyReceiverInfoUpdate(map[string]interface{}{
+		"featuresEx": []byte(features),
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Features != features.Low64() || !updated.HasFeature(featureRFC2198Redundancy) {
+		t.Fatalf("updated features = 0x%x/%x", updated.Features, []byte(updated.FeaturesEx))
+	}
+}
+
+func TestExplicitSupportedFormatsSuppressLegacyFeatureFallback(t *testing.T) {
+	info := receiverWithFeatures(featureAudioFormatAACELD44100Stereo)
+	info.hasSupportedFormats = true
+	if info.SupportsAudioFormat("screenStream", screenAudioFormatAACELD44100Stereo) {
+		t.Fatal("explicit empty supportedFormats was replaced by feature-derived formats")
+	}
+}
+
 func encodeTXTWire(records []string) []byte {
 	var wire []byte
 	for _, record := range records {

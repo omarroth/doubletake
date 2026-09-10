@@ -46,6 +46,13 @@ const (
 
 	audioSyncPayloadTypeNTP = 0xd4
 	audioSyncPayloadTypePTP = 0xd7
+	audioDataPayloadType    = 0x60
+	audioREDPayloadType     = 0x61
+	audioRedundancyCount    = 2
+
+	// Keep an RTP audio datagram within the ordinary IPv4 UDP payload budget.
+	// RFC 2198 history is reduced when encoded frames would exceed this size.
+	maximumAudioRTPDatagramBytes = 1472
 
 	// AirPlay receivers report missing audio on the control socket with the
 	// classic RTP retransmit request/response payload types. Keep the same
@@ -69,11 +76,7 @@ func newAudioChaCha64AEAD(key []byte) (cipher.AEAD, error) {
 }
 
 func useAudioRedundancy(codec AudioCodec) bool {
-	// AirPlaySender's APEndpointCreateAudioStreamOptions selects two recent
-	// packets for screen audio independently of its cryptor selection. Repeated
-	// packets retain their original nonce and ciphertext; encryption does not
-	// remove the need to recover UDP loss before the render deadline.
-	return codec == AudioCodecALAC
+	return codec == AudioCodecALAC || codec == AudioCodecAACELD
 }
 
 func defaultAudioChaChaNonceMode() audioChaChaNonceMode {
@@ -539,6 +542,7 @@ type AudioStream struct {
 	chachaNonce     uint64
 	chachaNonceMode audioChaChaNonceMode
 	chachaAADMode   audioChaChaAADMode
+	rfc2198         bool
 	ct              byte   // AirPlay compression type (2=ALAC, 8=AAC-ELD)
 	spf             uint16 // samples per frame
 	latencySamples  uint32 // audio latency in samples (for sync packets)
@@ -559,7 +563,7 @@ func (s *MirrorSession) AudioCodec() AudioCodec {
 // Real AirPlay senders use two separate UDP sockets for audio:
 //   - ctrlConn: the declared controlPort socket → sends sync/control to receiver's controlPort
 //   - dataConn: a separate socket at controlPort+1 → sends audio data to receiver's dataPort
-func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, latencyOverride uint32, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
+func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, latencyOverride uint32, rfc2198 bool, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
 	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.host, fmt.Sprintf("%d", dataPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve audio remote: %w", err)
@@ -610,6 +614,7 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 		securityMode:    securityMode,
 		chachaNonceMode: defaultAudioChaChaNonceMode(),
 		chachaAADMode:   defaultAudioChaChaAADMode(),
+		rfc2198:         rfc2198,
 		ct:              ct,
 		spf:             spf,
 		latencySamples:  latencySamples,
@@ -700,6 +705,56 @@ func (as *AudioStream) audioChaChaAAD(header []byte, rtpTime uint32) []byte {
 	}
 }
 
+type audioREDFrame struct {
+	payload []byte
+	rtpTime uint32
+}
+
+// composeAudioREDPayload builds the RFC 2198 payload used by receivers which
+// advertise that redundancy format. The newest previous frames are preferred,
+// then serialized in chronological order before the current frame.
+func composeAudioREDPayload(primary []byte, primaryRTP uint32, previous []audioREDFrame, maximumPayloadBytes int) []byte {
+	selected := make([]audioREDFrame, 0, audioRedundancyCount)
+	used := 1 + len(primary)
+	for index := len(previous) - 1; index >= 0 && len(selected) < audioRedundancyCount; index-- {
+		frame := previous[index]
+		offset := primaryRTP - frame.rtpTime
+		if offset > 0x3fff || len(frame.payload) > 0x3ff || used+4+len(frame.payload) > maximumPayloadBytes {
+			break
+		}
+		selected = append(selected, frame)
+		used += 4 + len(frame.payload)
+	}
+	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
+		selected[left], selected[right] = selected[right], selected[left]
+	}
+
+	payload := make([]byte, 0, used)
+	for _, frame := range selected {
+		offset := primaryRTP - frame.rtpTime
+		length := len(frame.payload)
+		payload = append(payload,
+			0x80|audioDataPayloadType,
+			byte(offset>>6),
+			byte((offset&0x3f)<<2)|byte(length>>8),
+			byte(length),
+		)
+	}
+	payload = append(payload, audioDataPayloadType)
+	for _, frame := range selected {
+		payload = append(payload, frame.payload...)
+	}
+	return append(payload, primary...)
+}
+
+func (as *AudioStream) maximumPlainAudioPayloadBytes() int {
+	overhead := 12
+	if as.chachaCipher != nil {
+		overhead += as.chachaCipher.Overhead() + audioChaChaNonceSize
+	}
+	return maximumAudioRTPDatagramBytes - overhead
+}
+
 // sendAudioPacketWithSeq sends a single RTP audio packet with explicit seq and RTP timestamp.
 // The caller manages sequence numbers (frame-based, not packet-based).
 // payload is the raw encoded frame data.
@@ -709,13 +764,48 @@ func (as *AudioStream) sendAudioPacketWithSeq(payload []byte, rtpTime uint32, se
 }
 
 func (as *AudioStream) sendAudioPacketWithSeqAndNonce(payload []byte, rtpTime uint32, seq uint16, reuseNonce *uint64) (uint64, error) {
+	return as.sendAudioPacketWithPayloadTypeAndNonce(payload, rtpTime, seq, audioDataPayloadType, reuseNonce)
+}
+
+func (as *AudioStream) sendAudioPacketWithPayloadTypeAndNonce(payload []byte, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) (uint64, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	packet, usedNonce := as.buildAudioPacketLocked(payload, rtpTime, seq, payloadType, reuseNonce)
+	if reuseNonce == nil {
+		// Register the immutable message before network dispatch, matching the
+		// sender's prepare/enqueue order and closing the lookup window before a
+		// later packet can expose this sequence as missing.
+		as.rememberAudioPacket(seq, packet)
+	}
+	if _, err := as.conn.WriteTo(packet, as.remoteAddr); err != nil {
+		return usedNonce, err
+	}
+	as.advanceAudioRTPTimeLocked(rtpTime)
+	return usedNonce, nil
+}
+
+// sendAudioREDPacket prepares both packet forms used by RFC 2198 receivers.
+// Normal delivery uses the compound PT97 packet; receiver NACKs retrieve the
+// separately encrypted PT96 primary packet from sequence history.
+func (as *AudioStream) sendAudioREDPacket(redPayload, primary []byte, rtpTime uint32, seq uint16) error {
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	redPacket, _ := as.buildAudioPacketLocked(redPayload, rtpTime, seq, audioREDPayloadType, nil)
+	primaryPacket, _ := as.buildAudioPacketLocked(primary, rtpTime, seq, audioDataPayloadType, nil)
+	as.rememberAudioPacket(seq, primaryPacket)
+	if _, err := as.conn.WriteTo(redPacket, as.remoteAddr); err != nil {
+		return err
+	}
+	as.advanceAudioRTPTimeLocked(rtpTime)
+	return nil
+}
+
+func (as *AudioStream) buildAudioPacketLocked(payload []byte, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) ([]byte, uint64) {
 
 	// RTP header: 12 bytes
 	header := make([]byte, 12)
 	header[0] = 0x80
-	header[1] = 0x60 // M=0, PT=96 (Apple senders never set marker bit)
+	header[1] = payloadType // M=0 (screen senders never set the marker bit)
 	binary.BigEndian.PutUint16(header[2:4], seq)
 	binary.BigEndian.PutUint32(header[4:8], rtpTime)
 	binary.BigEndian.PutUint32(header[8:12], as.ssrc)
@@ -770,24 +860,15 @@ func (as *AudioStream) sendAudioPacketWithSeqAndNonce(payload []byte, rtpTime ui
 	packet := make([]byte, 12+len(packetPayload))
 	copy(packet[:12], header)
 	copy(packet[12:], packetPayload)
+	return packet, usedNonce
+}
 
-	if reuseNonce == nil {
-		// Register the immutable message before network dispatch, matching the
-		// official sender's prepare/enqueue order and closing the lookup window
-		// before a later packet can expose this sequence as missing.
-		as.rememberAudioPacket(seq, packet)
-	}
-	_, err := as.conn.WriteTo(packet, as.remoteAddr)
-	if err != nil {
-		return usedNonce, err
-	}
-
+func (as *AudioStream) advanceAudioRTPTimeLocked(rtpTime uint32) {
 	// RTP timestamps wrap at 32 bits. A signed modular comparison keeps an old
 	// retransmit from moving the clock backwards while still crossing rollover.
 	if int32(rtpTime-as.rtpTime) >= 0 {
 		as.rtpTime = rtpTime
 	}
-	return usedNonce, nil
 }
 
 func (as *AudioStream) rememberAudioPacket(seq uint16, packet []byte) {
@@ -1238,27 +1319,27 @@ videoReady:
 		}
 	}()
 
-	// Redundant audio is kept for legacy/plaintext sessions, but modern
-	// ChaCha-encrypted receivers decode more reliably when each frame is sent once.
-	useFEC := useAudioRedundancy(AudioCodec(audioStream.ct))
-	if !useFEC {
+	useRedundancy := useAudioRedundancy(AudioCodec(audioStream.ct))
+	if !useRedundancy {
 		dbg("[AUDIO] packet redundancy disabled for codec %d: each frame sent once", audioStream.ct)
+	} else if audioStream.rfc2198 {
+		dbg("[AUDIO] RFC 2198 packet redundancy enabled: current frame plus up to two recent frames")
 	} else {
 		dbg("[AUDIO] packet redundancy enabled: current frame plus two recent frames")
 	}
 	var burstLimiter audioSendBurstLimiter
-	sendPacket := func(payload []byte, rtpTime uint32, seq uint16, reuseNonce *uint64) (uint64, error) {
+	sendPacket := func(payload []byte, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) (uint64, error) {
 		if err := burstLimiter.wait(ctx); err != nil {
 			return 0, err
 		}
-		return audioStream.sendAudioPacketWithSeqAndNonce(payload, rtpTime, seq, reuseNonce)
+		return audioStream.sendAudioPacketWithPayloadTypeAndNonce(payload, rtpTime, seq, payloadType, reuseNonce)
 	}
 
 	// AirPlaySender's APMessageRingCopyNextBurst walks backward from the next
 	// unsent packet, includes redundancyCount prior packets, then reverses the
 	// array. Match our SETUP redundantAudio=2 with [N-2, N-1, N]; an eight-frame
 	// interleave sends unrelated older packets outside that negotiated window.
-	const retransmitDepth = 3
+	const retransmitDepth = audioRedundancyCount + 1
 	type audioFrame struct {
 		payload []byte
 		rtpTime uint32
@@ -1266,6 +1347,7 @@ videoReady:
 		nonce   uint64
 	}
 	var retransmitBuf [retransmitDepth]audioFrame
+	redHistory := make([]audioREDFrame, 0, audioRedundancyCount)
 	var frameSeq uint16 = 1 // first frame = seq 1
 	var frameCount int
 	retransmitIdx := 0
@@ -1342,11 +1424,24 @@ videoReady:
 		copy(payload, frameBuf[:n])
 
 		frameCount++
-		if !useFEC {
+		if !useRedundancy {
 			// Single-send: send each frame once
-			if _, err := sendPacket(payload, frameRTP, frameSeq, nil); err != nil {
+			if _, err := sendPacket(payload, frameRTP, frameSeq, audioDataPayloadType, nil); err != nil {
 				return fmt.Errorf("audio send: %w", err)
 			}
+		} else if audioStream.rfc2198 {
+			redPayload := composeAudioREDPayload(payload, frameRTP, redHistory, audioStream.maximumPlainAudioPayloadBytes())
+			if err := burstLimiter.wait(ctx); err != nil {
+				return err
+			}
+			if err := audioStream.sendAudioREDPacket(redPayload, payload, frameRTP, frameSeq); err != nil {
+				return fmt.Errorf("audio send: %w", err)
+			}
+			if len(redHistory) == audioRedundancyCount {
+				copy(redHistory, redHistory[1:])
+				redHistory = redHistory[:audioRedundancyCount-1]
+			}
+			redHistory = append(redHistory, audioREDFrame{payload: payload, rtpTime: frameRTP})
 		} else {
 			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: frameRTP, seq: frameSeq}
 			retransmitIdx = (retransmitIdx + 1) % retransmitDepth
@@ -1358,7 +1453,7 @@ videoReady:
 				if i < available-1 {
 					reuseNonce = &frame.nonce
 				}
-				nonce, err := sendPacket(frame.payload, frame.rtpTime, frame.seq, reuseNonce)
+				nonce, err := sendPacket(frame.payload, frame.rtpTime, frame.seq, audioDataPayloadType, reuseNonce)
 				if err != nil {
 					return fmt.Errorf("audio send: %w", err)
 				}

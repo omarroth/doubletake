@@ -178,16 +178,16 @@ func TestReceiverProfilePresets(t *testing.T) {
 	}{
 		{ReceiverProfileModern, "AppleTV14,1", modernAirPlaySourceVersion, 0x3c177fde4a7fdfd5, receiverPairingModern,
 			receiverSetupSessionFirst, timingProtocolPTP, receiverNTPNone, false, true, true, true, true,
-			AudioCodecALAC, 0x40000, true, false, receiverLegacyVideoNone, false, 1920, 1080, 3840, 2160, true},
+			AudioCodecAACELD, 0x1440800, true, false, receiverLegacyVideoNone, false, 1920, 1080, 3840, 2160, true},
 		{ReceiverProfileRoku, "3820R2", "377.40.00", 0x038bcf46007f8ad0, receiverPairingLegacy,
 			receiverSetupMediaFirst, timingProtocolNTP, receiverNTPReceiver, true, false, false, true, true,
-			AudioCodecALAC, 0x40000, true, false, receiverLegacyVideoNone, false, 1920, 1080, 0, 0, false},
+			AudioCodecAACELD, 0x1440800, true, false, receiverLegacyVideoNone, false, 1920, 1080, 0, 0, false},
 		{ReceiverProfileLG, "75UP75009LC", "377.25.06", 0x038bcb46007f8ad0, receiverPairingLegacyHAP,
 			receiverSetupMediaFirst, timingProtocolPTP, receiverNTPNone, true, true, false, false, false,
 			AudioCodecALAC, 0x40000, true, false, receiverLegacyVideoNone, false, 1920, 1080, 0, 0, false},
 		{ReceiverProfileAppleTV3, "AppleTV3,2", "220.68", 0x1e5a7ffff7, receiverPairingLegacy,
 			receiverSetupMediaFirst, timingProtocolNTP, receiverNTPReceiver, false, false, false, false, false,
-			AudioCodecALAC, 0x40000, false, true, receiverLegacyVideoRaw, false, 0, 0, 0, 0, false},
+			AudioCodecAACELD, 0x1440800, false, true, receiverLegacyVideoRaw, false, 0, 0, 0, 0, false},
 		{ReceiverProfileUxPlay, "AppleTV3,2", "220.68", 0x527ffee6, receiverPairingLegacy,
 			receiverSetupMediaFirst, timingProtocolNTP, receiverNTPReceiver, false, false, false, false, false,
 			AudioCodecALAC, 0x40000, false, true, receiverLegacyVideoMixed, true, 1920, 1080, 0, 0, false},
@@ -219,6 +219,10 @@ func TestReceiverProfilePresets(t *testing.T) {
 				got.displayMaxHeight != test.displayMaxHeight ||
 				got.displayRequiresSession != test.displayRequiresSession {
 				t.Fatalf("profile = %+v", got)
+			}
+			wantOmittedFormats := test.profile == ReceiverProfileRoku || test.profile == ReceiverProfileAppleTV3
+			if got.omitSupportedFormats != wantOmittedFormats {
+				t.Fatalf("omitSupportedFormats = %t, want %t", got.omitSupportedFormats, wantOmittedFormats)
 			}
 		})
 	}
@@ -767,21 +771,22 @@ func TestSetupMirrorRefreshesSessionInfoWhenCombinedResponseOmitsIt(t *testing.T
 
 func TestReceiverServerAdvertisesCapabilityAxes(t *testing.T) {
 	for _, test := range []struct {
-		profile          ReceiverProfile
-		sourceVersion    string
-		wantPTPFeature   bool
-		wantConnections  bool
-		wantLegacyPair   bool
-		wantPTPInfo      bool
-		wantDisplay      bool
-		supportedFormats uint64
+		profile                   ReceiverProfile
+		sourceVersion             string
+		wantPTPFeature            bool
+		wantConnections           bool
+		wantLegacyPair            bool
+		wantPTPInfo               bool
+		wantDisplay               bool
+		supportedFormats          uint64
+		effectiveSupportedFormats uint64
 	}{
-		{profile: ReceiverProfileModern, sourceVersion: modernAirPlaySourceVersion, wantPTPFeature: true, wantConnections: true, wantLegacyPair: true, supportedFormats: 0x40000},
-		{profile: ReceiverProfileRoku, sourceVersion: "377.40.00", wantPTPFeature: true, wantPTPInfo: true, wantDisplay: true, supportedFormats: 0x40000},
-		{profile: ReceiverProfileLG, sourceVersion: "377.25.06", wantPTPFeature: true, wantPTPInfo: true, wantDisplay: true, supportedFormats: 0x40000},
-		{profile: ReceiverProfileAppleTV3, sourceVersion: "220.68", wantLegacyPair: true, supportedFormats: 0x40000},
-		{profile: ReceiverProfileUxPlay, sourceVersion: "220.68", wantDisplay: true, supportedFormats: 0x40000},
-		{profile: ReceiverProfileAirServer, sourceVersion: "375.3", wantPTPFeature: true, wantConnections: true, wantLegacyPair: true, supportedFormats: 0x1000000},
+		{profile: ReceiverProfileModern, sourceVersion: modernAirPlaySourceVersion, wantPTPFeature: true, wantConnections: true, wantLegacyPair: true, supportedFormats: 0x1440800, effectiveSupportedFormats: 0x1440800},
+		{profile: ReceiverProfileRoku, sourceVersion: "377.40.00", wantPTPFeature: true, wantPTPInfo: true, wantDisplay: true, effectiveSupportedFormats: 0x1440800},
+		{profile: ReceiverProfileLG, sourceVersion: "377.25.06", wantPTPFeature: true, wantPTPInfo: true, wantDisplay: true, supportedFormats: 0x40000, effectiveSupportedFormats: 0x40000},
+		{profile: ReceiverProfileAppleTV3, sourceVersion: "220.68", wantLegacyPair: true, effectiveSupportedFormats: 0x1440800},
+		{profile: ReceiverProfileUxPlay, sourceVersion: "220.68", wantDisplay: true, supportedFormats: 0x40000, effectiveSupportedFormats: 0x40000},
+		{profile: ReceiverProfileAirServer, sourceVersion: "375.3", wantPTPFeature: true, wantConnections: true, wantLegacyPair: true, supportedFormats: 0x1000000, effectiveSupportedFormats: 0x1000000},
 	} {
 		t.Run(string(test.profile), func(t *testing.T) {
 			server, client, _ := newReceiverServerTestPair(t, ReceiverConfig{Profile: test.profile})
@@ -803,11 +808,41 @@ func TestReceiverServerAdvertisesCapabilityAxes(t *testing.T) {
 			if got := uint64(client.info.SupportedFormats.ScreenStream); got != test.supportedFormats {
 				t.Fatalf("supportedFormats.screenStream = 0x%x, want 0x%x", got, test.supportedFormats)
 			}
+			if got := uint64(client.info.effectiveSupportedFormats().ScreenStream); got != test.effectiveSupportedFormats {
+				t.Fatalf("effective screenStream formats = 0x%x, want 0x%x", got, test.effectiveSupportedFormats)
+			}
 			if client.info.hasPTPInfo != test.wantPTPInfo {
 				t.Fatalf("hasPTPInfo = %t, want %t", client.info.hasPTPInfo, test.wantPTPInfo)
 			}
 			if (len(client.info.Displays) > 0) != test.wantDisplay {
 				t.Fatalf("display count = %d, want display=%t", len(client.info.Displays), test.wantDisplay)
+			}
+		})
+	}
+}
+
+func TestLoggedReceiverProfilesSelectAvailablePreferredAudio(t *testing.T) {
+	wantCodec := AudioCodecALAC
+	if aacELDEncoderAvailable {
+		wantCodec = AudioCodecAACELD
+	}
+	for _, test := range []struct {
+		profile     ReceiverProfile
+		wantRFC2198 bool
+	}{
+		{profile: ReceiverProfileModern, wantRFC2198: true},
+		{profile: ReceiverProfileRoku},
+		{profile: ReceiverProfileAppleTV3},
+	} {
+		t.Run(string(test.profile), func(t *testing.T) {
+			_, client, _ := newReceiverServerTestPair(t, ReceiverConfig{Profile: test.profile})
+			policy, err := compatibilityForReceiver(client.info, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if policy.audioCodec != wantCodec || policy.audioRFC2198 != test.wantRFC2198 {
+				t.Fatalf("audio policy = codec %d RFC2198=%t, want codec %d RFC2198=%t",
+					policy.audioCodec, policy.audioRFC2198, wantCodec, test.wantRFC2198)
 			}
 		})
 	}

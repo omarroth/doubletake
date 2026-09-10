@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
+	"crypto/cipher"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -20,8 +21,40 @@ func TestUseAudioRedundancyDefaults(t *testing.T) {
 	if !useAudioRedundancy(AudioCodecALAC) {
 		t.Fatal("expected ALAC screen sessions to use recent-packet redundancy")
 	}
-	if useAudioRedundancy(AudioCodecAACELD) {
-		t.Fatal("AAC-ELD must not use ALAC-style redundant retransmits")
+	if !useAudioRedundancy(AudioCodecAACELD) {
+		t.Fatal("expected AAC-ELD screen sessions to use recent-packet redundancy")
+	}
+}
+
+func TestComposeAudioREDPayload(t *testing.T) {
+	previous := []audioREDFrame{
+		{payload: []byte{1, 2}, rtpTime: 1000},
+		{payload: []byte{3, 4, 5}, rtpTime: 1480},
+	}
+	got := composeAudioREDPayload([]byte{6}, 1960, previous, 64)
+	want := []byte{
+		0xe0, 0x0f, 0x00, 0x02, // PT=96, offset=960, length=2
+		0xe0, 0x07, 0x80, 0x03, // PT=96, offset=480, length=3
+		0x60,
+		1, 2, 3, 4, 5, 6,
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("RED payload = %x, want %x", got, want)
+	}
+
+	got = composeAudioREDPayload([]byte{6}, 1960, previous, 9)
+	want = []byte{0xe0, 0x07, 0x80, 0x03, 0x60, 3, 4, 5, 6}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("capacity-limited RED payload = %x, want %x", got, want)
+	}
+
+	tooLarge := []audioREDFrame{
+		{payload: []byte{1}, rtpTime: 1000},
+		{payload: make([]byte, 1024), rtpTime: 1480},
+	}
+	got = composeAudioREDPayload([]byte{6}, 1960, tooLarge, 2048)
+	if !bytes.Equal(got, []byte{0x60, 6}) {
+		t.Fatalf("oversized RED history was retained: %x", got[:min(len(got), 16)])
 	}
 }
 
@@ -99,6 +132,111 @@ func TestEncryptedAudioRedundancyRecoversTwoLostBursts(t *testing.T) {
 	}
 }
 
+func TestStreamAudioUsesRFC2198ForAdvertisedReceiver(t *testing.T) {
+	const frames = 6
+	for _, security := range []string{"plaintext", "AES", "ChaCha"} {
+		t.Run(security, func(t *testing.T) {
+			stream, packets := streamAudioPacketsForTest(t, security, nil, frames, true)
+			if len(packets) != frames {
+				t.Fatalf("RFC 2198 datagrams = %d, want %d", len(packets), frames)
+			}
+			for index, packet := range packets {
+				seq := uint16(index + 1)
+				if packet[1] != audioREDPayloadType || binary.BigEndian.Uint16(packet[2:4]) != seq {
+					t.Fatalf("packet %d header = %02x/%d, want PT=%d seq=%d", index, packet[1], binary.BigEndian.Uint16(packet[2:4]), audioREDPayloadType, seq)
+				}
+				plain := decodeAudioPacketPayloadForTest(t, stream, security, packet)
+				// Verbatim ALAC is larger than RFC 2198's 10-bit redundant-block
+				// length, so it correctly uses a RED primary block without history.
+				if len(plain) != 1417 || plain[0] != audioDataPayloadType {
+					t.Fatalf("packet %d RED plaintext = len %d prefix %02x, want primary-only ALAC", index, len(plain), plain[:min(len(plain), 1)])
+				}
+				retransmit := stream.audioPacketForRetransmit(seq)
+				if len(retransmit) < 12 || retransmit[1] != audioDataPayloadType {
+					t.Fatalf("sequence %d retransmit packet is not PT96: %x", seq, retransmit[:min(len(retransmit), 12)])
+				}
+				if got := decodeAudioPacketPayloadForTest(t, stream, security, retransmit); !bytes.Equal(got, plain[1:]) {
+					t.Fatalf("sequence %d retransmit primary differs from RED primary", seq)
+				}
+				if security == "ChaCha" {
+					redNonce := binary.LittleEndian.Uint64(packet[len(packet)-audioChaChaNonceSize:])
+					primaryNonce := binary.LittleEndian.Uint64(retransmit[len(retransmit)-audioChaChaNonceSize:])
+					if redNonce != uint64(index*2) || primaryNonce != uint64(index*2+1) {
+						t.Fatalf("sequence %d RED/primary nonces = %d/%d, want %d/%d", seq, redNonce, primaryNonce, index*2, index*2+1)
+					}
+				}
+			}
+			if security == "ChaCha" && stream.chachaNonce != frames*2 {
+				t.Fatalf("nonce counter = %d, want %d", stream.chachaNonce, frames*2)
+			}
+		})
+	}
+}
+
+func TestCompoundRFC2198PayloadIsEncryptedAsOnePacket(t *testing.T) {
+	for _, security := range []string{"plaintext", "AES", "ChaCha"} {
+		t.Run(security, func(t *testing.T) {
+			conn := &recordingPacketConn{}
+			control := &recordingPacketConn{}
+			stream := &AudioStream{conn: conn, ctrlConn: control, remoteAddr: &netUDPAddrForAudioTest}
+			var err error
+			switch security {
+			case "AES":
+				stream.cipher, err = aes.NewCipher(bytes.Repeat([]byte{0x42}, 16))
+				stream.aesIV = bytes.Repeat([]byte{0x24}, 16)
+			case "ChaCha":
+				stream.chachaCipher, err = newAudioChaCha64AEAD(bytes.Repeat([]byte{0x42}, 32))
+				stream.chachaNonceMode = defaultAudioChaChaNonceMode()
+				stream.chachaAADMode = defaultAudioChaChaAADMode()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			plain := composeAudioREDPayload([]byte("current"), 1960, []audioREDFrame{
+				{payload: []byte("older"), rtpTime: 1000},
+				{payload: []byte("newer"), rtpTime: 1480},
+			}, stream.maximumPlainAudioPayloadBytes())
+			primary := []byte("current")
+			if err := stream.sendAudioREDPacket(plain, primary, 1960, 3); err != nil {
+				t.Fatal(err)
+			}
+			if len(conn.packets) != 1 {
+				t.Fatalf("sent %d packets, want one", len(conn.packets))
+			}
+			packet := conn.packets[0]
+			if packet[1] != audioREDPayloadType || binary.BigEndian.Uint16(packet[2:4]) != 3 || binary.BigEndian.Uint32(packet[4:8]) != 1960 {
+				t.Fatalf("RTP header = %x", packet[:12])
+			}
+			if got := decodeAudioPacketPayloadForTest(t, stream, security, packet); !bytes.Equal(got, plain) {
+				t.Fatalf("decoded RED payload = %x, want %x", got, plain)
+			}
+			retransmit := stream.audioPacketForRetransmit(3)
+			if len(retransmit) < 12 || retransmit[1] != audioDataPayloadType {
+				t.Fatalf("retransmit header = %x, want PT96", retransmit[:min(len(retransmit), 12)])
+			}
+			if got := decodeAudioPacketPayloadForTest(t, stream, security, retransmit); !bytes.Equal(got, primary) {
+				t.Fatalf("retransmit primary = %x, want %x", got, primary)
+			}
+			request := []byte{0x80, audioRetransmitRequestPayloadType, 0, 7, 0, 3, 0, 1}
+			handled, resent, err := stream.handleAudioControlPacket(request, &net.UDPAddr{})
+			if err != nil || !handled || resent != 1 || len(control.packets) != 1 {
+				t.Fatalf("NACK result = handled %t resent %d packets %d error %v", handled, resent, len(control.packets), err)
+			}
+			response := control.packets[0]
+			if len(response) != 4+len(retransmit) || response[1] != audioRetransmitResponsePayloadType || !bytes.Equal(response[4:], retransmit) {
+				t.Fatalf("NACK response did not wrap the stored PT96 packet: %x", response[:min(len(response), 20)])
+			}
+			if security == "ChaCha" {
+				redNonce := binary.LittleEndian.Uint64(packet[len(packet)-audioChaChaNonceSize:])
+				primaryNonce := binary.LittleEndian.Uint64(retransmit[len(retransmit)-audioChaChaNonceSize:])
+				if redNonce == primaryNonce || stream.chachaNonce != 2 {
+					t.Fatalf("RED/primary nonces = %d/%d with counter %d, want distinct values and counter 2", redNonce, primaryNonce, stream.chachaNonce)
+				}
+			}
+		})
+	}
+}
+
 func TestStreamAudioRedundancyPreservesCaptureGapsAndResets(t *testing.T) {
 	base := time.Now()
 	positions := []audioPCMFramePosition{
@@ -142,7 +280,11 @@ func (r *positionedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (audioPCMF
 	return position, nil
 }
 
-func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFrameReader, count int) (*AudioStream, [][]byte) {
+func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFrameReader, count int, rfc2198 ...bool) (*AudioStream, [][]byte) {
+	return streamAudioPacketsForCodecTest(t, security, frames, count, AudioCodecALAC, len(rfc2198) > 0 && rfc2198[0])
+}
+
+func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioPCMFrameReader, count int, codec AudioCodec, rfc2198 bool) (*AudioStream, [][]byte) {
 	t.Helper()
 	ctrlConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -157,10 +299,12 @@ func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFra
 	dataConn := &recordingPacketConn{}
 	stream := &AudioStream{
 		conn: dataConn, ctrlConn: ctrlConn, remoteAddr: &netUDPAddrForAudioTest,
-		ctrlAddr: ctrlPeer.LocalAddr().(*net.UDPAddr), spf: 352,
+		ctrlAddr: ctrlPeer.LocalAddr().(*net.UDPAddr),
 		// This fixture tests packet order, independent of scheduler latency.
-		ct: byte(AudioCodecALAC), latencySamples: audioSampleRate,
+		ct: byte(codec), latencySamples: audioSampleRate, rfc2198: rfc2198,
 	}
+	_, codecSPF, _, _, _, _ := codec.Info()
+	stream.spf = uint16(codecSPF)
 	switch security {
 	case "AES":
 		stream.cipher, err = aes.NewCipher(bytes.Repeat([]byte{0x42}, 16))
@@ -173,13 +317,20 @@ func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFra
 	if err != nil {
 		t.Fatal(err)
 	}
-	pcm := make([]byte, count*352*audioBytesPerSampleFrame)
+	pcm := make([]byte, count*int(codecSPF)*audioBytesPerSampleFrame)
 	for i := range pcm {
 		pcm[i] = byte(i)
 	}
 	capture := &AudioCapture{
 		pcmPipe: io.NopCloser(bytes.NewReader(pcm)), pcmFrames: frames,
-		waitCh: make(chan struct{}), codec: AudioCodecALAC,
+		waitCh: make(chan struct{}), codec: codec,
+	}
+	if codec == AudioCodecAACELD {
+		capture.eld, err = newELDEncoder()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(capture.eld.Close)
 	}
 	firstVideo := make(chan struct{})
 	close(firstVideo)
@@ -188,6 +339,30 @@ func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFra
 		t.Fatalf("StreamAudio = %v, want EOF after %d source frames", err, count)
 	}
 	return stream, dataConn.packets
+}
+
+func decodeAudioPacketPayloadForTest(t *testing.T, stream *AudioStream, security string, packet []byte) []byte {
+	t.Helper()
+	payload := packet[12:]
+	switch security {
+	case "AES":
+		plain := append([]byte(nil), payload...)
+		length := len(plain) / stream.cipher.BlockSize() * stream.cipher.BlockSize()
+		cipher.NewCBCDecrypter(stream.cipher, stream.aesIV).CryptBlocks(plain[:length], plain[:length])
+		return plain
+	case "ChaCha":
+		if len(payload) < audioChaChaNonceSize {
+			t.Fatalf("ChaCha payload is only %d bytes", len(payload))
+		}
+		nonce := payload[len(payload)-audioChaChaNonceSize:]
+		plain, err := stream.chachaCipher.Open(nil, nonce, payload[:len(payload)-audioChaChaNonceSize], packet[4:12])
+		if err != nil {
+			t.Fatalf("authenticate sequence %d: %v", binary.BigEndian.Uint16(packet[2:4]), err)
+		}
+		return plain
+	default:
+		return payload
+	}
 }
 
 func assertAudioPacketSequences(t *testing.T, packets [][]byte, want []uint16) {

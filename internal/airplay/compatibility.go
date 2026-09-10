@@ -25,6 +25,7 @@ type receiverCompatibility struct {
 	audioSecurity    audioSecurityMode
 	audioConnections audioConnectionLayout
 	audioCodec       AudioCodec
+	audioRFC2198     bool
 	fairPlayRoots    fairPlayRootPlacement
 }
 
@@ -32,17 +33,24 @@ const (
 	// These bit numbers are AirPlay feature indices used by Apple's sender, not
 	// receiver fingerprints. Feature 41 advertises PTP and feature 59 advertises
 	// the streamConnections audio descriptor.
-	featurePTP                         uint   = 41
-	featureAudioStreamConnectionSetup  uint   = 59
-	minimumPTPSourceVersionMajor              = 354
-	minimumPTPSourceVersionMinor              = 54
-	minimumPTPSourceVersionPatch              = 6
-	screenAudioFormatALAC              uint64 = 0x00040000
-	screenAudioFormatAACELD44100Stereo uint64 = 0x01000000
+	featureAudioFormatPCM44100Stereo    uint   = 18
+	featureAudioFormatALAC44100Stereo   uint   = 19
+	featureAudioFormatAACLC44100Stereo  uint   = 20
+	featureAudioFormatAACELD44100Stereo uint   = 21
+	featurePTP                          uint   = 41
+	featureAudioStreamConnectionSetup   uint   = 59
+	featureRFC2198Redundancy            uint   = 61
+	minimumPTPSourceVersionMajor               = 354
+	minimumPTPSourceVersionMinor               = 54
+	minimumPTPSourceVersionPatch               = 6
+	screenAudioFormatPCM44100Stereo     uint64 = 0x00000800
+	screenAudioFormatALAC               uint64 = 0x00040000
+	screenAudioFormatAACLC44100Stereo   uint64 = 0x00400000
+	screenAudioFormatAACELD44100Stereo  uint64 = 0x01000000
 )
 
 func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) (receiverCompatibility, error) {
-	audioCodec, err := screenAudioCodec(info)
+	audioCodec, err := screenAudioCodec(info, aacELDEncoderAvailable || !audioEnabled)
 	if err != nil && audioEnabled {
 		return receiverCompatibility{}, err
 	}
@@ -77,6 +85,7 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 	if info.HasFeature(featureAudioStreamConnectionSetup) {
 		policy.audioConnections = audioLayoutStreamConnections
 	}
+	policy.audioRFC2198 = info.HasFeature(featureRFC2198Redundancy)
 
 	// The sender gates PTP on both feature 41 and SourceVersion 354.54.6. PTP is
 	// meaningful here only after pair-verify actually encrypted the control
@@ -90,19 +99,26 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 	return policy, nil
 }
 
-func screenAudioCodec(info *ReceiverInfo) (AudioCodec, error) {
-	if info == nil || info.SupportedFormats.ScreenStream == 0 {
+func screenAudioCodec(info *ReceiverInfo, allowAACELD bool) (AudioCodec, error) {
+	if info == nil {
 		return AudioCodecALAC, nil
 	}
-	if info.SupportsAudioFormat("screenStream", screenAudioFormatALAC) {
+	mask := uint64(info.effectiveSupportedFormats().ScreenStream)
+	if mask == 0 {
 		return AudioCodecALAC, nil
 	}
-	if info.SupportsAudioFormat("screenStream", screenAudioFormatAACELD44100Stereo) {
+	if mask&screenAudioFormatAACELD44100Stereo != 0 && allowAACELD {
 		return AudioCodecAACELD, nil
+	}
+	if mask&screenAudioFormatALAC != 0 {
+		return AudioCodecALAC, nil
+	}
+	if mask&screenAudioFormatAACELD44100Stereo != 0 {
+		return 0, fmt.Errorf("%w: receiver only offers AAC-ELD for screen audio", ErrAACELDUnavailable)
 	}
 	return 0, fmt.Errorf(
 		"receiver advertises unsupported supportedFormats.screenStream mask 0x%x (need ALAC 0x%x or AAC-ELD 0x%x)",
-		uint64(info.SupportedFormats.ScreenStream), screenAudioFormatALAC, screenAudioFormatAACELD44100Stereo,
+		mask, screenAudioFormatALAC, screenAudioFormatAACELD44100Stereo,
 	)
 }
 

@@ -142,6 +142,7 @@ type receiverProfileSpec struct {
 	audioResponseConnections bool
 	audioCodec               AudioCodec
 	supportedScreenFormats   uint64
+	omitSupportedFormats     bool
 	audioSHKWithHAP          bool
 	fairPlayRootKeys         bool
 	legacyVideoKey           receiverLegacyVideoKeyMode
@@ -322,8 +323,8 @@ func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 			providePTPClockHeaders:   true,
 			audioConnectionsWithHAP:  true,
 			audioResponseConnections: true,
-			audioCodec:               AudioCodecALAC,
-			supportedScreenFormats:   0x40000,
+			audioCodec:               AudioCodecAACELD,
+			supportedScreenFormats:   0x1440800,
 			audioSHKWithHAP:          true,
 			displayWidth:             1920,
 			displayHeight:            1080,
@@ -349,8 +350,9 @@ func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 			advertisePTPInfo:         true,
 			audioConnectionsWithHAP:  true,
 			audioResponseConnections: true,
-			audioCodec:               AudioCodecALAC,
-			supportedScreenFormats:   0x40000,
+			audioCodec:               AudioCodecAACELD,
+			supportedScreenFormats:   0x1440800,
+			omitSupportedFormats:     true,
 			audioSHKWithHAP:          true,
 			displayWidth:             1920,
 			displayHeight:            1080,
@@ -384,8 +386,9 @@ func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 			setupOrder:             receiverSetupMediaFirst,
 			timingProtocol:         timingProtocolNTP,
 			ntpInitiator:           receiverNTPReceiver,
-			audioCodec:             AudioCodecALAC,
-			supportedScreenFormats: 0x40000,
+			audioCodec:             AudioCodecAACELD,
+			supportedScreenFormats: 0x1440800,
+			omitSupportedFormats:   true,
 			fairPlayRootKeys:       true,
 			legacyVideoKey:         receiverLegacyVideoRaw,
 		}, nil
@@ -901,17 +904,14 @@ func (s *ReceiverServer) info(sessionPrepared bool) map[string]any {
 		statusFlags |= statusFlagPasswordRequired
 	}
 	info := map[string]any{
-		"name":            s.cfg.Name,
-		"model":           s.cfg.Model,
-		"manufacturer":    s.cfg.Manufacturer,
-		"deviceID":        s.cfg.DeviceID,
-		"macAddress":      s.cfg.DeviceID,
-		"protocolVersion": "1.1",
-		"sourceVersion":   s.profile.sourceVersion,
-		"features":        s.profile.features,
-		"supportedFormats": map[string]any{
-			"screenStream": s.profile.supportedScreenFormats,
-		},
+		"name":                     s.cfg.Name,
+		"model":                    s.cfg.Model,
+		"manufacturer":             s.cfg.Manufacturer,
+		"deviceID":                 s.cfg.DeviceID,
+		"macAddress":               s.cfg.DeviceID,
+		"protocolVersion":          "1.1",
+		"sourceVersion":            s.profile.sourceVersion,
+		"features":                 s.profile.features,
 		"statusFlags":              statusFlags,
 		"pk":                       []byte(s.publicKey),
 		"initialVolume":            float64(0),
@@ -921,6 +921,9 @@ func (s *ReceiverServer) info(sessionPrepared bool) map[string]any {
 			"type": int64(100), "ch": int64(2),
 			"inputLatencyMicros": int64(0), "outputLatencyMicros": int64(0),
 		}},
+	}
+	if !s.profile.omitSupportedFormats {
+		info["supportedFormats"] = map[string]any{"screenStream": s.profile.supportedScreenFormats}
 	}
 	if s.profile.displayWidth > 0 && s.profile.displayHeight > 0 &&
 		(sessionPrepared || !s.profile.displayRequiresSession) {
@@ -1106,11 +1109,14 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 	if synthetic {
 		return nil
 	}
-	ct, spf, format, _, _, _ := profile.audioCodec.Info()
-	if plistInt(stream["ct"]) != int(ct) || plistInt(stream["spf"]) != int(spf) ||
-		plistInt(stream["audioFormat"]) != int(format) {
-		return fmt.Errorf("audio descriptor is ct=%d spf=%d format=0x%x, want ct=%d spf=%d format=0x%x",
-			plistInt(stream["ct"]), plistInt(stream["spf"]), plistInt(stream["audioFormat"]), ct, spf, format)
+	codec := AudioCodec(plistInt(stream["ct"]))
+	ct, spf, format, _, _, _ := codec.Info()
+	if (codec != AudioCodecALAC && codec != AudioCodecAACELD) ||
+		plistInt(stream["spf"]) != int(spf) || plistInt(stream["audioFormat"]) != int(format) ||
+		profile.supportedScreenFormats&uint64(format) == 0 {
+		return fmt.Errorf("audio descriptor ct=%d spf=%d format=0x%x is invalid for advertised screen mask 0x%x (codec metadata ct=%d spf=%d format=0x%x)",
+			plistInt(stream["ct"]), plistInt(stream["spf"]), plistInt(stream["audioFormat"]),
+			profile.supportedScreenFormats, ct, spf, format)
 	}
 	_, hasConnections := stream["streamConnections"].(map[string]any)
 	hasControlPort := plistInt(stream["controlPort"]) > 0
@@ -1134,10 +1140,8 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 	if profile.audioSHKWithHAP && c.hap != nil && len(plistBytes(stream["shk"])) != chacha20poly1305.KeySize {
 		return fmt.Errorf("encrypted audio descriptor omitted 32-byte shk")
 	}
-	if profile.audioCodec == AudioCodecAACELD {
-		if _, ok := stream["redundantAudio"]; ok {
-			return fmt.Errorf("AAC-ELD descriptor must not enable redundantAudio")
-		}
+	if got := plistInt(stream["redundantAudio"]); got != audioRedundancyCount {
+		return fmt.Errorf("screen audio redundantAudio is %d, want %d", got, audioRedundancyCount)
 	}
 	return nil
 }

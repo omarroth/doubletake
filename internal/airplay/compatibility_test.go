@@ -1,6 +1,7 @@
 package airplay
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -159,28 +160,92 @@ func TestSupportsPTPSourceVersion(t *testing.T) {
 
 func TestScreenAudioCodecUsesAdvertisedFormatMask(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		mask    uint64
-		want    AudioCodec
-		wantErr bool
+		name         string
+		mask         uint64
+		allowAACELD  bool
+		want         AudioCodec
+		wantError    error
+		wantAnyError bool
 	}{
 		{name: "missing mask", want: AudioCodecALAC},
 		{name: "ALAC", mask: screenAudioFormatALAC, want: AudioCodecALAC},
-		{name: "ALAC preferred", mask: screenAudioFormatALAC | screenAudioFormatAACELD44100Stereo, want: AudioCodecALAC},
-		{name: "AAC ELD 44.1 kHz stereo", mask: screenAudioFormatAACELD44100Stereo, want: AudioCodecAACELD},
-		{name: "unsupported advertised mask", mask: 0x800000, wantErr: true},
+		{name: "AAC ELD preferred", mask: screenAudioFormatALAC | screenAudioFormatAACELD44100Stereo, allowAACELD: true, want: AudioCodecAACELD},
+		{name: "ALAC fallback without AAC encoder", mask: screenAudioFormatALAC | screenAudioFormatAACELD44100Stereo, want: AudioCodecALAC},
+		{name: "AAC ELD only", mask: screenAudioFormatAACELD44100Stereo, allowAACELD: true, want: AudioCodecAACELD},
+		{name: "AAC ELD unavailable", mask: screenAudioFormatAACELD44100Stereo, wantError: ErrAACELDUnavailable},
+		{name: "unsupported advertised mask", mask: 0x800000, wantAnyError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			info := &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: FormatMask(test.mask)}}
-			policy, err := compatibilityForReceiver(info, false, true)
-			if (err != nil) != test.wantErr {
-				t.Fatalf("compatibility error = %v, want error=%t", err, test.wantErr)
+			got, err := screenAudioCodec(info, test.allowAACELD)
+			if test.wantError != nil {
+				if !errors.Is(err, test.wantError) {
+					t.Fatalf("screenAudioCodec error = %v, want %v", err, test.wantError)
+				}
+				return
 			}
-			if err == nil && policy.audioCodec != test.want {
-				got := policy.audioCodec
-				t.Fatalf("audio codec = %d, want %d", got, test.want)
+			if test.wantAnyError {
+				if err == nil {
+					t.Fatal("screenAudioCodec succeeded, want error")
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("screenAudioCodec = %d, %v, want %d, nil", got, err, test.want)
 			}
 		})
+	}
+}
+
+func TestScreenAudioCodecSynthesizesLegacyFormatsFromFeatures(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		features []uint
+		want     AudioCodec
+		wantErr  bool
+	}{
+		{name: "AAC ELD precedes ALAC", features: []uint{featureAudioFormatAACELD44100Stereo, featureAudioFormatALAC44100Stereo}, want: AudioCodecAACELD},
+		{name: "AAC ELD", features: []uint{featureAudioFormatAACELD44100Stereo}, want: AudioCodecAACELD},
+		{name: "ALAC", features: []uint{featureAudioFormatALAC44100Stereo}, want: AudioCodecALAC},
+		{name: "unsupported AAC LC", features: []uint{featureAudioFormatAACLC44100Stereo}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info := receiverWithFeatures(test.features...)
+			got, err := screenAudioCodec(&info, true)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("screenAudioCodec error = %v, want error=%t", err, test.wantErr)
+			}
+			if err == nil && got != test.want {
+				t.Fatalf("screenAudioCodec = %d, want %d", got, test.want)
+			}
+		})
+	}
+
+	info := receiverWithFeatures(featureAudioFormatAACELD44100Stereo)
+	info.SupportedFormats.ScreenStream = FormatMask(screenAudioFormatALAC)
+	if got, err := screenAudioCodec(&info, true); err != nil || got != AudioCodecALAC {
+		t.Fatalf("explicit supportedFormats override = %d, %v, want ALAC", got, err)
+	}
+}
+
+func TestVideoOnlyCompatibilityKeepsAdvertisedAACELDWithoutLocalEncoder(t *testing.T) {
+	info := &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: FormatMask(screenAudioFormatAACELD44100Stereo)}}
+	policy, err := compatibilityForReceiver(info, false, false)
+	if err != nil || policy.audioCodec != AudioCodecAACELD {
+		t.Fatalf("video-only compatibility = codec %d, %v, want AAC-ELD", policy.audioCodec, err)
+	}
+}
+
+func TestRFC2198RedundancyRequiresAdvertisedFeature(t *testing.T) {
+	without := receiverWithFeatures()
+	without.SupportedFormats.ScreenStream = FormatMask(screenAudioFormatALAC)
+	with := receiverWithFeatures(featureRFC2198Redundancy)
+	with.SupportedFormats.ScreenStream = FormatMask(screenAudioFormatALAC)
+	if mustCompatibility(t, &without, false).audioRFC2198 {
+		t.Fatal("RFC 2198 enabled without feature 61")
+	}
+	if !mustCompatibility(t, &with, false).audioRFC2198 {
+		t.Fatal("RFC 2198 disabled with feature 61")
 	}
 }
 

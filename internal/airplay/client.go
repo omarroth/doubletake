@@ -50,6 +50,7 @@ type ReceiverInfo struct {
 	MacAddress                    string              `plist:"macAddress"`
 	Displays                      []DisplayInfo       `plist:"displays"`
 	hasPTPInfo                    bool
+	hasSupportedFormats           bool
 }
 
 // FormatMask preserves the unsigned bit pattern of signed or unsigned plist
@@ -85,20 +86,49 @@ func (i *ReceiverInfo) SupportsAudioFormat(stream string, mask uint64) bool {
 	if i == nil || mask == 0 {
 		return false
 	}
+	formats := i.effectiveSupportedFormats()
 	var advertised FormatMask
 	switch stream {
 	case "audioStream":
-		advertised = i.SupportedFormats.AudioStream
+		advertised = formats.AudioStream
 	case "bufferStream":
-		advertised = i.SupportedFormats.BufferStream
+		advertised = formats.BufferStream
 	case "lowLatencyAudioStream":
-		advertised = i.SupportedFormats.LowLatencyAudioStream
+		advertised = formats.LowLatencyAudioStream
 	case "screenStream":
-		advertised = i.SupportedFormats.ScreenStream
+		advertised = formats.ScreenStream
 	default:
 		return false
 	}
 	return uint64(advertised)&mask == mask
+}
+
+// effectiveSupportedFormats reproduces the legacy capability fallback used
+// when a receiver omits the entire supportedFormats dictionary. An explicitly
+// supplied dictionary, including an empty stream mask, always takes precedence.
+func (i *ReceiverInfo) effectiveSupportedFormats() StreamFormats {
+	if i == nil {
+		return StreamFormats{}
+	}
+	if i.hasSupportedFormats || i.SupportedFormats != (StreamFormats{}) {
+		return i.SupportedFormats
+	}
+	var mask uint64
+	for _, format := range []struct {
+		feature uint
+		mask    uint64
+	}{
+		{featureAudioFormatPCM44100Stereo, screenAudioFormatPCM44100Stereo},
+		{featureAudioFormatALAC44100Stereo, screenAudioFormatALAC},
+		{featureAudioFormatAACLC44100Stereo, screenAudioFormatAACLC44100Stereo},
+		{featureAudioFormatAACELD44100Stereo, screenAudioFormatAACELD44100Stereo},
+	} {
+		if i.HasFeature(format.feature) {
+			mask |= format.mask
+		}
+	}
+	formats := FormatMask(mask)
+	return StreamFormats{AudioStream: formats, BufferStream: formats, ScreenStream: formats}
 }
 
 // AirPlay receiver status flags used to choose one authentication prompt.
@@ -518,6 +548,7 @@ func (c *AirPlayClient) getInfoWithTimeout(timeout time.Duration) (*ReceiverInfo
 	}
 	info.Server = responseHeaders["server"]
 	_, info.hasPTPInfo = fullInfo["PTPInfo"]
+	_, info.hasSupportedFormats = fullInfo["supportedFormats"]
 
 	c.mu.Lock()
 	var advertisement *AirPlayDevice
@@ -572,6 +603,7 @@ func (c *AirPlayClient) applyReceiverInfoUpdate(update map[string]interface{}, s
 	}
 	if _, ok := update["supportedFormats"]; ok {
 		info.SupportedFormats = StreamFormats{}
+		info.hasSupportedFormats = true
 	}
 	if _, ok := update["supportedAudioFormatsExtended"]; ok {
 		info.SupportedAudioFormatsExtended = nil
@@ -581,6 +613,11 @@ func (c *AirPlayClient) applyReceiverInfoUpdate(update map[string]interface{}, s
 	}
 	if _, err := plist.Unmarshal(body, &info); err != nil {
 		return nil, fmt.Errorf("decode receiver info update: %w", err)
+	}
+	if _, hasFeatures := update["features"]; !hasFeatures {
+		if _, hasFeaturesEx := update["featuresEx"]; hasFeaturesEx {
+			info.Features = info.FeaturesEx.Low64()
+		}
 	}
 	if server != "" {
 		info.Server = server
