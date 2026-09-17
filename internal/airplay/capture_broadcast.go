@@ -19,6 +19,14 @@ const (
 	// metadata; it is deliberately generous for normal H.264 buffer cadence.
 	broadcastSinkQueueChunks = 4096
 
+	// Shared encoded fan-out needs room for scheduler and transport bursts: a
+	// quarter second of nominal samples, independent of Apple's 67 ms raw-frame
+	// queue. Encoded reference pictures cannot be dropped to catch up, so a
+	// sustained backlog disconnects only that receiver instead. Byte and chunk
+	// bounds still cap memory independently; single-target handoff still waits
+	// with just one pending AU.
+	broadcastSinkFrameQueueDuration = 250 * time.Millisecond
+
 	// Source shutdown normally races with consumers draining their last few
 	// buffers. Do not let a receiver that stopped reading keep Run alive forever.
 	broadcastSinkDrainTimeout = 2 * time.Second
@@ -81,16 +89,15 @@ type BroadcastSink struct {
 
 	maxQueuedBytes  int
 	maxQueuedChunks int
-	// Apple's ordinary virtual-display source bounds its upstream frame queue to
-	// 67 ms and drops an incoming source frame at that limit. Doubletake derives
-	// a downstream encoded-relay ceiling from that value and counts configured
-	// sample durations. The byte and chunk limits remain independent safeguards.
+	// Bound shared encoded bursts by nominal sample duration, not PTS span or
+	// the upstream raw-frame dropping policy.
 	maxFrameQueueDuration time.Duration
 	backpressure          bool
 	blockedProducers      int // number waiting for queue handoff; guarded by mu
 
-	inputClosed   bool // the source ended; drain queue, then return EOF
-	closed        bool // explicitly removed; discard queue and return EOF
+	inputClosed   bool  // the source ended; drain queue, then return EOF
+	closed        bool  // removed or failed; discard queue and return terminalErr
+	terminalErr   error // immutable after closed; guarded by mu
 	doneClosed    bool
 	done          chan struct{}
 	startSequence uint64
@@ -105,7 +112,7 @@ func newBroadcastSinkWithPolicy(owner *BroadcastCapture, backpressure bool) *Bro
 		owner:                 owner,
 		maxQueuedBytes:        broadcastSinkQueueBytes,
 		maxQueuedChunks:       broadcastSinkQueueChunks,
-		maxFrameQueueDuration: ordinaryScreenFrameQueueDuration,
+		maxFrameQueueDuration: broadcastSinkFrameQueueDuration,
 		backpressure:          backpressure,
 		frameDuration:         frameDuration,
 		done:                  make(chan struct{}),
@@ -276,6 +283,8 @@ func (bc *BroadcastCapture) runFrames() error {
 
 			for _, sink := range sinks {
 				if err := sink.enqueueFrame(frame); err != nil {
+					// enqueueFrame already published any terminal backlog error
+					// under the sink lock; removal only detaches it from fan-out.
 					bc.RemoveSink(sink)
 				}
 			}
@@ -364,6 +373,7 @@ func (s *BroadcastSink) enqueue(p []byte) error {
 			continue
 		}
 		if len(s.queue) >= s.maxQueuedChunks || len(p) > s.maxQueuedBytes-s.queuedBytes {
+			s.abortLocked(errBroadcastSinkBacklog)
 			return errBroadcastSinkBacklog
 		}
 		break
@@ -401,6 +411,7 @@ func (s *BroadcastSink) enqueueFrame(frame VideoAccessUnit) error {
 			return io.ErrClosedPipe
 		}
 		if len(s.frameQueue) == 0 && len(frame.AnnexB) > s.maxQueuedBytes {
+			s.abortLocked(errBroadcastSinkBacklog)
 			return errBroadcastSinkBacklog
 		}
 		if s.backpressure && len(s.frameQueue) > 0 {
@@ -410,6 +421,7 @@ func (s *BroadcastSink) enqueueFrame(frame VideoAccessUnit) error {
 			continue
 		}
 		if s.frameQueueExceedsLimitsLocked(frame) {
+			s.abortLocked(errBroadcastSinkBacklog)
 			return errBroadcastSinkBacklog
 		}
 		break
@@ -441,7 +453,16 @@ func (s *BroadcastSink) finish() {
 // abort discards queued data and releases a blocked reader immediately.
 func (s *BroadcastSink) abort() {
 	s.mu.Lock()
+	s.abortLocked(io.EOF)
+	s.mu.Unlock()
+}
+
+// abortLocked makes queue failure and its reader-visible error atomic. A
+// concurrent Close or subsequent RemoveSink must not turn overflow into EOF.
+// Never resume after discarding encoded reference pictures.
+func (s *BroadcastSink) abortLocked(err error) {
 	if !s.closed {
+		s.terminalErr = err
 		s.closed = true
 		s.inputClosed = true
 		for i := range s.queue {
@@ -458,7 +479,6 @@ func (s *BroadcastSink) abort() {
 		s.closeDoneLocked()
 		s.cond.Broadcast()
 	}
-	s.mu.Unlock()
 }
 
 func (s *BroadcastSink) closeDoneLocked() {
@@ -481,7 +501,7 @@ func (s *BroadcastSink) Read(p []byte) (int, error) {
 		s.cond.Wait()
 	}
 	if s.closed {
-		return 0, io.EOF
+		return 0, s.terminalErr
 	}
 	if len(s.queue) == 0 {
 		s.closeDoneLocked()
@@ -517,7 +537,7 @@ func (s *BroadcastSink) ReadVideoAccessUnit() (VideoAccessUnit, error) {
 		s.cond.Wait()
 	}
 	if s.closed {
-		return VideoAccessUnit{}, io.EOF
+		return VideoAccessUnit{}, s.terminalErr
 	}
 	if len(s.frameQueue) == 0 {
 		s.closeDoneLocked()
@@ -562,8 +582,9 @@ func (r broadcastSinkReadCloser) Close() error {
 // directly to MirrorSession.StreamFrames.
 func (s *BroadcastSink) AsCapture() *ScreenCapture {
 	capture := &ScreenCapture{
-		stdout: broadcastSinkReadCloser{sink: s},
-		waitCh: s.done,
+		stdout:     broadcastSinkReadCloser{sink: s},
+		waitCh:     s.done,
+		streamOnly: true,
 	}
 	if s.owner != nil && s.owner.frames {
 		capture.frames = s
@@ -571,8 +592,8 @@ func (s *BroadcastSink) AsCapture() *ScreenCapture {
 	return capture
 }
 
-// Close closes this sink, discarding queued data and signalling EOF to its
-// reader.
+// Close discards queued data and signals EOF unless the sink already failed;
+// in that case its original terminal error is preserved.
 func (s *BroadcastSink) Close() {
 	if s.owner != nil {
 		s.owner.RemoveSink(s)

@@ -74,6 +74,9 @@ type ScreenCapture struct {
 	waitCh   chan struct{} // closed when process exits
 	waitErr  error         // set before waitCh is closed
 	stopped  bool
+	// Synthetic relays have no process exit status. Their readers own terminal
+	// errors even after waitCh closes; treating that channel as EOF loses them.
+	streamOnly bool
 }
 
 type capturePreparationKind uint8
@@ -1039,6 +1042,9 @@ func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder enc
 }
 
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
+	if sc.streamOnly {
+		return sc.stdout.Read(buf)
+	}
 	select {
 	case <-sc.waitCh:
 		if sc.waitErr != nil {
@@ -1056,6 +1062,9 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 func (sc *ScreenCapture) ReadVideoAccessUnit() (VideoAccessUnit, error) {
 	if sc == nil || sc.frames == nil {
 		return VideoAccessUnit{}, fmt.Errorf("capture does not provide timestamped access units")
+	}
+	if sc.streamOnly {
+		return sc.frames.ReadVideoAccessUnit()
 	}
 	select {
 	case <-sc.waitCh:
