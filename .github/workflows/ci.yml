@@ -9,7 +9,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -18,7 +21,14 @@ jobs:
       - run: make test
 
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            suffix: ""
+          - runner: ubuntu-24.04-arm
+            suffix: "-arm64"
+    runs-on: ${{ matrix.runner }}
     needs: test
     steps:
       - uses: actions/checkout@v4
@@ -36,15 +46,23 @@ jobs:
         run: make doubletake-test-receiver-release
 
       - name: Bundle manpages
+        if: matrix.suffix == ''
         run: make manpages-release
+
+      - name: Add architecture suffix
+        if: matrix.suffix != ''
+        run: |
+          mv doubletake "doubletake${{ matrix.suffix }}"
+          mv doubletake-ctl "doubletake-ctl${{ matrix.suffix }}"
+          mv doubletake-test-receiver "doubletake-test-receiver${{ matrix.suffix }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-assets
+          name: release-assets${{ matrix.suffix }}
           path: |
-            doubletake
-            doubletake-ctl
-            doubletake-test-receiver
+            doubletake${{ matrix.suffix }}
+            doubletake-ctl${{ matrix.suffix }}
+            doubletake-test-receiver${{ matrix.suffix }}
             doubletake-manpages.tar.gz
 
   release:
@@ -61,7 +79,8 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: release-assets
+          pattern: release-assets*
+          merge-multiple: true
 
       - name: Extract release notes from tag
         id: notes
@@ -86,4 +105,7 @@ jobs:
             doubletake
             doubletake-ctl
             doubletake-test-receiver
+            doubletake-arm64
+            doubletake-ctl-arm64
+            doubletake-test-receiver-arm64
             doubletake-manpages.tar.gz
