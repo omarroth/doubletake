@@ -8,7 +8,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 - FairPlay SAP authentication (clean Go implementation)
 - SRP-6a pairing with PIN and persistent credential storage
 - Wayland (PipeWire/xdg-desktop-portal) and X11 screen capture
-- H.264 encoding with NVENC, VA-API, OpenH264, and x264
+- H.264 encoding with NVENC, VA-API, V4L2 stateful encoders, OpenH264, and x264
 - Capability-gated HEVC Main10/high-resolution encoding with NVENC or x265
 - ChaCha20-Poly1305 stream encryption
 - mDNS device discovery
@@ -324,6 +324,7 @@ doubletake -target 192.168.1.77 -target-latency-ms 100
 # Hardware encoding
 doubletake -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
 doubletake -target 192.168.1.77 -hwaccel vaapi   # Intel/AMD
+doubletake -target 192.168.1.77 -hwaccel v4l2    # V4L2 stateful encoders (many ARM SoCs)
 
 # OpenH264 software encoding
 doubletake -target 192.168.1.77 -hwaccel openh264
@@ -361,7 +362,7 @@ doubletake-ctl disconnect
 | `-fps` | 30 | Frames per second |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = automatic AirPlay policy with separate defaults) |
-| `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `openh264`, `none` |
+| `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: capability-driven `auto`, forced `h264`, or forced `hevc` |
 | `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |
 | `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |

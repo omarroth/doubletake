@@ -239,7 +239,7 @@ func TestStartGStreamerCommandSetsParentDeathSignal(t *testing.T) {
 }
 
 func TestValidateHWAccel(t *testing.T) {
-	for _, method := range []string{"", "auto", "nvenc", "vaapi", "openh264", "none"} {
+	for _, method := range []string{"", "auto", "nvenc", "vaapi", "v4l2", "openh264", "none"} {
 		if err := ValidateHWAccel(method); err != nil {
 			t.Errorf("ValidateHWAccel(%q): %v", method, err)
 		}
@@ -691,6 +691,43 @@ func TestDetectGstEncoderSelectsExplicitOpenH264(t *testing.T) {
 	}
 }
 
+func TestDetectGstEncoderSelectsExplicitV4L2(t *testing.T) {
+	var probes []string
+	encoder, err := detectGstEncoderWithProbe(CaptureConfig{
+		FPS:     25,
+		Bitrate: 2500,
+		HWAccel: "v4l2",
+	}, func(name string) bool {
+		probes = append(probes, name)
+		return name == "v4l2h264enc"
+	})
+	if err != nil {
+		t.Fatalf("detectGstEncoderWithProbe: %v", err)
+	}
+
+	if !reflect.DeepEqual(probes, []string{"v4l2h264enc"}) {
+		t.Fatalf("encoder probes = %v, want only v4l2h264enc", probes)
+	}
+	if encoder.rawFormat != "NV12" {
+		t.Fatalf("V4L2 raw format = %q, want NV12", encoder.rawFormat)
+	}
+	if encoder.needsVulkan {
+		t.Fatal("V4L2 unexpectedly requires Vulkan upload")
+	}
+	wantParts := gstStage{
+		"v4l2h264enc",
+		"extra-controls=controls,video_bitrate=2500000,video_bitrate_mode=1," +
+			"h264_i_frame_period=50,video_gop_size=50,video_b_frames=0,repeat_sequence_header=1",
+	}
+	if !reflect.DeepEqual(encoder.parts, wantParts) {
+		t.Fatalf("V4L2 pipeline = %v, want %v", encoder.parts, wantParts)
+	}
+	wantAfter := gstStage{"video/x-h264,level=(string)4"}
+	if !reflect.DeepEqual(encoder.afterEncoder, wantAfter) {
+		t.Fatalf("V4L2 afterEncoder = %v, want %v", encoder.afterEncoder, wantAfter)
+	}
+}
+
 func TestDetectGstEncoderRejectsMissingExplicitOpenH264(t *testing.T) {
 	var probes []string
 	_, err := detectGstEncoderWithProbe(CaptureConfig{
@@ -714,7 +751,7 @@ func TestDetectGstEncoderRejectsMissingExplicitOpenH264(t *testing.T) {
 }
 
 func TestDetectGstEncoderSelectionContract(t *testing.T) {
-	allProbes := []string{"vulkanh264enc", "nvh264enc", "vah264enc", "openh264enc", "x264enc"}
+	allProbes := []string{"vulkanh264enc", "nvh264enc", "vah264enc", "v4l2h264enc", "openh264enc", "x264enc"}
 	tests := []struct {
 		name        string
 		method      string
@@ -728,6 +765,13 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			method:      "auto",
 			available:   map[string]bool{"openh264enc": true, "x264enc": true},
 			wantEncoder: "openh264enc",
+			wantProbes:  allProbes[:5],
+		},
+		{
+			name:        "auto prefers V4L2 over software",
+			method:      "auto",
+			available:   map[string]bool{"v4l2h264enc": true, "openh264enc": true, "x264enc": true},
+			wantEncoder: "v4l2h264enc",
 			wantProbes:  allProbes[:4],
 		},
 		{
@@ -769,6 +813,20 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			available:  map[string]bool{"openh264enc": true, "x264enc": true},
 			wantProbes: []string{"vah264enc"},
 			wantError:  "vah264enc",
+		},
+		{
+			name:        "v4l2 selects only V4L2",
+			method:      "v4l2",
+			available:   map[string]bool{"v4l2h264enc": true, "openh264enc": true},
+			wantEncoder: "v4l2h264enc",
+			wantProbes:  []string{"v4l2h264enc"},
+		},
+		{
+			name:       "missing v4l2 does not cross fallback",
+			method:     "v4l2",
+			available:  map[string]bool{"openh264enc": true, "x264enc": true},
+			wantProbes: []string{"v4l2h264enc"},
+			wantError:  "v4l2h264enc",
 		},
 		{
 			name:        "none forces x264",

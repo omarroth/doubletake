@@ -45,10 +45,10 @@ type CaptureConfig struct {
 // zero-value CaptureConfig useful and is treated as auto.
 func ValidateHWAccel(method string) error {
 	switch method {
-	case "", "auto", "nvenc", "vaapi", "openh264", "none":
+	case "", "auto", "nvenc", "vaapi", "v4l2", "openh264", "none":
 		return nil
 	default:
-		return fmt.Errorf("unknown encoder %q (want auto, nvenc, vaapi, openh264, or none)", method)
+		return fmt.Errorf("unknown encoder %q (want auto, nvenc, vaapi, v4l2, openh264, or none)", method)
 	}
 }
 
@@ -708,10 +708,11 @@ type gstStage []string
 
 // encoderResult holds the selected encoder stage and its input requirements.
 type encoderResult struct {
-	parts       gstStage
-	needsVulkan bool   // encoder needs vulkanupload immediately before it
-	rawFormat   string // system-memory format produced by videoconvert
-	codec       VideoCodec
+	parts        gstStage
+	afterEncoder gstStage // optional caps stage placed between the encoder and the parser
+	needsVulkan  bool     // encoder needs vulkanupload immediately before it
+	rawFormat    string   // system-memory format produced by videoconvert
+	codec        VideoCodec
 }
 
 func frameRateStage(fps int) gstStage {
@@ -805,6 +806,9 @@ func buildGstVideoPipeline(source gstStage, beforeConvert, afterScale []gstStage
 		args = appendGstStage(args, gstStage{"vulkanupload"})
 	}
 	args = appendGstStage(args, encoder.parts)
+	if len(encoder.afterEncoder) > 0 {
+		args = appendGstStage(args, encoder.afterEncoder)
+	}
 	parser, mediaType, payloader := "h264parse", "video/x-h264", "rtph264pay"
 	if encoder.codec == VideoCodecHEVC {
 		parser, mediaType, payloader = "h265parse", "video/x-h265", "rtph265pay"
@@ -1239,6 +1243,22 @@ func selectGstEncoderWithProbe(cfg CaptureConfig, hasElement func(string) bool, 
 				"b-frames=0",
 				"rate-control=cbr",
 			}},
+		},
+		{
+			method:  "v4l2",
+			element: "v4l2h264enc",
+			label:   "V4L2 hardware encoding (v4l2h264enc)",
+			result: encoderResult{rawFormat: "NV12", codec: VideoCodecH264, parts: []string{
+				"v4l2h264enc",
+				// V4L2 encoder tuning goes through extra-controls; unsupported
+				// controls are skipped with a warning, not a failure.
+				fmt.Sprintf("extra-controls=controls,video_bitrate=%d,video_bitrate_mode=1,h264_i_frame_period=%d,video_gop_size=%d,video_b_frames=0,repeat_sequence_header=1",
+					bitrate*1000, keyframeInterval, keyframeInterval),
+			},
+				// Some drivers (bcm2835 on Raspberry Pi) fail STREAMON unless
+				// negotiation fixes the H.264 level; level is signaling only.
+				afterEncoder: gstStage{"video/x-h264,level=(string)4"},
+			},
 		},
 		{
 			method:  "openh264",

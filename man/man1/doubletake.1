@@ -17,7 +17,7 @@ FairPlay SAP authentication
 .IP \(bu 2
 SRP-6a pairing with PIN and persistent credential storage
 .IP \(bu 2
-H.264 encoding with NVENC, VA-API, OpenH264, and x264
+H.264 encoding with NVENC, VA-API, V4L2 stateful encoders, OpenH264, and x264
 .IP \(bu 2
 Capability-gated HEVC Main10/high-resolution encoding with NVENC or x265
 .IP \(bu 2
@@ -80,7 +80,8 @@ Disable audio for video-only mirroring
 .TP
 .B \-hwaccel \fIMETHOD\fR
 Encoder preference: \fBauto\fR, \fBnvenc\fR (NVIDIA), \fBvaapi\fR
-(Intel/AMD), \fBopenh264\fR (software), or \fBnone\fR (x264, or x265 for
+(Intel/AMD), \fBv4l2\fR (stateful V4L2 encoders, common on ARM SoCs),
+\fBopenh264\fR (software), or \fBnone\fR (x264, or x265 for
 forced HEVC).
 Only \fBauto\fR tries fallback encoders. An explicit method fails if its
 required GStreamer encoder is unavailable. The default is \fBauto\fR.
