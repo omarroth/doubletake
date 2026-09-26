@@ -17,7 +17,7 @@ FairPlay SAP authentication
 .IP \(bu 2
 SRP-6a pairing with PIN and persistent credential storage
 .IP \(bu 2
-H.264 encoding with NVENC, VA-API, OpenH264, and x264
+H.264 encoding with NVENC, VA-API, V4L2 stateful encoders, OpenH264, and x264
 .IP \(bu 2
 Capability-gated HEVC Main10/high-resolution encoding with NVENC or x265
 .IP \(bu 2
@@ -80,10 +80,35 @@ Disable audio for video-only mirroring
 .TP
 .B \-hwaccel \fIMETHOD\fR
 Encoder preference: \fBauto\fR, \fBnvenc\fR (NVIDIA), \fBvaapi\fR
-(Intel/AMD), \fBopenh264\fR (software), or \fBnone\fR (x264, or x265 for
+(Intel/AMD), \fBv4l2\fR (stateful V4L2 encoders, common on ARM SoCs),
+\fBopenh264\fR (software), or \fBnone\fR (x264, or x265 for
 forced HEVC).
 Only \fBauto\fR tries fallback encoders. An explicit method fails if its
 required GStreamer encoder is unavailable. The default is \fBauto\fR.
+.IP
+A V4L2 driver that does not implement \fBVIDIOC_G_PARM\fR leaves GStreamer
+without a frame interval to probe, and the encoder then advertises one fixed
+framerate instead of the range the hardware accepts. The V4L2 pipeline adapts
+the capture rate immediately before the encoder so the requested
+.B \-fps
+still negotiates.
+.TP
+.B \-pipewire-node \fINODE\fR
+Capture an already-published PipeWire video node instead of requesting one from
+the screencast portal. \fINODE\fR is a node name, or a numeric node ID. This is
+needed on sessions whose compositor publishes its output directly but offers no
+\fBorg.freedesktop.portal.ScreenCast\fR implementation, such as gamescope on
+SteamOS; list candidates with \fBpw-dump\fR. A name survives the renumbering
+that makes a saved ID unusable. Because the node identifies the source on its
+own, this works with neither \fB$WAYLAND_DISPLAY\fR nor \fB$DISPLAY\fR set.
+.TP
+.B \-v4l2-device \fIDEVICE\fR
+Capture a V4L2 node directly, such as \fB/dev/video0\fR. This covers sources that
+publish video outside any display server: capture cards, loopback devices and
+virtual cameras, including the SteamVR headset view exported by a Steam Frame.
+Like \fB\-pipewire-node\fR it needs neither \fB$WAYLAND_DISPLAY\fR nor
+\fB$DISPLAY\fR. A device that cannot be opened is reported at startup rather
+than becoming a blank stream. Only one capture source may be given at a time.
 .TP
 .B \-video-codec \fICODEC\fR
 Screen codec: capability-driven \fBauto\fR (default), forced \fBh264\fR, or

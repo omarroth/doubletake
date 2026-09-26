@@ -86,22 +86,24 @@ type DeviceInfo struct {
 
 // Config holds daemon configuration.
 type Config struct {
-	SocketPath  string
-	CredFile    string
-	CredBackend string
-	FPS         int
-	Bitrate     int
-	PortMin     int // inclusive local UDP port bound; zero with PortMax means ephemeral
-	PortMax     int // inclusive local UDP port bound; zero with PortMin means ephemeral
-	HWAccel     string
-	VideoCodec  airplay.VideoCodec
-	Debug       bool
-	TestMode    bool
-	NoEncrypt   bool
-	DirectKey   bool
-	NoAudio     bool
-	ShowCursor  bool
-	Code        string // default pairing/Digest credential; request Pin overrides it
+	SocketPath   string
+	CredFile     string
+	CredBackend  string
+	FPS          int
+	Bitrate      int
+	PortMin      int // inclusive local UDP port bound; zero with PortMax means ephemeral
+	PortMax      int // inclusive local UDP port bound; zero with PortMin means ephemeral
+	HWAccel      string
+	VideoCodec   airplay.VideoCodec
+	Debug        bool
+	TestMode     bool
+	NoEncrypt    bool
+	DirectKey    bool
+	NoAudio      bool
+	ShowCursor   bool
+	PipeWireNode string
+	V4L2Device   string
+	Code         string // default pairing/Digest credential; request Pin overrides it
 }
 
 func (d *Daemon) mirrorStreamConfig() airplay.StreamConfig {
@@ -1312,6 +1314,8 @@ func (d *Daemon) prepareVideoCapture(ctx context.Context, restoreToken, deviceID
 		HWAccel:      d.cfg.HWAccel,
 		VideoCodec:   d.cfg.VideoCodec,
 		ShowCursor:   d.cfg.ShowCursor,
+		PipeWireNode: d.cfg.PipeWireNode,
+		V4L2Device:   d.cfg.V4L2Device,
 		RestoreToken: restoreToken,
 	}
 	if deviceID != "" {
@@ -1475,6 +1479,8 @@ func (d *Daemon) getOrStartCaptureGroup(entry *activeStream, restoreToken, devic
 		MaxWidth:     key.maxWidth,
 		MaxHeight:    key.maxHeight,
 		ShowCursor:   d.cfg.ShowCursor,
+		PipeWireNode: d.cfg.PipeWireNode,
+		V4L2Device:   d.cfg.V4L2Device,
 		RestoreToken: restoreToken,
 	}
 	if deviceID != "" {

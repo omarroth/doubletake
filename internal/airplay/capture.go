@@ -23,7 +23,7 @@ import (
 type CaptureConfig struct {
 	FPS        int
 	Bitrate    int        // Video bitrate in kbps (0 = auto)
-	HWAccel    string     // "auto", "nvenc", "vaapi", "openh264", or "none"
+	HWAccel    string     // "auto", "nvenc", "vaapi", "v4l2", "openh264", or "none"
 	VideoCodec VideoCodec // empty/h264, auto (resolved before Start), or hevc
 
 	// MaxWidth/MaxHeight select the encoded canvas advertised by the receiver.
@@ -35,6 +35,18 @@ type CaptureConfig struct {
 	X11WindowID   uint64
 	X11WindowName string
 
+	// PipeWireNode captures an already-published PipeWire video node instead of
+	// asking the screencast portal for one. A numeric value selects a node ID, any
+	// other value selects a node name. Compositors that publish their output
+	// directly (gamescope on SteamOS) need this because their session offers no
+	// org.freedesktop.portal.ScreenCast implementation.
+	PipeWireNode string
+
+	// V4L2Device captures a V4L2 node directly, for sources that publish video
+	// outside any display server: capture cards, loopback devices, and virtual
+	// cameras such as the SteamVR headset view on a Steam Frame.
+	V4L2Device string
+
 	ShowCursor bool // show the mouse cursor in the captured video (Wayland and X11)
 
 	RestoreToken     string
@@ -45,10 +57,10 @@ type CaptureConfig struct {
 // zero-value CaptureConfig useful and is treated as auto.
 func ValidateHWAccel(method string) error {
 	switch method {
-	case "", "auto", "nvenc", "vaapi", "openh264", "none":
+	case "", "auto", "nvenc", "vaapi", "v4l2", "openh264", "none":
 		return nil
 	default:
-		return fmt.Errorf("unknown encoder %q (want auto, nvenc, vaapi, openh264, or none)", method)
+		return fmt.Errorf("unknown encoder %q (want auto, nvenc, vaapi, v4l2, openh264, or none)", method)
 	}
 }
 
@@ -81,6 +93,8 @@ type capturePreparationKind uint8
 const (
 	capturePreparationX11 capturePreparationKind = iota
 	capturePreparationWayland
+	capturePreparationPipeWire
+	capturePreparationV4L2
 	capturePreparationTest
 )
 
@@ -140,8 +154,32 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := ValidateHWAccel(cfg.HWAccel); err != nil {
 		return nil, err
 	}
+	// Each explicit source names a different device. Picking one silently would
+	// stream something the caller did not ask for, so refuse the ambiguity.
+	var requested []string
+	if cfg.V4L2Device != "" {
+		requested = append(requested, "-v4l2-device")
+	}
+	if cfg.PipeWireNode != "" {
+		requested = append(requested, "-pipewire-node")
+	}
+	if cfg.X11WindowID != 0 || cfg.X11WindowName != "" {
+		requested = append(requested, "-x11-window-id/-x11-window-name")
+	}
+	if len(requested) > 1 {
+		return nil, fmt.Errorf("conflicting capture sources requested (%s); pick one", strings.Join(requested, ", "))
+	}
+
 	kind := capturePreparationX11
-	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
+	if cfg.V4L2Device != "" {
+		// The device node identifies the source on its own, so like the named
+		// PipeWire path this deliberately needs no display server.
+		kind = capturePreparationV4L2
+	} else if cfg.PipeWireNode != "" {
+		// An explicitly named node identifies the source on its own, so this path
+		// deliberately does not require a display server in the environment.
+		kind = capturePreparationPipeWire
+	} else if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
 		kind = capturePreparationX11
 	} else if os.Getenv("WAYLAND_DISPLAY") != "" {
 		kind = capturePreparationWayland
@@ -188,8 +226,24 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		return preparation, nil
 	}
 
+	if kind == capturePreparationV4L2 {
+		if err := exec.Command("gst-inspect-1.0", "v4l2src").Run(); err != nil {
+			return nil, fmt.Errorf("GStreamer 'v4l2src' plugin not found; install gst-plugins-good")
+		}
+		if err := validateV4L2Device(cfg.V4L2Device); err != nil {
+			return nil, err
+		}
+		return preparation, nil
+	}
+
 	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
 		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
+	}
+
+	if kind == capturePreparationPipeWire {
+		// The node is already published, so there is no portal session to acquire
+		// and nothing interactive to complete before the receiver session starts.
+		return preparation, nil
 	}
 	nodeID, pwFd, dbusConn, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
 	if err != nil {
@@ -355,10 +409,12 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 	}
 
 	switch kind {
-	case capturePreparationWayland:
-		return startPreparedWaylandCapture(ctx, cfg, encoder, nodeID, pwFd, dbusConn, streamSize, timestampedOutput)
+	case capturePreparationWayland, capturePreparationPipeWire:
+		return startPreparedPipeWireCapture(ctx, cfg, encoder, nodeID, pwFd, dbusConn, streamSize, timestampedOutput)
 	case capturePreparationX11:
 		return startPreparedX11Capture(ctx, cfg, encoder, timestampedOutput)
+	case capturePreparationV4L2:
+		return startPreparedV4L2Capture(ctx, cfg, encoder, timestampedOutput)
 	case capturePreparationTest:
 		return startPreparedTestCapture(ctx, cfg, encoder, timestampedOutput)
 	default:
@@ -708,10 +764,12 @@ type gstStage []string
 
 // encoderResult holds the selected encoder stage and its input requirements.
 type encoderResult struct {
-	parts       gstStage
-	needsVulkan bool   // encoder needs vulkanupload immediately before it
-	rawFormat   string // system-memory format produced by videoconvert
-	codec       VideoCodec
+	parts         gstStage
+	beforeEncoder gstStage // optional stage placed immediately before the encoder
+	afterEncoder  gstStage // optional caps stage placed between the encoder and the parser
+	needsVulkan   bool     // encoder needs vulkanupload immediately before it
+	rawFormat     string   // system-memory format produced by videoconvert
+	codec         VideoCodec
 }
 
 func frameRateStage(fps int) gstStage {
@@ -726,10 +784,51 @@ func frameIntervalMillis(fps int) int {
 }
 
 func pipeWireVideoSourceStage(fd int, nodeID uint32, fps int) gstStage {
-	return gstStage{
+	return append(gstStage{
 		"pipewiresrc",
 		fmt.Sprintf("fd=%d", fd),
 		fmt.Sprintf("path=%d", nodeID),
+	}, pipeWireSourceTuningStage(fps)...)
+}
+
+// pipeWireNodeSourceStage connects to an already-published node rather than a
+// portal-provided one, so it carries no inherited fd. A numeric target is a node
+// ID; anything else is a node name, which survives the restarts and
+// renumbering that make an ID unusable in a saved command line.
+func pipeWireNodeSourceStage(node string, fps int) gstStage {
+	selector := fmt.Sprintf("target-object=%s", node)
+	if _, err := strconv.ParseUint(node, 10, 32); err == nil {
+		// target-object matches a name or a serial, never a node ID, so an ID has
+		// to go through path even though pipewiresrc marks it deprecated.
+		selector = fmt.Sprintf("path=%s", node)
+	}
+	return append(gstStage{"pipewiresrc", selector}, pipeWireSourceTuningStage(fps)...)
+}
+
+// validateV4L2Device fails fast on a node that cannot be read. Without it a
+// missing or busy device surfaces as a stalled or blank stream instead of a
+// startup error.
+func validateV4L2Device(device string) error {
+	probe, err := os.Open(device)
+	if err != nil {
+		return fmt.Errorf("capture device %s is not readable: %w", device, err)
+	}
+	probe.Close()
+	return nil
+}
+
+// v4l2VideoSourceStage reads a V4L2 node directly. The device negotiates its own
+// format and rate, so nothing is pinned here beyond timestamping.
+func v4l2VideoSourceStage(device string) gstStage {
+	return gstStage{
+		"v4l2src",
+		fmt.Sprintf("device=%s", device),
+		"do-timestamp=true",
+	}
+}
+
+func pipeWireSourceTuningStage(fps int) gstStage {
+	return gstStage{
 		"do-timestamp=true",
 		fmt.Sprintf("keepalive-time=%d", frameIntervalMillis(fps)),
 		// The compositor and pipewiresrc's keepalive path both retain the latest
@@ -750,6 +849,58 @@ func lowLatencyVideoQueueStage() gstStage {
 		"max-size-time=0",
 		"leaky=downstream",
 	}
+}
+
+// gstProcessOptions describes a capture process for startGstCaptureProcess.
+type gstProcessOptions struct {
+	label      string // capture path, for the debug line
+	codec      VideoCodec
+	timestamps bool
+}
+
+// startGstCaptureProcess launches a built pipeline and wraps it in a
+// ScreenCapture. The X11, V4L2 and test paths share it, none of which owns
+// resources beyond the child process. The portal path still runs its own copy
+// because its inherited fd and D-Bus lifetime deserve a separate change.
+func startGstCaptureProcess(ctx context.Context, gstArgs []string, opts gstProcessOptions) (*ScreenCapture, error) {
+	captureCtx, cancel := context.WithCancel(ctx)
+
+	dbg("[CAPTURE] gst-launch-1.0 (%s) %s", opts.label, strings.Join(gstArgs, " "))
+	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("gst stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("gst stderr pipe: %w", err)
+	}
+
+	waitResult, err := startGStreamerCommand(cmd)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("start gst-launch: %w", err)
+	}
+
+	go logStderr("GST", stderr)
+
+	capture := &ScreenCapture{
+		cmd:    cmd,
+		stdout: stdout,
+		cancel: cancel,
+		waitCh: make(chan struct{}),
+	}
+	if opts.timestamps {
+		capture.frames = newRTPVideoAccessUnitReader(stdout, opts.codec)
+	}
+	go func() {
+		capture.waitErr = <-waitResult
+		close(capture.waitCh)
+	}()
+	return capture, nil
 }
 
 func appendGstStage(args []string, stage gstStage) []string {
@@ -801,10 +952,16 @@ func buildGstVideoPipeline(source gstStage, beforeConvert, afterScale []gstStage
 	for _, stage := range afterScale {
 		args = appendGstStage(args, stage)
 	}
+	if len(encoder.beforeEncoder) > 0 {
+		args = appendGstStage(args, encoder.beforeEncoder)
+	}
 	if encoder.needsVulkan {
 		args = appendGstStage(args, gstStage{"vulkanupload"})
 	}
 	args = appendGstStage(args, encoder.parts)
+	if len(encoder.afterEncoder) > 0 {
+		args = appendGstStage(args, encoder.afterEncoder)
+	}
 	parser, mediaType, payloader := "h264parse", "video/x-h264", "rtph264pay"
 	if encoder.codec == VideoCodecHEVC {
 		parser, mediaType, payloader = "h265parse", "video/x-h265", "rtph265pay"
@@ -827,8 +984,11 @@ func buildGstVideoPipeline(source gstStage, beforeConvert, afterScale []gstStage
 	return appendGstStage(args, gstStage{"fdsink", "fd=1", "sync=false", "async=false"})
 }
 
-func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoderParts encoderResult, nodeID uint32, pwFd *os.File, dbusConn *dbus.Conn, streamSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
-	if pwFd == nil || dbusConn == nil {
+// startPreparedPipeWireCapture serves both PipeWire sources: a portal session,
+// which arrives with an inherited fd and a D-Bus connection that must outlive
+// the pipeline, and an explicitly named node, which has neither.
+func startPreparedPipeWireCapture(ctx context.Context, cfg CaptureConfig, encoderParts encoderResult, nodeID uint32, pwFd *os.File, dbusConn *dbus.Conn, streamSize [2]int, timestampedOutput bool) (*ScreenCapture, error) {
+	if cfg.PipeWireNode == "" && (pwFd == nil || dbusConn == nil) {
 		if pwFd != nil {
 			_ = pwFd.Close()
 		}
@@ -854,6 +1014,10 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 	// when available. The actual result is read back from the codec SPS downstream.
 	const pwFdNum = 3
 	source := pipeWireVideoSourceStage(pwFdNum, nodeID, fps)
+	if cfg.PipeWireNode != "" {
+		source = pipeWireNodeSourceStage(cfg.PipeWireNode, fps)
+		dbg("[CAPTURE] capturing PipeWire node %q", cfg.PipeWireNode)
+	}
 
 	hasCompositor := streamSize[0] > 0 && streamSize[1] > 0 && hasGstElement("compositor")
 
@@ -886,13 +1050,23 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 
 	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
 	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
-	cmd.ExtraFiles = []*os.File{pwFd}
+	if pwFd != nil {
+		cmd.ExtraFiles = []*os.File{pwFd}
+	}
+
+	releasePortal := func() {
+		if pwFd != nil {
+			pwFd.Close()
+		}
+		if dbusConn != nil {
+			dbusConn.Close()
+		}
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
-		pwFd.Close()
-		dbusConn.Close()
+		releasePortal()
 		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
 	stderr, _ := cmd.StderrPipe()
@@ -900,11 +1074,12 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 	waitResult, err := startGStreamerCommand(cmd)
 	if err != nil {
 		cancel()
-		pwFd.Close()
-		dbusConn.Close()
+		releasePortal()
 		return nil, fmt.Errorf("start gst-launch: %w", err)
 	}
-	pwFd.Close() // child inherited it
+	if pwFd != nil {
+		pwFd.Close() // child inherited it
+	}
 
 	go logStderr("GST", stderr)
 
@@ -928,8 +1103,6 @@ func startPreparedWaylandCapture(ctx context.Context, cfg CaptureConfig, encoder
 }
 
 func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder encoderResult, timestampedOutput bool) (*ScreenCapture, error) {
-	captureCtx, cancel := context.WithCancel(ctx)
-
 	fps := cfg.FPS
 	if fps <= 0 {
 		fps = 30
@@ -970,39 +1143,39 @@ func startPreparedX11Capture(ctx context.Context, cfg CaptureConfig, encoder enc
 	beforeConvert := []gstStage{frameRateStage(fps), lowLatencyVideoQueueStage()}
 	gstArgs := buildGstVideoPipeline(ximageSrcArgs, beforeConvert, nil, encoder, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
-	dbg("[CAPTURE] gst-launch-1.0 (x11) %s", strings.Join(gstArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
+	return startGstCaptureProcess(ctx, gstArgs, gstProcessOptions{
+		label:      "x11",
+		codec:      encoder.codec,
+		timestamps: timestampedOutput,
+	})
+}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("gst stdout pipe: %w", err)
+// startPreparedV4L2Capture reads a V4L2 node directly. There is no portal
+// session and no display server involved, so it owns no external resources
+// beyond the child process.
+func startPreparedV4L2Capture(ctx context.Context, cfg CaptureConfig, encoder encoderResult, timestampedOutput bool) (*ScreenCapture, error) {
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
 	}
-	stderr, _ := cmd.StderrPipe()
 
-	waitResult, err := startGStreamerCommand(cmd)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("start gst-launch: %w", err)
+	dbg("[CAPTURE] capturing V4L2 device %s", cfg.V4L2Device)
+	source := v4l2VideoSourceStage(cfg.V4L2Device)
+	// The device paces its own frames; videorate covers a source that pauses or
+	// runs slower than the receiver expects, matching the PipeWire node path.
+	afterScale := []gstStage{
+		gstStage{"videorate", "drop-only=true", "skip-to-first=true"},
+		frameRateStage(fps),
+		lowLatencyVideoQueueStage(),
 	}
+	gstArgs := buildGstVideoPipeline(source, nil, afterScale,
+		encoder, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
-	go logStderr("GST", stderr)
-
-	capture := &ScreenCapture{
-		cmd:    cmd,
-		stdout: stdout,
-		cancel: cancel,
-		waitCh: make(chan struct{}),
-	}
-	if timestampedOutput {
-		capture.frames = newRTPVideoAccessUnitReader(stdout, encoder.codec)
-	}
-	go func() {
-		capture.waitErr = <-waitResult
-		close(capture.waitCh)
-	}()
-
-	return capture, nil
+	return startGstCaptureProcess(ctx, gstArgs, gstProcessOptions{
+		label:      "v4l2",
+		codec:      encoder.codec,
+		timestamps: timestampedOutput,
+	})
 }
 
 func (sc *ScreenCapture) Read(buf []byte) (int, error) {
@@ -1241,6 +1414,30 @@ func selectGstEncoderWithProbe(cfg CaptureConfig, hasElement func(string) bool, 
 			}},
 		},
 		{
+			method:  "v4l2",
+			element: "v4l2h264enc",
+			label:   "V4L2 hardware encoding (v4l2h264enc)",
+			result: encoderResult{rawFormat: "NV12", codec: VideoCodecH264, parts: []string{
+				"v4l2h264enc",
+				// V4L2 encoder tuning goes through extra-controls; unsupported
+				// controls are skipped with a warning, not a failure.
+				fmt.Sprintf("extra-controls=controls,video_bitrate=%d,video_bitrate_mode=1,h264_i_frame_period=%d,video_gop_size=%d,video_b_frames=0,repeat_sequence_header=1",
+					bitrate*1000, keyframeInterval, keyframeInterval),
+			},
+				// A driver that does not implement VIDIOC_G_PARM leaves GStreamer
+				// without a frame interval to probe, and it then advertises a fixed
+				// framerate on the encoder's sink pad instead of the open range the
+				// hardware accepts. qcom-iris reports {29/1, 912261120/31457309},
+				// which no other rate can intersect, so an upstream framerate caps
+				// filter fails negotiation outright. videorate adapts to whatever
+				// the driver insists on and is a passthrough when the rate matches.
+				beforeEncoder: gstStage{"videorate"},
+				// Some drivers (bcm2835 on Raspberry Pi) fail STREAMON unless
+				// negotiation fixes the H.264 level; level is signaling only.
+				afterEncoder: gstStage{"video/x-h264,level=(string)4"},
+			},
+		},
+		{
 			method:  "openh264",
 			element: "openh264enc",
 			label:   "OpenH264 software encoding (openh264enc)",
@@ -1355,8 +1552,6 @@ func StartTestCapture(ctx context.Context, cfg CaptureConfig) (*ScreenCapture, e
 }
 
 func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder encoderResult, timestampedOutput bool) (*ScreenCapture, error) {
-	captureCtx, cancel := context.WithCancel(ctx)
-
 	fps := cfg.FPS
 	if fps <= 0 {
 		fps = 30
@@ -1377,43 +1572,11 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 	// raw backlog.
 	gstArgs := buildGstVideoPipeline(source, beforeConvert, nil, encoder, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
-	dbg("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(gstArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("gst stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("gst stderr pipe: %w", err)
-	}
-
-	waitResult, err := startGStreamerCommand(cmd)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("start gst-launch-1.0: %w", err)
-	}
-
-	go logStderr("GST", stderr)
-
-	capture := &ScreenCapture{
-		cmd:    cmd,
-		stdout: stdout,
-		cancel: cancel,
-		waitCh: make(chan struct{}),
-	}
-	if timestampedOutput {
-		capture.frames = newRTPVideoAccessUnitReader(stdout, encoder.codec)
-	}
-	go func() {
-		capture.waitErr = <-waitResult
-		close(capture.waitCh)
-	}()
-
-	return capture, nil
+	return startGstCaptureProcess(ctx, gstArgs, gstProcessOptions{
+		label:      "test mode",
+		codec:      encoder.codec,
+		timestamps: timestampedOutput,
+	})
 }
 
 func logStderr(prefix string, r io.Reader) {

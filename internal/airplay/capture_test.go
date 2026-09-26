@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
@@ -239,7 +240,7 @@ func TestStartGStreamerCommandSetsParentDeathSignal(t *testing.T) {
 }
 
 func TestValidateHWAccel(t *testing.T) {
-	for _, method := range []string{"", "auto", "nvenc", "vaapi", "openh264", "none"} {
+	for _, method := range []string{"", "auto", "nvenc", "vaapi", "v4l2", "openh264", "none"} {
 		if err := ValidateHWAccel(method); err != nil {
 			t.Errorf("ValidateHWAccel(%q): %v", method, err)
 		}
@@ -373,6 +374,112 @@ func TestPipeWireVideoSourceCopiesPortalBuffers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("PipeWire source stage = %v, want %v", got, want)
+	}
+}
+
+func TestPipeWireNodeSourceTargetsNameOrID(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		node string
+		want string
+	}{
+		// target-object resolves a name or a serial, never a node ID.
+		{name: "name", node: "gamescope", want: "target-object=gamescope"},
+		{name: "numeric id", node: "39", want: "path=39"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := pipeWireNodeSourceStage(tt.node, 30)
+			want := gstStage{
+				"pipewiresrc",
+				tt.want,
+				"do-timestamp=true",
+				"keepalive-time=33",
+				"always-copy=true",
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("PipeWire node source stage = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// A named node identifies its source without a portal, so preparation must not
+// require a display server in the environment.
+func TestPipeWireNodeCaptureNeedsNoDisplayServer(t *testing.T) {
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", "")
+
+	_, err := PrepareCapture(context.Background(), CaptureConfig{
+		FPS:          30,
+		HWAccel:      "none",
+		VideoCodec:   VideoCodecH264,
+		PipeWireNode: "gamescope",
+	})
+	if err != nil && strings.Contains(err.Error(), "no display server detected") {
+		t.Fatalf("named PipeWire node still required a display server: %v", err)
+	}
+}
+
+func TestV4L2VideoSourceStage(t *testing.T) {
+	got := v4l2VideoSourceStage("/dev/video99")
+	want := gstStage{"v4l2src", "device=/dev/video99", "do-timestamp=true"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("V4L2 source stage = %v, want %v", got, want)
+	}
+}
+
+// A device node identifies its source, so this path must not demand a display
+// server any more than the named PipeWire node does.
+func TestV4L2CaptureNeedsNoDisplayServer(t *testing.T) {
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", "")
+
+	_, err := PrepareCapture(context.Background(), CaptureConfig{
+		FPS:        30,
+		HWAccel:    "none",
+		VideoCodec: VideoCodecH264,
+		V4L2Device: "/dev/video-doubletake-missing",
+	})
+	if err != nil && strings.Contains(err.Error(), "no display server detected") {
+		t.Fatalf("V4L2 capture still required a display server: %v", err)
+	}
+}
+
+// A source that cannot be opened must fail at startup rather than turning into
+// a silently blank stream.
+func TestValidateV4L2DeviceRejectsUnreadable(t *testing.T) {
+	err := validateV4L2Device("/dev/video-doubletake-missing")
+	if err == nil {
+		t.Fatal("validateV4L2Device accepted a missing capture device")
+	}
+	if !strings.Contains(err.Error(), "/dev/video-doubletake-missing") {
+		t.Fatalf("error %q does not name the offending device", err)
+	}
+
+	readable := filepath.Join(t.TempDir(), "node")
+	if writeErr := os.WriteFile(readable, nil, 0o600); writeErr != nil {
+		t.Fatalf("seed readable node: %v", writeErr)
+	}
+	if err := validateV4L2Device(readable); err != nil {
+		t.Fatalf("validateV4L2Device(%q) = %v, want nil", readable, err)
+	}
+}
+
+// Two explicit sources name different devices; silently preferring one would
+// stream something the caller did not ask for.
+func TestCaptureRejectsConflictingSources(t *testing.T) {
+	_, err := PrepareCapture(context.Background(), CaptureConfig{
+		FPS:          30,
+		HWAccel:      "none",
+		VideoCodec:   VideoCodecH264,
+		V4L2Device:   "/dev/video99",
+		PipeWireNode: "gamescope",
+	})
+	if err == nil {
+		t.Fatal("PrepareCapture accepted both -v4l2-device and -pipewire-node")
+	}
+	if !strings.Contains(err.Error(), "conflicting capture sources") {
+		t.Fatalf("error %q does not report the conflict", err)
 	}
 }
 
@@ -597,6 +704,15 @@ func TestBuildGstVideoPipelineSharesReceiverScaling(t *testing.T) {
 			720,
 			false,
 		),
+		"V4L2": buildGstVideoPipeline(
+			v4l2VideoSourceStage("/dev/video99"),
+			nil,
+			[]gstStage{{"videorate", "drop-only=true"}, frameRateStage(30), lowLatencyVideoQueueStage()},
+			encoder,
+			1280,
+			720,
+			false,
+		),
 		"test": buildGstVideoPipeline(
 			gstStage{"videotestsrc", "is-live=true"},
 			[]gstStage{{"video/x-raw,width=1920,height=1080"}},
@@ -691,6 +807,82 @@ func TestDetectGstEncoderSelectsExplicitOpenH264(t *testing.T) {
 	}
 }
 
+func TestDetectGstEncoderSelectsExplicitV4L2(t *testing.T) {
+	var probes []string
+	encoder, err := detectGstEncoderWithProbe(CaptureConfig{
+		FPS:     25,
+		Bitrate: 2500,
+		HWAccel: "v4l2",
+	}, func(name string) bool {
+		probes = append(probes, name)
+		return name == "v4l2h264enc"
+	})
+	if err != nil {
+		t.Fatalf("detectGstEncoderWithProbe: %v", err)
+	}
+
+	if !reflect.DeepEqual(probes, []string{"v4l2h264enc"}) {
+		t.Fatalf("encoder probes = %v, want only v4l2h264enc", probes)
+	}
+	if encoder.rawFormat != "NV12" {
+		t.Fatalf("V4L2 raw format = %q, want NV12", encoder.rawFormat)
+	}
+	if encoder.needsVulkan {
+		t.Fatal("V4L2 unexpectedly requires Vulkan upload")
+	}
+	wantParts := gstStage{
+		"v4l2h264enc",
+		"extra-controls=controls,video_bitrate=2500000,video_bitrate_mode=1," +
+			"h264_i_frame_period=50,video_gop_size=50,video_b_frames=0,repeat_sequence_header=1",
+	}
+	if !reflect.DeepEqual(encoder.parts, wantParts) {
+		t.Fatalf("V4L2 pipeline = %v, want %v", encoder.parts, wantParts)
+	}
+	wantAfter := gstStage{"video/x-h264,level=(string)4"}
+	if !reflect.DeepEqual(encoder.afterEncoder, wantAfter) {
+		t.Fatalf("V4L2 afterEncoder = %v, want %v", encoder.afterEncoder, wantAfter)
+	}
+	wantBefore := gstStage{"videorate"}
+	if !reflect.DeepEqual(encoder.beforeEncoder, wantBefore) {
+		t.Fatalf("V4L2 beforeEncoder = %v, want %v", encoder.beforeEncoder, wantBefore)
+	}
+}
+
+// A driver that does not implement VIDIOC_G_PARM makes GStreamer advertise a
+// single fixed framerate on the encoder's sink pad, so the requested rate must
+// reach videorate rather than the encoder itself.
+func TestV4L2PipelineAdaptsFrameRateBeforeEncoder(t *testing.T) {
+	encoder, err := detectGstEncoderWithProbe(CaptureConfig{
+		FPS:     30,
+		Bitrate: 2500,
+		HWAccel: "v4l2",
+	}, func(name string) bool { return name == "v4l2h264enc" })
+	if err != nil {
+		t.Fatalf("detectGstEncoderWithProbe: %v", err)
+	}
+
+	args := buildGstVideoPipeline(gstStage{"videotestsrc"}, []gstStage{frameRateStage(30)}, nil, encoder, 0, 0, false)
+
+	rate := indexOfStage(args, "videorate")
+	caps := indexOfStage(args, "video/x-raw,framerate=30/1")
+	enc := indexOfStage(args, "v4l2h264enc")
+	if rate < 0 || caps < 0 || enc < 0 {
+		t.Fatalf("pipeline missing expected stages: %v", args)
+	}
+	if !(caps < rate && rate < enc) {
+		t.Fatalf("want framerate caps before videorate before the encoder, got %v", args)
+	}
+}
+
+func indexOfStage(args []string, want string) int {
+	for i, arg := range args {
+		if arg == want {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestDetectGstEncoderRejectsMissingExplicitOpenH264(t *testing.T) {
 	var probes []string
 	_, err := detectGstEncoderWithProbe(CaptureConfig{
@@ -714,7 +906,7 @@ func TestDetectGstEncoderRejectsMissingExplicitOpenH264(t *testing.T) {
 }
 
 func TestDetectGstEncoderSelectionContract(t *testing.T) {
-	allProbes := []string{"vulkanh264enc", "nvh264enc", "vah264enc", "openh264enc", "x264enc"}
+	allProbes := []string{"vulkanh264enc", "nvh264enc", "vah264enc", "v4l2h264enc", "openh264enc", "x264enc"}
 	tests := []struct {
 		name        string
 		method      string
@@ -728,6 +920,13 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			method:      "auto",
 			available:   map[string]bool{"openh264enc": true, "x264enc": true},
 			wantEncoder: "openh264enc",
+			wantProbes:  allProbes[:5],
+		},
+		{
+			name:        "auto prefers V4L2 over software",
+			method:      "auto",
+			available:   map[string]bool{"v4l2h264enc": true, "openh264enc": true, "x264enc": true},
+			wantEncoder: "v4l2h264enc",
 			wantProbes:  allProbes[:4],
 		},
 		{
@@ -769,6 +968,20 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			available:  map[string]bool{"openh264enc": true, "x264enc": true},
 			wantProbes: []string{"vah264enc"},
 			wantError:  "vah264enc",
+		},
+		{
+			name:        "v4l2 selects only V4L2",
+			method:      "v4l2",
+			available:   map[string]bool{"v4l2h264enc": true, "openh264enc": true},
+			wantEncoder: "v4l2h264enc",
+			wantProbes:  []string{"v4l2h264enc"},
+		},
+		{
+			name:       "missing v4l2 does not cross fallback",
+			method:     "v4l2",
+			available:  map[string]bool{"openh264enc": true, "x264enc": true},
+			wantProbes: []string{"v4l2h264enc"},
+			wantError:  "v4l2h264enc",
 		},
 		{
 			name:        "none forces x264",
