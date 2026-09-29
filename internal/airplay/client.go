@@ -310,6 +310,10 @@ type AirPlayClient struct {
 	// Most recent Digest challenge seen on this connection. Cached so later
 	// requests can authenticate up front instead of relying on a retry.
 	authChallenge *digestChallenge
+
+	// forceMixFairPlayKey overrides the feature-27 heuristic on raw
+	// pair-verify so the FairPlay key is always mixed with the shared secret.
+	forceMixFairPlayKey bool
 }
 
 func NewAirPlayClient(host string, port int) *AirPlayClient {
@@ -353,6 +357,16 @@ func (c *AirPlayClient) SetPassword(password string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.authPassword = password
+}
+
+// SetMixFairPlayKey forces raw pair-verify to request X-Apple-PD and mix the
+// FairPlay stream key with the pair-verify shared secret, even for receivers
+// advertising the legacy-pairing feature. Some third-party receivers (e.g.
+// Barco ClickShare) advertise feature 27 but require the mixed key.
+func (c *AirPlayClient) SetMixFairPlayKey(force bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.forceMixFairPlayKey = force
 }
 
 // digestRetryHeader returns an Authorization header value when err is a 401

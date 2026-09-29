@@ -78,6 +78,12 @@ automatic AirPlay policy with separate screen and audio defaults (default: 0).
 .B \-no-audio
 Disable audio for video-only mirroring
 .TP
+.B \-mix-key
+Always mix the FairPlay stream key with the pair-verify shared secret.
+Receivers advertising legacy pairing (feature 27) normally get the unmixed
+key; some third-party receivers, such as Barco ClickShare, advertise it but
+require the mixed key and otherwise accept the stream without displaying it.
+.TP
 .B \-hwaccel \fIMETHOD\fR
 Encoder preference: \fBauto\fR, \fBnvenc\fR (NVIDIA), \fBvaapi\fR
 (Intel/AMD), \fBopenh264\fR (software), or \fBnone\fR (x264, or x265 for
