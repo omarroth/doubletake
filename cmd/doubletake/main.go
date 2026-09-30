@@ -72,6 +72,7 @@ func main() {
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
+	mixKey := flag.Bool("mix-key", false, "Always mix the FairPlay stream key with the pair-verify secret (for receivers such as Barco ClickShare that advertise legacy pairing but need the mixed key)")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	portRange := flag.String("port-range", "", "Local UDP port range for receiver timing/audio (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 3 ports.")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
@@ -117,6 +118,7 @@ func main() {
 			TestMode:    *testMode,
 			NoEncrypt:   *noEncrypt,
 			DirectKey:   *directKey,
+			MixKey:      *mixKey,
 			NoAudio:     *noAudio,
 			ShowCursor:  !*noCursor,
 			Code:        credential,
@@ -166,13 +168,17 @@ func main() {
 	}
 
 	newClient := func() *airplay.AirPlayClient {
+		var c *airplay.AirPlayClient
 		if advertisement != nil {
 			device := *advertisement
 			device.IP = addr
 			device.Port = *port
-			return airplay.NewAirPlayClientForDevice(device)
+			c = airplay.NewAirPlayClientForDevice(device)
+		} else {
+			c = airplay.NewAirPlayClient(addr, *port)
 		}
-		return airplay.NewAirPlayClient(addr, *port)
+		c.SetMixFairPlayKey(*mixKey)
+		return c
 	}
 	client := newClient()
 	client.SetPassword(credential)

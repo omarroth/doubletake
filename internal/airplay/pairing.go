@@ -902,8 +902,9 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	// FairPlay key derivation. Apple's senders advertise it unconditionally, but
 	// observed raw receivers split on feature 27: those advertising the original
 	// legacy-pairing capability require the unmixed key path, while those without
-	// it require PD mixing. Keep this empirical exception capability-based.
-	mixFairPlayKey := c.info == nil || !c.info.SupportsLegacyPairing()
+	// it require PD mixing. Keep this empirical exception capability-based;
+	// SetMixFairPlayKey overrides it for receivers that break the pattern.
+	mixFairPlayKey := c.forceMixFairPlayKey || c.info == nil || !c.info.SupportsLegacyPairing()
 	var verifyHeaders map[string]string
 	if mixFairPlayKey {
 		verifyHeaders = map[string]string{"X-Apple-PD": "1"}

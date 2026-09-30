@@ -99,6 +99,7 @@ type Config struct {
 	TestMode    bool
 	NoEncrypt   bool
 	DirectKey   bool
+	MixKey      bool // force FairPlay key mixing on raw pair-verify
 	NoAudio     bool
 	ShowCursor  bool
 	Code        string // default pairing/Digest credential; request Pin overrides it
@@ -893,6 +894,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 			next = airplay.NewAirPlayClient(target, port)
 		}
 		next.SetPassword(credential)
+		next.SetMixFairPlayKey(d.cfg.MixKey)
 		if err := next.Connect(ctx); err != nil {
 			return nil, nil, err
 		}

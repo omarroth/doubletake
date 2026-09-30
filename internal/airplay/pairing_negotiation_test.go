@@ -85,6 +85,16 @@ func TestTransientPairingFallsBackFromUnsupportedHAPToRawByProtocol(t *testing.T
 }
 
 func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
+	testRawLegacyPairingFairPlayKeyMixing(t, false)
+}
+
+// Some third-party receivers (e.g. Barco ClickShare) advertise feature 27 but
+// require the mixed key; SetMixFairPlayKey must override the heuristic.
+func TestRawLegacyPairingForcedMixSendsPDAndMixesFairPlayKey(t *testing.T) {
+	testRawLegacyPairingFairPlayKeyMixing(t, true)
+}
+
+func testRawLegacyPairingFairPlayKeyMixing(t *testing.T, forceMix bool) {
 	state := newReceiverPairingTestState(t, "", newReceiverControllerStore())
 	clientConn, serverConn := newPairingNegotiationPipe(t)
 	defer clientConn.Close()
@@ -99,6 +109,7 @@ func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
 			Features: FeatureLegacyPairing,
 		},
 	}
+	client.SetMixFairPlayKey(forceMix)
 	serverDone := make(chan error, 1)
 	go func() {
 		reader := bufio.NewReader(serverConn)
@@ -108,8 +119,9 @@ func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
 				serverDone <- err
 				return
 			}
-			if got := request.headers["x-apple-pd"]; got != "" {
-				serverDone <- fmt.Errorf("request %d X-Apple-PD = %q, want omitted", requestIndex+1, got)
+			wantPD := forceMix && request.uri == "/pair-verify"
+			if got := request.headers["x-apple-pd"]; (got == "1") != wantPD || (!wantPD && got != "") {
+				serverDone <- fmt.Errorf("request %d (%s) X-Apple-PD = %q, want present=%t", requestIndex+1, request.uri, got, wantPD)
 				return
 			}
 			var response []byte
@@ -139,8 +151,8 @@ func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
 		t.Fatalf("Pair: %v", err)
 	}
 	waitPairingTestServer(t, serverDone)
-	if client.PairKeys == nil || client.PairKeys.MixFairPlayKey {
-		t.Fatal("legacy raw pairing unexpectedly enabled FairPlay key mixing")
+	if client.PairKeys == nil || client.PairKeys.MixFairPlayKey != forceMix {
+		t.Fatalf("legacy raw pairing FairPlay key mixing = %v, want %v", client.PairKeys != nil && client.PairKeys.MixFairPlayKey, forceMix)
 	}
 }
 

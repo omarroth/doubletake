@@ -365,6 +365,7 @@ doubletake-ctl disconnect
 | `-video-codec` | auto | Screen codec: capability-driven `auto`, forced `h264`, or forced `hevc` |
 | `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |
 | `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |
+| `-mix-key` | false | Always mix the FairPlay stream key with the pair-verify secret (needed by receivers such as Barco ClickShare that advertise legacy pairing) |
 | `-no-audio` | false | Disable audio streaming |
 | `-test` | false | Use synthetic video source |
 | `-daemonize` | false | Run as background daemon with Unix socket control interface |
