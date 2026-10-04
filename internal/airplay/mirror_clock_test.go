@@ -503,6 +503,29 @@ func TestMediaClockTimingPeerUpdatePreservesContinuity(t *testing.T) {
 	}
 }
 
+func TestMediaClockTimingPeerUpdateInitializesAsyncClock(t *testing.T) {
+	const timeline = uint64(0x48e15caa8da00008)
+	clock := &mediaClock{}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- clock.waitUntilReady(ctx, time.Second)
+	}()
+
+	receivedAt := time.Now()
+	if err := clock.updateTimingPeerInfo(map[string]interface{}{"ClockID": timeline}, receivedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-waitErr; err != nil {
+		t.Fatalf("wait for asynchronous clock: %v", err)
+	}
+	if timestamp, gotTimeline, ok := clock.now(0); !ok || timestamp == 0 || gotTimeline != timeline {
+		t.Fatalf("asynchronous clock = timestamp 0x%016x timeline 0x%016x ok=%t, want nonzero timestamp on 0x%016x",
+			timestamp, gotTimeline, ok, timeline)
+	}
+}
+
 func TestMediaClockTimingPeerUpdateRequiresClockIdentity(t *testing.T) {
 	clock := &mediaClock{timelineID: 1}
 	if err := clock.updateTimingPeerInfo(nil, time.Now()); err == nil {

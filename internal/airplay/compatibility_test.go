@@ -112,11 +112,11 @@ func TestPTPRequiresCapabilityVersionAndEncryption(t *testing.T) {
 			i.SourceVersion = "354.54.5"
 			return i
 		}(), encrypted: true, want: timingProtocolNTP},
-		{name: "377.40 interoperability exception", info: func() ReceiverInfo {
+		{name: "capable third party version", info: func() ReceiverInfo {
 			i := ptp
 			i.SourceVersion = "377.40.12"
 			return i
-		}(), encrypted: true, want: timingProtocolNTP},
+		}(), encrypted: true, want: timingProtocolPTP},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := mustCompatibility(t, &test.info, test.encrypted)
@@ -140,9 +140,9 @@ func TestSupportsPTPSourceVersion(t *testing.T) {
 		{version: "354.55", want: true},
 		{version: "355.0", want: true},
 		{version: "377.39.99", want: true},
-		{version: "377.40"},
-		{version: "377.40.0"},
-		{version: "377.40.999"},
+		{version: "377.40", want: true},
+		{version: "377.40.0", want: true},
+		{version: "377.40.999", want: true},
 		{version: "377.41", want: true},
 		{version: "980.71.1", want: true},
 		{version: ""},

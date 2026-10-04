@@ -109,6 +109,39 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 	}
 }
 
+func TestReceiverServerFallsBackWhenPTPClockIdentityIsMissing(t *testing.T) {
+	server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{
+		Profile:              ReceiverProfileLG,
+		Auth:                 ReceiverAuthNone,
+		Model:                "UnrelatedModel",
+		Manufacturer:         "Independent Vendor",
+		OmitPTPClockIdentity: true,
+		AcceptNTPFallback:    true,
+	})
+	if err := client.Pair(ctx, ""); err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+
+	session, err := client.SetupMirror(ctx, StreamConfig{NoAudio: true})
+	if err != nil {
+		t.Fatalf("setup mirror: %v", err)
+	}
+	if session.timingProtocol != timingProtocolNTP {
+		t.Fatalf("session timing protocol = %q, want NTP fallback", session.timingProtocol)
+	}
+	if err := session.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("close mirror session: %v", err)
+	}
+
+	stats := server.Stats()
+	if stats.SetupRequests != 5 {
+		t.Fatalf("SETUP requests = %d, want rejected control + PTP audio + rejected control + NTP audio/video", stats.SetupRequests)
+	}
+	if stats.TeardownRequests != 2 {
+		t.Fatalf("TEARDOWN requests = %d, want failed PTP cleanup and final NTP cleanup", stats.TeardownRequests)
+	}
+}
+
 func TestReceiverServerDecryptsLegacyFairPlayVideo(t *testing.T) {
 	for _, profile := range []ReceiverProfile{ReceiverProfileAppleTV3, ReceiverProfileUxPlay} {
 		t.Run(string(profile), func(t *testing.T) {
@@ -868,6 +901,9 @@ func TestReceiverServerCombinedCodePairsAndAnswersDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Digest-protected setup: %v", err)
 	}
+	if session.timingProtocol != timingProtocolNTP {
+		t.Fatalf("session timing protocol = %q, want negotiated NTP fallback", session.timingProtocol)
+	}
 	if err := session.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("close mirror session: %v", err)
 	}
@@ -876,10 +912,10 @@ func TestReceiverServerCombinedCodePairsAndAnswersDigest(t *testing.T) {
 	if stats.DigestChallenges != 1 {
 		t.Fatalf("Digest challenges = %d, want exactly 1", stats.DigestChallenges)
 	}
-	// The profile deliberately omits feature 59 while requiring encrypted
-	// streamConnections, exercising the sender's bounded descriptor negotiation:
-	// controlPort is rejected once, then the alternate shape succeeds.
-	if stats.PINStarts != 0 || stats.PairSetup != 3 || stats.PairVerify != 2 || stats.SetupRequests != 4 {
+	// This encrypted profile advertises PTP but rejects it during SETUP, then
+	// deliberately omits feature 59 while requiring streamConnections. Three
+	// bounded PTP probes precede the NTP control/order and descriptor negotiation.
+	if stats.PINStarts != 0 || stats.PairSetup != 3 || stats.PairVerify != 2 || stats.SetupRequests != 7 {
 		t.Fatalf("combined auth stats = %+v", stats)
 	}
 	if got := server.stats.audioControlPort.Load(); got != 1 {
