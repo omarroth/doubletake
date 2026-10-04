@@ -388,11 +388,17 @@ func TestCaptureBitrateUsesReceiverSize(t *testing.T) {
 }
 
 func TestKeyframeIntervalFrames(t *testing.T) {
-	if got := keyframeIntervalFrames(30); got != 60 {
-		t.Fatalf("keyframeIntervalFrames(30) = %d, want 60", got)
+	if got := keyframeIntervalFrames(30); got != 15 {
+		t.Fatalf("keyframeIntervalFrames(30) = %d, want 15", got)
 	}
-	if got := keyframeIntervalFrames(0); got != 60 {
-		t.Fatalf("keyframeIntervalFrames(0) = %d, want 60", got)
+	if got := keyframeIntervalFrames(0); got != 15 {
+		t.Fatalf("keyframeIntervalFrames(0) = %d, want 15", got)
+	}
+	if got := keyframeIntervalFrames(1); got != 1 {
+		t.Fatalf("keyframeIntervalFrames(1) = %d, want 1", got)
+	}
+	if got := keyframeIntervalFrames(25); got != 13 {
+		t.Fatalf("keyframeIntervalFrames(25) = %d, want 13", got)
 	}
 }
 
@@ -770,7 +776,7 @@ func TestDetectGstEncoderSelectsExplicitOpenH264(t *testing.T) {
 	wantParts := gstStage{
 		"openh264enc",
 		"bitrate=2500000",
-		"gop-size=50",
+		"gop-size=13",
 		"rate-control=bitrate",
 		"usage-type=screen",
 	}

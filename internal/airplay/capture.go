@@ -2335,11 +2335,14 @@ func keyframeIntervalFrames(fps int) int {
 	if fps <= 0 {
 		fps = 30
 	}
-	// Capture starts before the receiver's media SETUP completes so Wayland's
-	// portal prompt stays outside the first-frame deadline. A receiver (or a
-	// later daemon sink) can therefore miss the encoder's initial IDR. Keep the
-	// next random-access point comfortably inside that deadline.
-	return fps * 2
+	// Capture starts before media SETUP completes and shared captures may already
+	// be running when another receiver attaches, so either path can miss the
+	// encoder's initial IDR. The protocol lets a receiver request an immediate
+	// bitstream restart, but gst-launch does not expose that upstream encoder event
+	// to its parent process. Keep a nearby periodic random-access point instead.
+	// This bounds startup and decoder recovery to half a second without making
+	// every frame intra-coded.
+	return max(1, (fps+1)/2)
 }
 
 // vbvBufferKbit returns the x264 VBV buffer size in kbit for the given bitrate
