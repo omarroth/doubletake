@@ -375,6 +375,13 @@ type AirPlayClient struct {
 	streamKey []byte
 	streamIV  []byte
 
+	// ptpTimelineMissing records that this receiver accepted a PTP SETUP
+	// without naming a timeline, so later sessions are timed over NTP.
+	ptpTimelineMissing bool
+	// pairedTransient records that the control channel came from transient
+	// pairing, which is valid only on the connection that performed it.
+	pairedTransient bool
+
 	// HTTP Digest credentials, used only when the receiver has "Require
 	// Password" enabled and challenges a request with 401. Pair-setup and
 	// Digest are separate protocols, but a non-empty Pair code is retained here
@@ -506,6 +513,32 @@ func (c *AirPlayClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
 	c.conn = conn
+	return nil
+}
+
+// reconnectVerified replaces the control connection and re-establishes the
+// encrypted channel: pair-verify with the credentials already held, or a new
+// transient pairing if that is how this client paired. A receiver does not accept a new session
+// on a connection whose session was torn down, and the encrypted channel's
+// keys and nonces belong to the old connection.
+func (c *AirPlayClient) reconnectVerified(ctx context.Context) error {
+	_ = c.Close()
+	c.encrypted = false
+	c.encWriteKey, c.encReadKey, c.encCipher = nil, nil, nil
+	c.encWriteNonce, c.encReadNonce = 0, 0
+	c.streamKey, c.streamIV = nil, nil
+	if err := c.Connect(ctx); err != nil {
+		return err
+	}
+	if c.pairedTransient {
+		if err := c.pairTransient(ctx); err != nil {
+			return fmt.Errorf("transient pairing: %w", err)
+		}
+		return nil
+	}
+	if err := c.PairVerify(ctx); err != nil {
+		return fmt.Errorf("pair-verify: %w", err)
+	}
 	return nil
 }
 

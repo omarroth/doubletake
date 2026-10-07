@@ -232,7 +232,11 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 		Ed25519Private: priv,
 	}
 
-	return c.performTransientSetupAndVerify(ctx)
+	if err := c.performTransientSetupAndVerify(ctx); err != nil {
+		return err
+	}
+	c.pairedTransient = true
+	return nil
 }
 
 // performTransientSetupAndVerify does transient (PIN-less) pair-setup + pair-verify.

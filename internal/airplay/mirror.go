@@ -36,6 +36,11 @@ const (
 	failedMirrorSetupTeardownTimeout = 2 * time.Second
 )
 
+// errMissingReceiverTimeline marks a receiver that advertised PTP and accepted a
+// PTP SETUP without naming its timeline. setupMirrorSession retries such a
+// receiver once over NTP.
+var errMissingReceiverTimeline = errors.New("SETUP response omitted timingPeerInfo.ClockID")
+
 // mediaClock maps local monotonic time onto the receiver's PTP timeline. The
 // receiver's X-Apple-RequestReceivedTimestamp is in the same boot-relative
 // domain as its PTP Follow_Up timestamps, so no local PTP stack is required.
@@ -50,7 +55,7 @@ func (c *mediaClock) configureFromSetup(response map[string]interface{}, headers
 	peer, _ := response["timingPeerInfo"].(map[string]interface{})
 	timelineID := plistUint64(peer["ClockID"])
 	if timelineID == 0 {
-		return fmt.Errorf("SETUP response omitted timingPeerInfo.ClockID")
+		return errMissingReceiverTimeline
 	}
 
 	anchorTimestamp, receivedMillis, processingMillis, err := receiverClockTimestamp(headers)
@@ -460,7 +465,25 @@ func (c *AirPlayClient) closeUnsafeMirrorControlConnection() {
 }
 
 // setupMirrorSession negotiates the mirroring stream with the Apple TV.
+//
+// Some third-party receivers (LG webOS 5, Samsung) advertise PTP and accept a
+// PTP SETUP, but name no timeline and only stream when timed over NTP. Their
+// SETUP response is the only reliable signal, so such a receiver is retried
+// once over NTP on a fresh, re-verified connection.
 func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig, prepareVideoCapture func(width, height int, codec VideoCodec) (VideoPreparationResult, error), captureMayReportMinimumLead bool) (*MirrorSession, error) {
+	session, err := c.setupMirrorSessionOnce(ctx, cfg, prepareVideoCapture, captureMayReportMinimumLead)
+	if !errors.Is(err, errMissingReceiverTimeline) || c.ptpTimelineMissing || c.fpKey != nil {
+		return session, err
+	}
+	log.Printf("receiver advertised PTP but named no timeline; retrying over NTP")
+	c.ptpTimelineMissing = true
+	if reconnectErr := c.reconnectVerified(ctx); reconnectErr != nil {
+		return nil, fmt.Errorf("%w; reconnect for NTP timing: %v", err, reconnectErr)
+	}
+	return c.setupMirrorSessionOnce(ctx, cfg, prepareVideoCapture, captureMayReportMinimumLead)
+}
+
+func (c *AirPlayClient) setupMirrorSessionOnce(ctx context.Context, cfg StreamConfig, prepareVideoCapture func(width, height int, codec VideoCodec) (VideoPreparationResult, error), captureMayReportMinimumLead bool) (*MirrorSession, error) {
 	if err := ValidateVideoCodec(string(cfg.VideoCodec)); err != nil {
 		return nil, err
 	}
@@ -470,6 +493,9 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 	policy, err := compatibilityForReceiver(c.info, c.encrypted, !cfg.NoAudio)
 	if err != nil {
 		return nil, fmt.Errorf("negotiate screen audio: %w", err)
+	}
+	if c.ptpTimelineMissing {
+		policy.timing = timingProtocolNTP
 	}
 	sourceVersion := policy.sourceVersion()
 	timingProtocol := policy.timing

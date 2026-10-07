@@ -109,6 +109,61 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 	}
 }
 
+func TestReceiverWithoutPTPTimelineFallsBackToNTP(t *testing.T) {
+	// Transient pairing must be redone on the new connection; a PIN pairing
+	// is re-verified with the long-term keys it already holds.
+	for _, test := range []struct {
+		name string
+		auth ReceiverAuthMode
+		code string
+	}{
+		{name: "transient pairing", auth: ReceiverAuthNone},
+		{name: "PIN pairing", auth: ReceiverAuthPIN, code: "1234"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testReceiverWithoutPTPTimelineFallsBackToNTP(t, test.auth, test.code)
+		})
+	}
+}
+
+func testReceiverWithoutPTPTimelineFallsBackToNTP(t *testing.T, auth ReceiverAuthMode, code string) {
+	server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{
+		Profile:              ReceiverProfileLG,
+		Auth:                 auth,
+		Code:                 code,
+		OmitPTPClockIdentity: true,
+	})
+	if err := client.Pair(ctx, code); err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	session, err := client.SetupMirror(ctx, StreamConfig{NoAudio: true})
+	if err != nil {
+		t.Fatalf("setup mirror: %v", err)
+	}
+	if session.timingProtocol != timingProtocolNTP || session.mediaClock != nil {
+		t.Fatalf("session timing = %q (media clock %t), want NTP without a PTP clock",
+			session.timingProtocol, session.mediaClock != nil)
+	}
+	deadline := time.Now().Add(time.Second)
+	stats := server.Stats()
+	for (stats.VideoConnections != 1 || stats.TimingReplies == 0) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+		stats = server.Stats()
+	}
+	if err := session.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("close mirror session: %v", err)
+	}
+	stats = server.Stats()
+	// The PTP attempt is torn down on the first connection; NTP runs on a
+	// second, re-verified one.
+	if stats.Connections != 2 || stats.TeardownRequests != 2 || stats.RecordRequests != 1 {
+		t.Fatalf("control stats = %+v, want 2 connections, 2 TEARDOWNs, 1 RECORD", stats)
+	}
+	if stats.VideoConnections != 1 || stats.TimingProbes == 0 || stats.TimingReplies == 0 {
+		t.Fatalf("media stats = %+v, want one video stream timed over NTP", stats)
+	}
+}
+
 func TestReceiverServerDecryptsLegacyFairPlayVideo(t *testing.T) {
 	for _, profile := range []ReceiverProfile{ReceiverProfileAppleTV3, ReceiverProfileUxPlay} {
 		t.Run(string(profile), func(t *testing.T) {

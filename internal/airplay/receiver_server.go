@@ -67,10 +67,14 @@ type ReceiverConfig struct {
 	// optional nested info dictionary. It exercises the sender's post-session
 	// GET /info compatibility fallback.
 	OmitCombinedInfo bool
-	Name             string
-	Model            string
-	Manufacturer     string
-	DeviceID         string
+	// OmitPTPClockIdentity answers a PTP SETUP without timingPeerInfo.ClockID
+	// and also accepts an NTP session, as LG webOS 5 and Samsung receivers do
+	// while still advertising PTP.
+	OmitPTPClockIdentity bool
+	Name                 string
+	Model                string
+	Manufacturer         string
+	DeviceID             string
 	// DisplayWidth and DisplayHeight override the selected validation profile's
 	// advertised pixel size. They must be supplied together.
 	DisplayWidth  int
@@ -535,14 +539,17 @@ func (s *ReceiverServer) logf(format string, args ...any) {
 }
 
 type receiverConnection struct {
-	server            *ReceiverServer
-	conn              net.Conn
-	reader            *bufio.Reader
-	pairing           *receiverPairingState
-	fairplay          *receiverFPSAPState
-	hap               *receiverHAPStream
-	media             *receiverMediaSession
-	timingProbed      bool
+	server       *ReceiverServer
+	conn         net.Conn
+	reader       *bufio.Reader
+	pairing      *receiverPairingState
+	fairplay     *receiverFPSAPState
+	hap          *receiverHAPStream
+	media        *receiverMediaSession
+	timingProbed bool
+	// timingProtocol is the protocol this connection's session descriptor
+	// negotiated; empty until then.
+	timingProtocol    string
 	legacyFairPlayKey [16]byte
 	legacyFairPlayIV  []byte
 	legacyFairPlaySet bool
@@ -971,8 +978,8 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 	if err := c.ensureMedia(); err != nil {
 		return receiverError(500, err)
 	}
-	if c.server.profile.timingProtocol == timingProtocolNTP &&
-		c.server.profile.ntpInitiator == receiverNTPReceiver && !c.timingProbed &&
+	if c.sessionTimingProtocol() == timingProtocolNTP &&
+		(c.server.profile.ntpInitiator == receiverNTPReceiver || c.server.cfg.OmitPTPClockIdentity) && !c.timingProbed &&
 		plistInt(setup["timingPort"]) > 0 {
 		c.probeLegacyTiming(setup)
 	}
@@ -988,7 +995,8 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 			response["info"] = c.server.info(true)
 		}
 	}
-	if c.server.profile.timingProtocol == timingProtocolPTP && c.server.profile.providePTPClockIdentity {
+	if c.sessionTimingProtocol() == timingProtocolPTP && c.server.profile.providePTPClockIdentity &&
+		!c.server.cfg.OmitPTPClockIdentity {
 		response["timingPeerInfo"] = map[string]any{
 			"ClockID":                           int64(0x4454424c54414b45),
 			"ID":                                c.server.identifier,
@@ -997,7 +1005,7 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 			"SupportsClockPortMatchingOverride": true,
 		}
 	}
-	if c.server.profile.timingProtocol == timingProtocolNTP && c.server.profile.ntpInitiator == receiverNTPSender {
+	if c.sessionTimingProtocol() == timingProtocolNTP && c.server.profile.ntpInitiator == receiverNTPSender {
 		response["timingPort"] = int64(endpoints.TimingPort)
 	}
 
@@ -1080,10 +1088,12 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 
 	if hasSession {
 		protocol, _ := setup["timingProtocol"].(string)
-		if protocol != profile.timingProtocol {
+		ntpFallback := c.server.cfg.OmitPTPClockIdentity && protocol == timingProtocolNTP
+		if protocol != profile.timingProtocol && !ntpFallback {
 			return fmt.Errorf("timingProtocol is %q, want %q", protocol, profile.timingProtocol)
 		}
-		switch profile.timingProtocol {
+		c.timingProtocol = protocol
+		switch protocol {
 		case timingProtocolNTP:
 			if plistInt(setup["timingPort"]) <= 0 {
 				return fmt.Errorf("NTP SETUP omitted timingPort")
@@ -1366,6 +1376,13 @@ func (c *receiverConnection) probeLegacyTiming(setup map[string]any) {
 	if err := c.media.ProbeLegacyTiming(ctx, &net.UDPAddr{IP: remote.IP, Port: port}, 3); err != nil {
 		c.server.logf("legacy timing probe failed: %v", err)
 	}
+}
+
+func (c *receiverConnection) sessionTimingProtocol() string {
+	if c.timingProtocol != "" {
+		return c.timingProtocol
+	}
+	return c.server.profile.timingProtocol
 }
 
 func (c *receiverConnection) closeMedia() {
