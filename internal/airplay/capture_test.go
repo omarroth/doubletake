@@ -412,13 +412,32 @@ func TestFrameIntervalMillis(t *testing.T) {
 	}
 }
 
+func stubPipeWireProvideClock(t *testing.T, supported bool) {
+	t.Helper()
+	original := pipeWireSourceHasProvideClock
+	pipeWireSourceHasProvideClock = func() bool { return supported }
+	t.Cleanup(func() { pipeWireSourceHasProvideClock = original })
+}
+
+func TestPipeWireVideoSourceClockPolicy(t *testing.T) {
+	for _, supported := range []bool{true, false} {
+		stubPipeWireProvideClock(t, supported)
+		got := strings.Join(pipeWireVideoSourceStage(3, 42, 30, false), " ")
+		if has := strings.Contains(got, "provide-clock=false"); has != supported {
+			t.Errorf("provide-clock supported=%v: stage = %s", supported, got)
+		}
+	}
+}
+
 func TestPipeWireVideoSourceBufferPoolPolicy(t *testing.T) {
+	stubPipeWireProvideClock(t, true)
 	base := gstStage{
 		"pipewiresrc",
 		"fd=3",
 		"path=42",
 		"do-timestamp=true",
 		"keepalive-time=34",
+		"provide-clock=false",
 	}
 	for _, test := range []struct {
 		name       string
@@ -961,6 +980,7 @@ func TestVAWaylandPipelineSelection(t *testing.T) {
 }
 
 func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
+	stubPipeWireProvideClock(t, true)
 	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420", codec: VideoCodecH264}
 	pipeline := buildSystemWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
 	joined := strings.Join(pipeline, " ")
@@ -970,7 +990,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 		}
 	}
 	wantOrder := []string{
-		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34",
+		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34", "provide-clock=false",
 		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=NV12",
 		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
@@ -986,6 +1006,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 }
 
 func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
+	stubPipeWireProvideClock(t, true)
 	encoder := encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE", codec: VideoCodecHEVC}
 	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
 	joined := strings.Join(pipeline, " ")
@@ -995,7 +1016,7 @@ func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 		}
 	}
 	wantOrder := []string{
-		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34",
+		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34", "provide-clock=false",
 		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
 		"!", "vapostproc", "disable-passthrough=true", "add-borders=true",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
