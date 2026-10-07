@@ -858,6 +858,13 @@ func frameIntervalMillis(fps int) int {
 	return 1 + 999/fps
 }
 
+// pipeWireSourceHasProvideClock reports whether the installed pipewiresrc
+// exposes provide-clock. Older plugins reject unknown properties at launch.
+var pipeWireSourceHasProvideClock = sync.OnceValue(func() bool {
+	out, err := exec.Command("gst-inspect-1.0", "pipewiresrc").Output()
+	return err == nil && bytes.Contains(out, []byte("provide-clock"))
+})
+
 func pipeWireVideoSourceStage(fd int, nodeID uint32, fps int, alwaysCopy bool) gstStage {
 	stage := gstStage{
 		"pipewiresrc",
@@ -865,6 +872,12 @@ func pipeWireVideoSourceStage(fd int, nodeID uint32, fps int, alwaysCopy bool) g
 		fmt.Sprintf("path=%d", nodeID),
 		"do-timestamp=true",
 		fmt.Sprintf("keepalive-time=%d", frameIntervalMillis(fps)),
+	}
+	if pipeWireSourceHasProvideClock() {
+		// When pipewiresrc provides the pipeline clock, capture timestamps drift
+		// from the system clock used for network time. The receiver keeps
+		// accepting frames but stops presenting them, freezing the mirror.
+		stage = append(stage, "provide-clock=false")
 	}
 	if alwaysCopy {
 		// Retaining elements downstream must never hold every buffer in the
