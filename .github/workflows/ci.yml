@@ -42,9 +42,6 @@ jobs:
       - name: Build doubletake-ctl
         run: make doubletake-ctl-release
 
-      - name: Build doubletake-test-receiver
-        run: make doubletake-test-receiver-release
-
       - name: Bundle manpages
         if: matrix.suffix == ''
         run: make manpages-release
@@ -54,7 +51,6 @@ jobs:
         run: |
           mv doubletake "doubletake${{ matrix.suffix }}"
           mv doubletake-ctl "doubletake-ctl${{ matrix.suffix }}"
-          mv doubletake-test-receiver "doubletake-test-receiver${{ matrix.suffix }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -62,7 +58,6 @@ jobs:
           path: |
             doubletake${{ matrix.suffix }}
             doubletake-ctl${{ matrix.suffix }}
-            doubletake-test-receiver${{ matrix.suffix }}
             doubletake-manpages.tar.gz
 
   release:
@@ -104,8 +99,6 @@ jobs:
           files: |
             doubletake
             doubletake-ctl
-            doubletake-test-receiver
             doubletake-arm64
             doubletake-ctl-arm64
-            doubletake-test-receiver-arm64
             doubletake-manpages.tar.gz

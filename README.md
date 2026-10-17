@@ -71,11 +71,20 @@ These are devices that have been tested with doubletake. If there are devices no
 make
 ```
 
-This builds the three binaries into `bin/`:
+This builds the two binaries into `bin/`:
 
 - `bin/doubletake`
 - `bin/doubletake-ctl`
-- `bin/doubletake-test-receiver`
+
+For developer testing, build the diagnostic receiver explicitly:
+
+```sh
+make doubletake-test-receiver
+```
+
+This creates `bin/doubletake-test-receiver`. It is excluded from default builds,
+installation, and release artifacts. Its manual is available at
+`man/man1/doubletake-test-receiver.1`.
 
 ## Install
 
