@@ -44,10 +44,13 @@ func TestAfterSavedPairingNeverFallsBackToTransient(t *testing.T) {
 		{"raw, impostor", saved(PairingProtocolRaw, true), notAuthenticated, SavedPairingRefuse, true},
 		{"raw, other failure", saved(PairingProtocolRaw, true), forgotten, SavedPairingRefuse, true},
 		{"raw saved before identities", saved(PairingProtocolRaw, false), nil, SavedPairingPairAsNew, false},
+		// Older than pairing_protocol: /info would decide whether it is raw,
+		// and /info is the impersonator's. It counts as code-paired.
+		{"no protocol recorded", saved(PairingProtocolUnknown, false), nil, SavedPairingPairWithCode, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			verified := false
-			got := AfterSavedPairing(test.saved, &ReceiverInfo{}, func() error {
+			got := AfterSavedPairing(test.saved, func() error {
 				verified = true
 				return test.verifyErr
 			})
