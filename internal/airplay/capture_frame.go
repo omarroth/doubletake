@@ -251,6 +251,11 @@ type timestampedRTPHeader struct {
 	timestamp      uint32
 	ssrc           uint32
 	onvifTimestamp uint64
+	// untimed marks a packet without the ONVIF extension. GStreamer before 1.22
+	// timestamps only the first packet of each buffer list, so the later FU-A
+	// fragments of a large access unit arrive untimed; they inherit the access
+	// unit's timestamp in acceptPacketHeader.
+	untimed bool
 }
 
 func parseTimestampedRTPPacket(packet []byte) (timestampedRTPHeader, []byte, error) {
@@ -272,30 +277,30 @@ func parseTimestampedRTPPacket(packet []byte) (timestampedRTPHeader, []byte, err
 	if offset > len(packet) {
 		return header, nil, fmt.Errorf("RTP video: truncated CSRC list")
 	}
-	if !hasExtension {
-		return header, nil, fmt.Errorf("RTP video: ONVIF timestamp extension is absent")
+	var onvifTimestamp uint64
+	if hasExtension {
+		if len(packet)-offset < 4 {
+			return header, nil, fmt.Errorf("RTP video: truncated header extension")
+		}
+		profile := binary.BigEndian.Uint16(packet[offset : offset+2])
+		if profile != onvifRTPHeaderProfile {
+			return header, nil, fmt.Errorf("RTP video: unexpected header extension profile 0x%04x", profile)
+		}
+		extensionWords := int(binary.BigEndian.Uint16(packet[offset+2 : offset+4]))
+		extensionBytes := extensionWords * 4
+		offset += 4
+		if extensionWords < 3 {
+			return header, nil, fmt.Errorf("RTP video: ONVIF extension is %d bytes, want at least 12", extensionBytes)
+		}
+		if extensionBytes > len(packet)-offset {
+			return header, nil, fmt.Errorf("RTP video: truncated ONVIF extension")
+		}
+		onvifTimestamp = binary.BigEndian.Uint64(packet[offset : offset+8])
+		if onvifTimestamp == 0 {
+			return header, nil, fmt.Errorf("RTP video: zero ONVIF timestamp")
+		}
+		offset += extensionBytes
 	}
-	if len(packet)-offset < 4 {
-		return header, nil, fmt.Errorf("RTP video: truncated header extension")
-	}
-	profile := binary.BigEndian.Uint16(packet[offset : offset+2])
-	if profile != onvifRTPHeaderProfile {
-		return header, nil, fmt.Errorf("RTP video: unexpected header extension profile 0x%04x", profile)
-	}
-	extensionWords := int(binary.BigEndian.Uint16(packet[offset+2 : offset+4]))
-	extensionBytes := extensionWords * 4
-	offset += 4
-	if extensionWords < 3 {
-		return header, nil, fmt.Errorf("RTP video: ONVIF extension is %d bytes, want at least 12", extensionBytes)
-	}
-	if extensionBytes > len(packet)-offset {
-		return header, nil, fmt.Errorf("RTP video: truncated ONVIF extension")
-	}
-	onvifTimestamp := binary.BigEndian.Uint64(packet[offset : offset+8])
-	if onvifTimestamp == 0 {
-		return header, nil, fmt.Errorf("RTP video: zero ONVIF timestamp")
-	}
-	offset += extensionBytes
 
 	payloadEnd := len(packet)
 	if padding {
@@ -315,6 +320,7 @@ func parseTimestampedRTPPacket(packet []byte) (timestampedRTPHeader, []byte, err
 		timestamp:      binary.BigEndian.Uint32(packet[4:8]),
 		ssrc:           binary.BigEndian.Uint32(packet[8:12]),
 		onvifTimestamp: onvifTimestamp,
+		untimed:        !hasExtension,
 	}
 	return header, packet[offset:payloadEnd], nil
 }
@@ -332,6 +338,12 @@ func (r *rtpVideoAccessUnitReader) acceptPacketHeader(header timestampedRTPHeade
 	r.haveSSRC = true
 	r.ssrc = header.ssrc
 
+	if header.untimed {
+		if !r.haveAccessUnitTimestamp || header.timestamp != r.rtpTimestamp {
+			return fmt.Errorf("RTP video: ONVIF timestamp extension is absent")
+		}
+		return nil
+	}
 	if !r.haveAccessUnitTimestamp {
 		r.haveAccessUnitTimestamp = true
 		r.rtpTimestamp = header.timestamp
