@@ -330,3 +330,108 @@ func TestSavePairingRefusesAPairingWithoutTheReceiversIdentity(t *testing.T) {
 		t.Fatalf("after re-pairing, saved = %+v; the first receiver's identifier must not survive", got)
 	}
 }
+
+// What an impersonator puts in /info to be paired with transiently: a modern
+// receiver whose password belongs to HTTP Digest, needing no pairing code.
+func modernPasswordInfo() *ReceiverInfo {
+	return &ReceiverInfo{Features: uint64(1) << 43, StatusFlags: statusFlagPasswordRequired}
+}
+
+// Pairing again with a receiver this machine has paired with must take the
+// code, whatever /info says. Pair, given the same code and this /info, goes
+// transient -- which is how a "pair again with a code" used to hand the stream
+// to whoever wrote /info.
+func TestPairWithCodeNeverGoesTransientWhateverInfoSays(t *testing.T) {
+	if modernPasswordInfo().RequiredPairingCredential() != PairingCredentialNone {
+		t.Fatal("test /info does not claim to need no pairing code")
+	}
+
+	t.Run("Pair goes transient", func(t *testing.T) {
+		state := newReceiverPairingTestState(t, "4827", newReceiverControllerStore())
+		client := newReceiverPairingTestClient(t)
+		client.info = modernPasswordInfo()
+		conn, done, closePair := runReceiverPairingServer(t, state, 1, 0)
+		defer closePair()
+		client.conn = conn
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// The PIN receiver refuses transient setup, so Pair fails: it never
+		// tried the code.
+		if err := client.Pair(ctx, "4827"); err == nil {
+			t.Fatal("Pair used the code; this test no longer shows the transient path")
+		}
+		closePair()
+		<-done
+	})
+
+	t.Run("PairWithCode uses the code", func(t *testing.T) {
+		state := newReceiverPairingTestState(t, "4827", newReceiverControllerStore())
+		client := newReceiverPairingTestClient(t)
+		client.info = modernPasswordInfo()
+		conn, done, closePair := runReceiverPairingServer(t, state, 3, 2)
+		defer closePair()
+		client.conn = conn
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := client.PairWithCode(ctx, "4827"); err != nil {
+			t.Fatalf("PairWithCode: %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("receiver: %v", err)
+		}
+		if client.ReceiverIdentity() == nil {
+			t.Fatal("PairWithCode succeeded without recording the receiver's identity")
+		}
+	})
+
+	t.Run("no code", func(t *testing.T) {
+		client := newReceiverPairingTestClient(t)
+		if err := client.PairWithCode(context.Background(), ""); !errors.Is(err, ErrReceiverNotAuthenticated) {
+			t.Fatalf("PairWithCode(\"\") = %v, want ErrReceiverNotAuthenticated", err)
+		}
+	})
+}
+
+// The device ID in /info is written by the device. A saved pairing found only
+// by it is skipped by an impersonator that names itself as something new.
+func TestLookupReceiverUsesTheReceiverMeant(t *testing.T) {
+	store, err := NewCredentialStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
+	receiverKey := ed25519.NewKeyFromSeed(pinSetupReceiverSeed).Public().(ed25519.PublicKey)
+	if err := store.SavePairing("AA:BB:CC:DD:EE:01", "pair-id", key.Public().(ed25519.PublicKey), key,
+		PairingProtocolHAP, &ReceiverIdentity{ID: pinSetupReceiverID, PublicKey: receiverKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name               string
+		expected, reported string
+		wantPairing        bool
+		wantRefused        bool
+	}{
+		{"nothing expected: the reported ID", "", "AA:BB:CC:DD:EE:01", true, false},
+		{"the receiver meant", "AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:01", true, false},
+		{"case differs only", "aa:bb:cc:dd:ee:01", "AA:BB:CC:DD:EE:01", true, false},
+		{"impostor names itself as new", "AA:BB:CC:DD:EE:01", "11:22:33:44:55:66", false, true},
+		{"a receiver never paired with", "11:22:33:44:55:66", "77:88:99:AA:BB:CC", false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			saved, err := store.LookupReceiver(test.expected, test.reported)
+			if test.wantRefused {
+				if !errors.Is(err, ErrReceiverNotAuthenticated) || saved != nil {
+					t.Fatalf("LookupReceiver = (%v, %v), want refusal", saved, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LookupReceiver: %v", err)
+			}
+			if got := saved.HasPairingCredentials(); got != test.wantPairing {
+				t.Fatalf("found a pairing = %t, want %t", got, test.wantPairing)
+			}
+		})
+	}
+}

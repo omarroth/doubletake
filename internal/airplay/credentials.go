@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -77,17 +78,15 @@ func (c *SavedCredentials) HasReceiverIdentity() bool {
 
 // UsesRawPairing reports whether the saved pairing is a raw AirPlay pairing.
 // Raw pair-setup takes no code and authenticates nobody; the only identity
-// such a pairing can hold is the key the receiver gave the first time. Very old
-// entries name no protocol, and are resolved the way RestorePairingCredentials
-// resolves them.
-func (c *SavedCredentials) UsesRawPairing(info *ReceiverInfo) bool {
-	if c == nil {
-		return false
-	}
-	if c.PairingProtocol == PairingProtocolUnknown {
-		return info != nil && info.PrefersLegacyPairing()
-	}
-	return c.PairingProtocol == PairingProtocolRaw
+// such a pairing can hold is the key the receiver gave the first time.
+//
+// Only the entry itself can say so. Entries older than PairingProtocol name no
+// protocol; RestorePairingCredentials guesses theirs from /info, but /info is
+// written by whatever answers at the address, and treating such an entry as
+// raw would let that device choose to be paired with without a code. They
+// count as code-paired.
+func (c *SavedCredentials) UsesRawPairing() bool {
+	return c != nil && c.PairingProtocol == PairingProtocolRaw
 }
 
 // RestorePairingCredentials installs a saved identity and its negotiated wire
@@ -169,6 +168,32 @@ func (cs *CredentialStore) Lookup(deviceID string) *SavedCredentials {
 		return nil
 	}
 	return creds
+}
+
+// LookupReceiver finds the saved pairing for a receiver, given the device ID
+// the caller means (expectedID, from discovery or configuration; may be empty)
+// and the one the device at the address reports in /info (reportedID).
+//
+// The reported ID alone cannot be trusted: the device writes it itself. An
+// impersonator that names itself as a receiver never seen before has no saved
+// pairing to fail, and would be paired with from scratch -- transiently, if it
+// also claims to need no code. So when the caller knows which receiver it
+// means, that receiver's pairing is the one that applies, and a device naming
+// itself differently is refused while that pairing exists.
+func (cs *CredentialStore) LookupReceiver(expectedID, reportedID string) (*SavedCredentials, error) {
+	if expectedID == "" || strings.EqualFold(expectedID, reportedID) {
+		if saved := cs.Lookup(reportedID); saved != nil || expectedID == "" {
+			return saved, nil
+		}
+		return cs.Lookup(expectedID), nil
+	}
+	if saved := cs.Lookup(expectedID); saved.HasPairingCredentials() {
+		return nil, fmt.Errorf("%w: the device at this address names itself %q, not %q, which this machine paired with",
+			ErrReceiverNotAuthenticated, reportedID, expectedID)
+	}
+	// Not paired with the receiver meant, so this is a first contact either
+	// way; the device's own ID is what its pairing will be saved under.
+	return cs.Lookup(reportedID), nil
 }
 
 // Len returns the number of stored credential entries.

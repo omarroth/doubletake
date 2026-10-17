@@ -9,9 +9,10 @@ type SavedPairingStep int
 const (
 	// SavedPairingVerified: the receiver proved it is the one paired with.
 	SavedPairingVerified SavedPairingStep = iota
-	// SavedPairingPairWithCode: pair again with a PIN or password -- never
-	// transiently. Only the real receiver can show its PIN on its own screen,
-	// so this cannot hand the stream to an impersonator.
+	// SavedPairingPairWithCode: pair again with a PIN or password, through
+	// PairWithCode -- never Pair, which goes transient when /info says so.
+	// Only the real receiver can show its PIN on its own screen, so this
+	// cannot hand the stream to an impersonator.
 	SavedPairingPairWithCode
 	// SavedPairingPairAsNew: pair as with a receiver never seen before. Only
 	// for a raw pairing saved before receiver identities were recorded: raw
@@ -32,8 +33,8 @@ const (
 // /info, which the device at the address writes itself. Falling back after a
 // failed verify -- as the callers used to -- let an impersonator fail on
 // purpose, claim to need no code, and receive the stream.
-func AfterSavedPairing(saved *SavedCredentials, info *ReceiverInfo, verify func() error) SavedPairingStep {
-	raw := saved.UsesRawPairing(info)
+func AfterSavedPairing(saved *SavedCredentials, verify func() error) SavedPairingStep {
+	raw := saved.UsesRawPairing()
 	if !saved.HasReceiverIdentity() {
 		// Nothing to authenticate it against; pair again to record one.
 		if raw {

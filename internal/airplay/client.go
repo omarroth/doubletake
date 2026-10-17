@@ -767,6 +767,26 @@ func parseTXTWire(data []byte) map[string]string {
 	return parseTXT(records)
 }
 
+// PairWithCode pairs with a PIN shown on the receiver, or a legacy receiver's
+// pairing password, and nothing else: unlike Pair, it never falls back to
+// transient or raw pairing, whatever /info claims. It is what a receiver this
+// machine has already paired with must go through to be paired with again --
+// transient pairing authenticates nobody, and /info is written by whatever
+// answers at the address. On success ReceiverIdentity holds the receiver's
+// proven identity.
+func (c *AirPlayClient) PairWithCode(ctx context.Context, code string) error {
+	if code == "" {
+		return fmt.Errorf("%w: pairing again needs the code shown on the receiver", ErrReceiverNotAuthenticated)
+	}
+	if err := c.pairWithPIN(ctx, code); err != nil {
+		return err
+	}
+	if c.ReceiverIdentity() == nil {
+		return fmt.Errorf("%w: pairing completed without the receiver proving its identity", ErrReceiverNotAuthenticated)
+	}
+	return nil
+}
+
 func (c *AirPlayClient) Pair(ctx context.Context, pin string) error {
 	if pin != "" {
 		c.SetPassword(pin)
