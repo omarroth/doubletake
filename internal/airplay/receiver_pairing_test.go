@@ -95,13 +95,7 @@ func TestReceiverPairingStateSavedHAPVerify(t *testing.T) {
 	}
 	closeFirst()
 
-	savedClient := &AirPlayClient{
-		PairingID: client.PairingID,
-		PairKeys: &PairKeys{
-			Ed25519Public:  append(ed25519.PublicKey(nil), client.PairKeys.Ed25519Public...),
-			Ed25519Private: append(ed25519.PrivateKey(nil), client.PairKeys.Ed25519Private...),
-		},
-	}
+	savedClient := restoredTestClient(t, client)
 	secondState := newReceiverPairingTestState(t, "4827", store)
 	savedConn, secondDone, closeSecond := runReceiverPairingServer(t, secondState, 0, 2)
 	defer closeSecond()
@@ -131,8 +125,7 @@ func TestReceiverPairingStateRawSetupAndVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("raw pair setup: %v", err)
 	}
-	client.info.PK = serverPublic
-	if err := client.rawPairVerify(ctx); err != nil {
+	if err := client.completeRawSetupAndVerify(ctx, serverPublic); err != nil {
 		t.Fatalf("raw pair verify: %v", err)
 	}
 	if err := <-serverDone; err != nil {
@@ -165,8 +158,7 @@ func TestReceiverPairingStateSavedRawVerify(t *testing.T) {
 		closeFirst()
 		t.Fatalf("raw pair setup: %v", err)
 	}
-	client.info.PK = serverPublic
-	if err := client.rawPairVerify(ctx); err != nil {
+	if err := client.completeRawSetupAndVerify(ctx, serverPublic); err != nil {
 		closeFirst()
 		t.Fatalf("initial raw pair verify: %v", err)
 	}
@@ -176,17 +168,10 @@ func TestReceiverPairingStateSavedRawVerify(t *testing.T) {
 	}
 	closeFirst()
 
-	saved := &SavedCredentials{
-		PairingID:       client.PairingID,
-		Ed25519Public:   append([]byte(nil), client.PairKeys.Ed25519Public...),
-		Ed25519Seed:     append([]byte(nil), client.PairKeys.Ed25519Private.Seed()...),
-		PairingProtocol: client.PairingProtocol(),
-	}
-	savedClient := NewAirPlayClient("127.0.0.1", 7000)
-	savedClient.info = &ReceiverInfo{PK: append(plistData(nil), serverPublic...)}
-	if err := savedClient.RestorePairingCredentials(saved); err != nil {
-		t.Fatalf("restore raw credentials: %v", err)
-	}
+	// /info is left empty: a saved pairing is verified against the key it
+	// recorded, not against whatever /info says.
+	savedClient := restoredTestClient(t, client)
+	savedClient.info = &ReceiverInfo{}
 	secondConn, secondDone, closeSecond := runReceiverPairingServer(t, state, 0, 2)
 	defer closeSecond()
 	savedClient.conn = secondConn
@@ -316,11 +301,40 @@ func TestReceiverPairingStateRejectsHAPControllerSignature(t *testing.T) {
 	}
 }
 
-func newReceiverPairingTestState(t *testing.T, pin string, store *receiverControllerStore) *receiverPairingState {
+// restoredTestClient is what a later cast starts from: client's pairing, saved
+// and loaded back, receiver identity included.
+func restoredTestClient(t *testing.T, client *AirPlayClient) *AirPlayClient {
 	t.Helper()
-	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x51}, ed25519.SeedSize))
+	receiver := client.ReceiverIdentity()
+	if receiver == nil {
+		t.Fatal("pairing recorded no receiver identity to save")
+	}
+	saved := &SavedCredentials{
+		PairingID:         client.PairingID,
+		Ed25519Public:     append([]byte(nil), client.PairKeys.Ed25519Public...),
+		Ed25519Seed:       append([]byte(nil), client.PairKeys.Ed25519Private.Seed()...),
+		PairingProtocol:   client.PairingProtocol(),
+		ReceiverID:        receiver.ID,
+		ReceiverPublicKey: append([]byte(nil), receiver.PublicKey...),
+	}
+	restored := NewAirPlayClient("127.0.0.1", 7000)
+	if err := restored.RestorePairingCredentials(saved); err != nil {
+		t.Fatalf("restore credentials: %v", err)
+	}
+	return restored
+}
+
+func newReceiverPairingTestState(t *testing.T, pin string, store *receiverControllerStore) *receiverPairingState {
+	return newReceiverPairingTestStateWithKey(t, pin, store, "receiver-test-id", 0x51)
+}
+
+// newReceiverPairingTestStateWithKey is a receiver with its own identity -- a
+// different seed is a different device.
+func newReceiverPairingTestStateWithKey(t *testing.T, pin string, store *receiverControllerStore, identifier string, seed byte) *receiverPairingState {
+	t.Helper()
+	privateKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
 	state, err := newReceiverPairingState(receiverPairingConfig{
-		identifier:  "receiver-test-id",
+		identifier:  identifier,
 		privateKey:  privateKey,
 		pin:         pin,
 		controllers: store,

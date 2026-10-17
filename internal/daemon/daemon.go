@@ -956,10 +956,14 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		if err := client.Pair(ctx, value); err != nil {
 			return err
 		}
-		if client.PairKeys != nil {
+		// Only a pairing that proved the receiver's identity is worth saving.
+		// A transient pairing proves nothing and leaves nothing to verify
+		// against; saving it would produce credentials that cannot tell this
+		// receiver from an impersonator.
+		if receiver := client.ReceiverIdentity(); client.PairKeys != nil && receiver != nil {
 			if err := d.credStore.SavePairing(deviceID, client.PairingID,
 				client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private,
-				client.PairingProtocol()); err != nil {
+				client.PairingProtocol(), receiver); err != nil {
 				log.Printf("[daemon] warning: failed to save credentials: %v", err)
 			} else {
 				log.Printf("[daemon] credentials saved for %s (deviceID: %s)", info.Name, deviceID)
@@ -1014,20 +1018,44 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 
 	// Pairing
 	paired := false
+	// Once this machine has paired with a receiver, nothing falls back to
+	// transient pairing for it; airplay.AfterSavedPairing says why.
+	mustPairWithCode := false
 	if savedCreds != nil && savedCreds.HasPairingCredentials() {
-		verifyErr := restoreSavedPairing(client, savedCreds)
-		if verifyErr == nil {
-			verifyErr = client.PairVerify(ctx)
-		}
-		if verifyErr != nil {
-			log.Printf("[daemon] pair-verify with saved creds failed: %v", verifyErr)
-			if err := reconnect(); err != nil {
-				removeStream(fmt.Sprintf("reconnect failed: %v", err))
-				return
+		var verifyErr error
+		step := airplay.AfterSavedPairing(savedCreds, info, func() error {
+			verifyErr = restoreSavedPairing(client, savedCreds)
+			if verifyErr == nil {
+				verifyErr = client.PairVerify(ctx)
 			}
-		} else {
+			return verifyErr
+		})
+		switch step {
+		case airplay.SavedPairingVerified:
 			paired = true
 			log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
+		case airplay.SavedPairingRefuse:
+			if errors.Is(verifyErr, airplay.ErrReceiverNotAuthenticated) {
+				removeStream(fmt.Sprintf("%s did not prove it is the receiver this machine paired with "+
+					"(%v); refusing to cast. If the receiver was reset, remove its saved pairing "+
+					"to pair with it again.", info.Name, verifyErr))
+			} else {
+				removeStream(fmt.Sprintf("pair-verify with the saved pairing for %s failed (%v); "+
+					"refusing to replace it with an unauthenticated one. Remove its saved pairing "+
+					"to pair with it again.", info.Name, verifyErr))
+			}
+			return
+		case airplay.SavedPairingPairWithCode, airplay.SavedPairingPairAsNew:
+			if verifyErr != nil {
+				log.Printf("[daemon] pair-verify with saved creds failed: %v", verifyErr)
+				if err := reconnect(); err != nil {
+					removeStream(fmt.Sprintf("reconnect failed: %v", err))
+					return
+				}
+			} else {
+				log.Printf("[daemon] saved pairing for %s predates receiver authentication; pairing again", info.Name)
+			}
+			mustPairWithCode = step == airplay.SavedPairingPairWithCode
 		}
 	} else if savedCreds != nil {
 		log.Printf("[daemon] saved credentials have no usable pair-verify keys, skipping")
@@ -1053,7 +1081,11 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		// Legacy password receivers consume the password in SRP. Modern receivers
 		// keep it solely for Digest and still perform transient HAP pairing, even
 		// when the receiver also publishes the on-screen PIN bit.
-		switch requiredPairingCredentialKind(info) {
+		kind := requiredPairingCredentialKind(info)
+		if mustPairWithCode && kind != CredentialKindPassword && kind != CredentialKindPIN {
+			kind = CredentialKindPIN
+		}
+		switch kind {
 		case CredentialKindPassword:
 			if err := pairWithCredential(CredentialKindPassword); err != nil {
 				removeStream(err.Error())

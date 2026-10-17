@@ -355,6 +355,16 @@ type AirPlayClient struct {
 	// protocol to probe first; a receiver may advertise HAP while implementing
 	// only the original raw AirPlay exchange.
 	pairingProtocol pairingProtocol
+	// receiver is the paired receiver's long-term identity, learned during a
+	// PIN/password pair-setup or restored from saved credentials. Every
+	// pair-verify that has one requires the receiver to prove it.
+	receiver *ReceiverIdentity
+	// transientSetup records that this session's keys came from a transient
+	// (PIN-less) or raw pair-setup just performed on this connection. Only
+	// then may pair-verify proceed without a receiver identity to check:
+	// transient pairing is unauthenticated by design, and there is nothing
+	// long-term to verify. A pair-verify with neither is refused.
+	transientSetup bool
 
 	// Encryption state after pair-verify
 	encrypted     bool
@@ -1469,4 +1479,11 @@ func validateContentLength(n int) error {
 		return fmt.Errorf("Content-Length %d exceeds the %d byte limit", n, maxResponseBody)
 	}
 	return nil
+}
+
+// ReceiverIdentity returns the paired receiver's identity proven during
+// pair-setup, for saving alongside this machine's own keys. It is nil when the
+// session paired transiently, which establishes no long-term identity.
+func (c *AirPlayClient) ReceiverIdentity() *ReceiverIdentity {
+	return c.receiver.clone()
 }
