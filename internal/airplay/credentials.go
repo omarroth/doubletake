@@ -16,7 +16,15 @@ type SavedCredentials struct {
 	Ed25519Public   []byte          `json:"ed25519_public"`
 	Ed25519Seed     []byte          `json:"ed25519_seed"` // 32-byte seed (private key is derived from this)
 	PairingProtocol PairingProtocol `json:"pairing_protocol,omitempty"`
-	RestoreToken    string          `json:"restore_token,omitempty"`
+	// ReceiverID and ReceiverPublicKey are the RECEIVER's long-term identity,
+	// proven during pair-setup: its HAP pairing identifier (empty for raw
+	// pairings) and Ed25519 public key. Every later pair-verify checks the
+	// receiver's signature against them. Credentials saved before they were
+	// recorded cannot tell the paired receiver from an impersonator, and are
+	// not used to verify -- the receiver is paired with again instead.
+	ReceiverID        string `json:"receiver_id,omitempty"`
+	ReceiverPublicKey []byte `json:"receiver_ed25519_public,omitempty"`
+	RestoreToken      string `json:"restore_token,omitempty"`
 }
 
 // PairingProtocol is the pair-verify wire protocol negotiated when credentials
@@ -57,6 +65,31 @@ func (c *SavedCredentials) HasPairingCredentials() bool {
 		len(c.Ed25519Seed) == ed25519.SeedSize
 }
 
+// HasReceiverIdentity reports whether the saved entry records the receiver's
+// own identity, which pair-verify needs to authenticate it.
+func (c *SavedCredentials) HasReceiverIdentity() bool {
+	if c == nil || len(c.ReceiverPublicKey) != ed25519.PublicKeySize {
+		return false
+	}
+	// A HAP pairing names its receiver; a raw one has no identifier to name.
+	return c.ReceiverID != "" || c.PairingProtocol == PairingProtocolRaw
+}
+
+// UsesRawPairing reports whether the saved pairing is a raw AirPlay pairing.
+// Raw pair-setup takes no code and authenticates nobody; the only identity
+// such a pairing can hold is the key the receiver gave the first time. Very old
+// entries name no protocol, and are resolved the way RestorePairingCredentials
+// resolves them.
+func (c *SavedCredentials) UsesRawPairing(info *ReceiverInfo) bool {
+	if c == nil {
+		return false
+	}
+	if c.PairingProtocol == PairingProtocolUnknown {
+		return info != nil && info.PrefersLegacyPairing()
+	}
+	return c.PairingProtocol == PairingProtocolRaw
+}
+
 // RestorePairingCredentials installs a saved identity and its negotiated wire
 // protocol on the client. Call this before PairVerify.
 func (c *AirPlayClient) RestorePairingCredentials(saved *SavedCredentials) error {
@@ -87,6 +120,16 @@ func (c *AirPlayClient) RestorePairingCredentials(saved *SavedCredentials) error
 	c.PairKeys = &PairKeys{
 		Ed25519Public:  append(ed25519.PublicKey(nil), pub...),
 		Ed25519Private: append(ed25519.PrivateKey(nil), priv...),
+	}
+	// Restored only when present. Without it PairVerify refuses rather than
+	// accept whatever answers, and the caller pairs again to record it.
+	c.receiver = nil
+	c.transientSetup = false
+	if saved.HasReceiverIdentity() {
+		c.receiver = &ReceiverIdentity{
+			ID:        saved.ReceiverID,
+			PublicKey: append(ed25519.PublicKey(nil), saved.ReceiverPublicKey...),
+		}
 	}
 	return nil
 }
@@ -145,15 +188,27 @@ func (cs *CredentialStore) Save(deviceID string, pairingID string, pub ed25519.P
 }
 
 // SavePairing stores credentials together with the protocol which actually
-// completed. New production call sites should use this instead of Save.
-func (cs *CredentialStore) SavePairing(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey, protocol PairingProtocol) error {
+// completed and the receiver identity that pair-setup proved. New production
+// call sites should use this instead of Save.
+//
+// A pairing is refused without the receiver's identity: saving one would
+// produce credentials that cannot authenticate the receiver they were made
+// with, which is the weakness this field exists to close.
+func (cs *CredentialStore) SavePairing(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey, protocol PairingProtocol, receiver *ReceiverIdentity) error {
 	if protocol != PairingProtocolHAP && protocol != PairingProtocolRaw {
 		return fmt.Errorf("cannot save unknown pairing protocol %q", protocol)
 	}
-	return cs.savePairing(deviceID, pairingID, pub, priv, protocol)
+	if !receiver.valid() || (protocol == PairingProtocolHAP && receiver.ID == "") {
+		return fmt.Errorf("cannot save a pairing without the receiver's proven identity")
+	}
+	return cs.savePairingWith(deviceID, pairingID, pub, priv, protocol, receiver)
 }
 
 func (cs *CredentialStore) savePairing(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey, protocol PairingProtocol) error {
+	return cs.savePairingWith(deviceID, pairingID, pub, priv, protocol, nil)
+}
+
+func (cs *CredentialStore) savePairingWith(deviceID string, pairingID string, pub ed25519.PublicKey, priv ed25519.PrivateKey, protocol PairingProtocol, receiver *ReceiverIdentity) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -169,6 +224,14 @@ func (cs *CredentialStore) savePairing(deviceID string, pairingID string, pub ed
 	creds.Ed25519Seed = append([]byte(nil), priv.Seed()...)
 	if protocol != PairingProtocolUnknown {
 		creds.PairingProtocol = protocol
+	}
+	// Written together with the keys, never left behind from an older
+	// pairing: a new key beside a previous receiver's identity would describe
+	// a pairing that never happened.
+	creds.ReceiverID, creds.ReceiverPublicKey = "", nil
+	if receiver.valid() {
+		creds.ReceiverID = receiver.ID
+		creds.ReceiverPublicKey = append([]byte(nil), receiver.PublicKey...)
 	}
 	return cs.backend.Save(deviceID, creds)
 }

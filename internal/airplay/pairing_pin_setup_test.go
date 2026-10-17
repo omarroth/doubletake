@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -27,6 +28,28 @@ type pinSetupServerObservation struct {
 	publicKey  []byte
 	acl        []byte
 }
+
+// pinSetupReceiverSeed and pinSetupReceiverID are the fake receiver's
+// long-term identity, which it proves in M6.
+var pinSetupReceiverSeed = bytes.Repeat([]byte{0x77}, ed25519.SeedSize)
+
+const pinSetupReceiverID = "fake-receiver-id"
+
+// pinSetupServerOptions makes the fake receiver misbehave in one way.
+type pinSetupServerOptions struct {
+	omitM4Proof bool
+	m6          pinSetupM6
+}
+
+type pinSetupM6 int
+
+const (
+	m6Valid         pinSetupM6 = iota
+	m6Empty                    // state only, no identity: what this fake used to send
+	m6BadSignature             // identity present, signature made with another key
+	m6NoIdentifier             // key and signature but no identifier
+	m6Undecryptable            // encrypted under the wrong key
+)
 
 type pinSetupServerOutcome struct {
 	observation pinSetupServerObservation
@@ -54,6 +77,12 @@ func TestPINPairSetupIncludesScreenCaptureACL(t *testing.T) {
 	}
 	if !bytes.Equal(client.PairKeys.SharedSecret, result.sharedKey) {
 		t.Fatal("client and receiver derived different SRP session keys")
+	}
+	// The receiver's identity from M6 is what every later pair-verify checks.
+	receiver := client.ReceiverIdentity()
+	wantKey := ed25519.NewKeyFromSeed(pinSetupReceiverSeed).Public().(ed25519.PublicKey)
+	if receiver == nil || receiver.ID != pinSetupReceiverID || !bytes.Equal(receiver.PublicKey, wantKey) {
+		t.Fatalf("receiver identity = %+v, want %q with the receiver's key", receiver, pinSetupReceiverID)
 	}
 	if got, want := string(result.pairingID), client.PairingID; got != want {
 		t.Fatalf("encrypted pairing identifier = %q, want %q", got, want)
@@ -94,7 +123,45 @@ func TestPINPairSetupRejectsWrongPINAtM3(t *testing.T) {
 	}
 }
 
+// A PIN pairing must learn and prove whom it paired with. Each of these used to
+// be accepted -- M6 was never read -- leaving a saved pairing with no receiver
+// key, so pair-verify could not tell the receiver from anything else.
+func TestPINPairSetupRequiresTheReceiversProvenIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		opts pinSetupServerOptions
+	}{
+		{"M6 without identity", pinSetupServerOptions{m6: m6Empty}},
+		{"M6 signed by another key", pinSetupServerOptions{m6: m6BadSignature}},
+		{"M6 without identifier", pinSetupServerOptions{m6: m6NoIdentifier}},
+		{"M6 encrypted under another key", pinSetupServerOptions{m6: m6Undecryptable}},
+		{"M4 without SRP proof", pinSetupServerOptions{omitM4Proof: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const pin = "4827"
+			client, serverDone, closePair := newPINSetupTestPairWith(t, pin, test.opts)
+			defer closePair()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := client.pairSetup(ctx, pin)
+			if !errors.Is(err, ErrReceiverNotAuthenticated) {
+				t.Fatalf("pairSetup error = %v, want ErrReceiverNotAuthenticated", err)
+			}
+			if client.ReceiverIdentity() != nil {
+				t.Fatal("a receiver that did not prove itself was recorded")
+			}
+			closePair()
+			<-serverDone
+		})
+	}
+}
+
 func newPINSetupTestPair(t *testing.T, receiverPIN string) (*AirPlayClient, <-chan pinSetupServerOutcome, func()) {
+	return newPINSetupTestPairWith(t, receiverPIN, pinSetupServerOptions{})
+}
+
+func newPINSetupTestPairWith(t *testing.T, receiverPIN string, opts pinSetupServerOptions) (*AirPlayClient, <-chan pinSetupServerOutcome, func()) {
 	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
@@ -120,7 +187,7 @@ func newPINSetupTestPair(t *testing.T, receiverPIN string) (*AirPlayClient, <-ch
 
 	serverDone := make(chan pinSetupServerOutcome, 1)
 	go func() {
-		observation, err := servePINPairSetup(serverConn, receiverPIN)
+		observation, err := servePINPairSetup(serverConn, receiverPIN, opts)
 		serverDone <- pinSetupServerOutcome{observation: observation, err: err}
 	}()
 
@@ -144,7 +211,7 @@ func waitPINSetupServer(t *testing.T, done <-chan pinSetupServerOutcome) pinSetu
 	}
 }
 
-func servePINPairSetup(conn net.Conn, pin string) (pinSetupServerObservation, error) {
+func servePINPairSetup(conn net.Conn, pin string, opts pinSetupServerOptions) (pinSetupServerObservation, error) {
 	var observation pinSetupServerObservation
 	reader := bufio.NewReader(conn)
 
@@ -217,12 +284,15 @@ func servePINPairSetup(conn net.Conn, pin string) (pinSetupServerObservation, er
 	}
 
 	serverProof := pinSetupTestHash(A.Bytes(), wantM3Proof, sharedKey)
-	m4 := tlv8EncodeOrdered([]tlv8Item{
-		{Tag: tlvState, Value: []byte{0x04}},
-		{Tag: tlvProof, Value: serverProof},
-	})
-	if err := writeRTSPTestResponse(conn, 200, nil, m4); err != nil {
+	m4Items := []tlv8Item{{Tag: tlvState, Value: []byte{0x04}}}
+	if !opts.omitM4Proof {
+		m4Items = append(m4Items, tlv8Item{Tag: tlvProof, Value: serverProof})
+	}
+	if err := writeRTSPTestResponse(conn, 200, nil, tlv8EncodeOrdered(m4Items)); err != nil {
 		return observation, fmt.Errorf("write M4: %w", err)
+	}
+	if opts.omitM4Proof {
+		return observation, nil // the client must stop here
 	}
 
 	m5Request, err := readRTSPTestRequest(reader)
@@ -262,11 +332,51 @@ func servePINPairSetup(conn net.Conn, pin string) (pinSetupServerObservation, er
 		return observation, fmt.Errorf("M5 controller signature is invalid")
 	}
 
-	m6 := tlv8EncodeOrdered([]tlv8Item{{Tag: tlvState, Value: []byte{0x06}}})
+	m6 := pinSetupTestM6(opts.m6, sharedKey, sessionKey)
 	if err := writeRTSPTestResponse(conn, 200, nil, m6); err != nil {
 		return observation, fmt.Errorf("write M6: %w", err)
 	}
 	return observation, nil
+}
+
+// pinSetupTestM6 builds the receiver's M6: its identifier and long-term key,
+// signed over HKDF(K, Accessory-Sign) || identifier || key, encrypted with the
+// pair-setup session key -- or one of the ways of getting that wrong.
+func pinSetupTestM6(kind pinSetupM6, sharedKey, sessionKey []byte) []byte {
+	if kind == m6Empty {
+		return tlv8EncodeOrdered([]tlv8Item{{Tag: tlvState, Value: []byte{0x06}}})
+	}
+	receiverKey := ed25519.NewKeyFromSeed(pinSetupReceiverSeed)
+	receiverPublic := receiverKey.Public().(ed25519.PublicKey)
+	identifier := []byte(pinSetupReceiverID)
+	signKey := pinSetupTestHKDF(sharedKey, []byte("Pair-Setup-Accessory-Sign-Salt"), []byte("Pair-Setup-Accessory-Sign-Info"), 32)
+	signingKey := receiverKey
+	if kind == m6BadSignature {
+		signingKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x13}, ed25519.SeedSize))
+	}
+	signature := ed25519.Sign(signingKey, bytes.Join([][]byte{signKey, identifier, receiverPublic}, nil))
+	items := []tlv8Item{{Tag: tlvIdentifier, Value: identifier}}
+	if kind == m6NoIdentifier {
+		items = nil
+	}
+	items = append(items,
+		tlv8Item{Tag: tlvPublicKey, Value: receiverPublic},
+		tlv8Item{Tag: tlvSignature, Value: signature},
+	)
+	encryptKey := sessionKey
+	if kind == m6Undecryptable {
+		encryptKey = bytes.Repeat([]byte{0x99}, 32)
+	}
+	aead, err := chacha20poly1305.New(encryptKey)
+	if err != nil {
+		panic(err)
+	}
+	nonce := make([]byte, aead.NonceSize())
+	copy(nonce[4:], "PS-Msg06")
+	return tlv8EncodeOrdered([]tlv8Item{
+		{Tag: tlvState, Value: []byte{0x06}},
+		{Tag: tlvEncryptedData, Value: aead.Seal(nil, nonce, tlv8EncodeOrdered(items), nil)},
+	})
 }
 
 func validatePINSetupRequest(request rtspTestRequest, state byte) error {

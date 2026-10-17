@@ -298,6 +298,14 @@ func (c *AirPlayClient) completeRawSetupAndVerify(ctx context.Context, serverPub
 		c.info = &ReceiverInfo{}
 	}
 	c.info.PK = serverPub
+	// Raw pair-setup is unauthenticated, like transient pairing: it returns
+	// whatever key the device sends. Recording it is still worth it -- a raw
+	// pairing that is saved then holds this key, and later verifies are
+	// checked against it rather than against whatever /info says that day.
+	c.transientSetup = true
+	if len(serverPub) >= ed25519.PublicKeySize {
+		c.receiver = &ReceiverIdentity{PublicKey: append(ed25519.PublicKey(nil), serverPub[:ed25519.PublicKeySize]...)}
+	}
 	dbg("[PAIR] starting raw pair-verify (no HAP encryption)")
 	if err := c.rawPairVerify(ctx); err != nil {
 		return fmt.Errorf("raw pair-verify: %w", err)
@@ -607,10 +615,16 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	// Verify server proof: H(A, M1, K) — A unpadded
 	m2ProofInput := bytes.Join([][]byte{clientPublic, m1Proof[:], K}, nil)
 	m2ProofExpected := sha512.Sum512(m2ProofInput)
-	if serverProof, ok := m4[tlvProof]; ok {
-		if !bytes.Equal(serverProof, m2ProofExpected[:]) {
-			return fmt.Errorf("server proof mismatch")
-		}
+	serverProof, hasProof := m4[tlvProof]
+	if !hasProof && pin != "" {
+		// The proof is how the receiver shows it knows the PIN. A long-term
+		// pairing that does without it has not authenticated the receiver at
+		// all. Transient pairing uses a published PIN and proves nothing
+		// either way, so it is left as it was.
+		return fmt.Errorf("%w: pair-setup M4 carried no SRP proof", ErrReceiverNotAuthenticated)
+	}
+	if hasProof && !bytes.Equal(serverProof, m2ProofExpected[:]) {
+		return fmt.Errorf("server proof mismatch")
 	}
 
 	// M5: Exchange Ed25519 keys over encrypted channel
@@ -659,12 +673,69 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 		return fmt.Errorf("pair-setup M6 error: %d", errTLV[0])
 	}
 
+	if pin != "" {
+		// A long-term pairing must learn whom it paired with. M6 carries the
+		// receiver's identifier and Ed25519 key, signed, under keys derived
+		// from the PIN -- so only the device that showed the PIN could have
+		// produced it. Every later pair-verify checks against what is
+		// recorded here. Before this, M6 was never read, the receiver's key
+		// was never known, and pair-verify could not tell the paired receiver
+		// from anything else answering at its address.
+		identity, err := receiverIdentityFromM6(K, sessionKey, m6)
+		if err != nil {
+			return err
+		}
+		c.receiver = identity
+		c.transientSetup = false
+	} else {
+		c.receiver = nil
+		c.transientSetup = true
+	}
+
 	c.PairKeys.SharedSecret = K
 	return nil
 }
 
+// receiverIdentityFromM6 decrypts and verifies the receiver's identity in
+// pair-setup M6: its pairing identifier and long-term Ed25519 key, signed over
+// HKDF(K, "Pair-Setup-Accessory-Sign-Salt"/"-Info") || identifier || key.
+func receiverIdentityFromM6(K, sessionKey []byte, m6 map[byte][]byte) (*ReceiverIdentity, error) {
+	encrypted := m6[tlvEncryptedData]
+	if len(encrypted) == 0 {
+		return nil, fmt.Errorf("%w: pair-setup M6 carried no receiver identity", ErrReceiverNotAuthenticated)
+	}
+	aead, err := chacha20poly1305.New(sessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("chacha20: %w", err)
+	}
+	nonce := make([]byte, 12)
+	copy(nonce[4:], "PS-Msg06")
+	plain, err := aead.Open(nil, nonce, encrypted, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: decrypt pair-setup M6: %v", ErrReceiverNotAuthenticated, err)
+	}
+	sub := tlv8Decode(plain)
+	identifier, publicKey := sub[tlvIdentifier], sub[tlvPublicKey]
+	if len(identifier) == 0 || len(publicKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("%w: pair-setup M6 receiver identity is incomplete", ErrReceiverNotAuthenticated)
+	}
+	signKey := hkdfSHA512(K, []byte("Pair-Setup-Accessory-Sign-Salt"), []byte("Pair-Setup-Accessory-Sign-Info"), 32)
+	identity := &ReceiverIdentity{ID: string(identifier), PublicKey: append(ed25519.PublicKey(nil), publicKey...)}
+	signed := bytes.Join([][]byte{signKey, identifier, publicKey}, nil)
+	if err := verifyReceiverSignature(identity, identifier, signed, sub[tlvSignature]); err != nil {
+		return nil, err
+	}
+	return identity, nil
+}
+
 // pairVerify establishes an encrypted channel using X25519 + Ed25519.
 func (c *AirPlayClient) PairVerify(ctx context.Context) error {
+	// Refused before anything is sent: with no receiver identity and no
+	// transient setup on this connection, whatever answers could not be told
+	// from the paired receiver.
+	if !c.receiver.valid() && !c.transientSetup {
+		return fmt.Errorf("%w: no saved receiver identity to verify against; pair again", ErrReceiverNotAuthenticated)
+	}
 	if c.pairingProtocol == pairingProtocolRaw {
 		return c.rawPairVerify(ctx)
 	}
@@ -717,18 +788,36 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	// Derive session encryption key
 	verifyKey := hkdfSHA512(shared, []byte("Pair-Verify-Encrypt-Salt"), []byte("Pair-Verify-Encrypt-Info"), 32)
 
-	// Decrypt and verify server's response if encrypted data present
-	if len(serverEncrypted) > 0 {
-		aead, err := chacha20poly1305.New(verifyKey)
-		if err != nil {
-			return fmt.Errorf("chacha20: %w", err)
+	// The receiver must prove it is the one this machine paired with: V2's
+	// encrypted part names it and carries its signature over
+	// serverX25519 || identifier || clientX25519, made with the long-term key
+	// recorded at pair-setup. This used to be decrypted only when present, and
+	// its contents discarded -- so any device answering at the receiver's
+	// address, with any X25519 key, was accepted.
+	authenticated := false
+	switch {
+	case c.receiver.valid():
+		if err := verifyPairVerifyM2(c.receiver, verifyKey, serverEncrypted, serverPublic[:], clientPublic[:]); err != nil {
+			return err
 		}
-		nonce := make([]byte, 12)
-		copy(nonce[4:], "PV-Msg02")
-		_, err = aead.Open(nil, nonce, serverEncrypted, nil)
-		if err != nil {
-			return fmt.Errorf("decrypt V2: %w", err)
+		authenticated = true
+	case c.transientSetup:
+		// Transient pairing just happened on this connection. It uses a
+		// published PIN and establishes no long-term identity, so there is
+		// nothing to verify against; it stays as it was.
+		if len(serverEncrypted) > 0 {
+			aead, err := chacha20poly1305.New(verifyKey)
+			if err != nil {
+				return fmt.Errorf("chacha20: %w", err)
+			}
+			nonce := make([]byte, 12)
+			copy(nonce[4:], "PV-Msg02")
+			if _, err := aead.Open(nil, nonce, serverEncrypted, nil); err != nil {
+				return fmt.Errorf("decrypt V2: %w", err)
+			}
 		}
+	default:
+		return fmt.Errorf("%w: no saved receiver identity to verify against; pair again", ErrReceiverNotAuthenticated)
 	}
 
 	// V3: Send our encrypted proof
@@ -767,7 +856,14 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 		if errTLV, ok := v4[tlvError]; ok {
 			return fmt.Errorf("pair-verify V4 error: %d", errTLV[0])
 		}
+		if state, ok := v4[tlvState]; authenticated && (!ok || len(state) != 1 || state[0] != 0x04) {
+			return fmt.Errorf("%w: pair-verify V4 is not a completed M4", ErrReceiverNotAuthenticated)
+		}
 		dbg("[PAIR-VERIFY] V4: response %d bytes, no error", len(v4Bytes))
+	} else if authenticated {
+		// M4 is the receiver's confirmation that it accepted this
+		// controller. A paired receiver sends it; an empty reply is not one.
+		return fmt.Errorf("%w: pair-verify V4 was empty", ErrReceiverNotAuthenticated)
 	} else {
 		dbg("[PAIR-VERIFY] V4: empty response (OK)")
 	}
@@ -797,6 +893,28 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	dbg("[PAIR-VERIFY] encryption ENABLED (HAP framing, nonces at 0)")
 
 	return nil
+}
+
+// verifyPairVerifyM2 decrypts pair-verify V2's encrypted part and checks the
+// receiver's signature over serverX25519 || identifier || clientX25519.
+func verifyPairVerifyM2(receiver *ReceiverIdentity, verifyKey, encrypted, serverPublic, clientPublic []byte) error {
+	if len(encrypted) == 0 {
+		return fmt.Errorf("%w: pair-verify V2 carried no receiver proof", ErrReceiverNotAuthenticated)
+	}
+	aead, err := chacha20poly1305.New(verifyKey)
+	if err != nil {
+		return fmt.Errorf("chacha20: %w", err)
+	}
+	nonce := make([]byte, 12)
+	copy(nonce[4:], "PV-Msg02")
+	plain, err := aead.Open(nil, nonce, encrypted, nil)
+	if err != nil {
+		return fmt.Errorf("%w: decrypt pair-verify V2: %v", ErrReceiverNotAuthenticated, err)
+	}
+	sub := tlv8Decode(plain)
+	identifier := sub[tlvIdentifier]
+	signed := bytes.Join([][]byte{serverPublic, identifier, clientPublic}, nil)
+	return verifyReceiverSignature(receiver, identifier, signed, sub[tlvSignature])
 }
 
 // TLV8 encoding/decoding
@@ -960,13 +1078,26 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	copy(serverSigMsg[:32], serverPublic[:])
 	copy(serverSigMsg[32:], clientPublic[:])
 
-	// Use the server's Ed25519 public key from /info
-	if c.info == nil || len(c.info.PK) < 32 {
-		return fmt.Errorf("server Ed25519 public key not available (call GetInfo first)")
+	// Whose key the signature is checked against is the whole question. /info
+	// and the mDNS "pk" record are plaintext and say whatever the device at
+	// this address chooses, so checking a saved pairing against them let any
+	// impersonator supply its own key and pass. A saved pairing is checked
+	// against the key recorded when it was made; only a raw pair-setup just
+	// performed on this connection -- unauthenticated by design, like
+	// transient pairing -- may use the key that setup returned.
+	var serverEd25519Pub ed25519.PublicKey
+	switch {
+	case c.receiver.valid():
+		serverEd25519Pub = c.receiver.PublicKey
+	case c.transientSetup && c.info != nil && len(c.info.PK) >= ed25519.PublicKeySize:
+		serverEd25519Pub = ed25519.PublicKey(c.info.PK[:ed25519.PublicKeySize])
+	default:
+		return fmt.Errorf("%w: raw pair-verify has no saved receiver key to verify against; pair again",
+			ErrReceiverNotAuthenticated)
 	}
-	serverEd25519Pub := ed25519.PublicKey(c.info.PK[:32])
 	if !ed25519.Verify(serverEd25519Pub, serverSigMsg, serverSig) {
-		return fmt.Errorf("server signature verification failed")
+		return fmt.Errorf("%w: raw pair-verify signature does not match the receiver's key",
+			ErrReceiverNotAuthenticated)
 	}
 	dbg("[RAW-PV] server signature verified OK")
 
