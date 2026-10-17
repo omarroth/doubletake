@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -45,6 +46,11 @@ type Request struct {
 	Target string `json:"target,omitempty"`
 	Port   int    `json:"port,omitempty"`
 	Pin    string `json:"pin,omitempty"`
+	// DeviceID optionally names the receiver meant. Its saved pairing then
+	// applies even if the device at Target names itself differently, and such
+	// a device is refused. Without it, the ID discovery advertised for Target
+	// is used.
+	DeviceID string `json:"device_id,omitempty"`
 }
 
 // StreamInfo describes one active (or connecting) mirror stream.
@@ -796,7 +802,7 @@ func (d *Daemon) handleConnect(req Request) Response {
 
 	go func() {
 		defer d.streamWorkers.Done()
-		d.connectAndStream(connCtx, entry, target, port, req.Pin)
+		d.connectAndStream(connCtx, entry, target, port, req.Pin, req.DeviceID)
 	}()
 
 	d.mu.Lock()
@@ -843,7 +849,7 @@ func (d *Daemon) pickFreeDeviceLocked(preferredPort int) (string, int) {
 	return "", 0
 }
 
-func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, target string, port int, suppliedCredential string) {
+func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, target string, port int, suppliedCredential, expectedDeviceID string) {
 	// removeStream cleans up this stream's entry and tears down its capture group
 	// if no other streams use that group.
 	removeStream := func(msg string) {
@@ -931,7 +937,25 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	}
 
 	deviceID := info.DeviceID
-	savedCreds := d.credStore.Lookup(deviceID)
+	if expectedDeviceID == "" {
+		// What discovery advertised for this address, before this connection.
+		d.mu.Lock()
+		for _, device := range d.devices {
+			if device.IP == target {
+				expectedDeviceID = device.DeviceID
+				break
+			}
+		}
+		d.mu.Unlock()
+	}
+	if expectedDeviceID == "" {
+		log.Printf("[daemon] warning: no device_id for %s and none discovered; a device there naming itself as a new receiver would be paired with from scratch", target)
+	}
+	savedCreds, err := d.credStore.LookupReceiver(expectedDeviceID, deviceID)
+	if err != nil {
+		removeStream(fmt.Sprintf("%v; refusing to cast", err))
+		return
+	}
 	screenCastRestoreToken := ""
 	if savedCreds != nil {
 		screenCastRestoreToken = savedCreds.RestoreToken
@@ -943,28 +967,41 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		if err != nil {
 			return err
 		}
+		// Whatever is paired with next is saved under this ID, so the device
+		// may not change it between connections.
+		if !strings.EqualFold(nextInfo.DeviceID, deviceID) {
+			_ = next.Close()
+			return fmt.Errorf("the receiver named itself %q, then %q after reconnecting; refusing to cast",
+				deviceID, nextInfo.DeviceID)
+		}
 		client = next
 		info = nextInfo
-		deviceID = info.DeviceID
 		return nil
 	}
 
 	log.Printf("[daemon] connected to %s (model: %s, deviceID: %s)", info.Name, info.Model, deviceID)
 
-	pairWithCredentialValue := func(value string) error {
-		credential = value
-		if err := client.Pair(ctx, value); err != nil {
-			return err
-		}
-		if client.PairKeys != nil {
+	// Only a pairing that proved the receiver's identity is worth saving. A
+	// transient pairing proves nothing and leaves nothing to verify against;
+	// saving it would produce credentials that cannot tell this receiver from
+	// an impersonator.
+	savePairing := func() {
+		if receiver := client.ReceiverIdentity(); client.PairKeys != nil && receiver != nil {
 			if err := d.credStore.SavePairing(deviceID, client.PairingID,
 				client.PairKeys.Ed25519Public, client.PairKeys.Ed25519Private,
-				client.PairingProtocol()); err != nil {
+				client.PairingProtocol(), receiver); err != nil {
 				log.Printf("[daemon] warning: failed to save credentials: %v", err)
 			} else {
 				log.Printf("[daemon] credentials saved for %s (deviceID: %s)", info.Name, deviceID)
 			}
 		}
+	}
+	pairWithCredentialValue := func(value string) error {
+		credential = value
+		if err := client.Pair(ctx, value); err != nil {
+			return err
+		}
+		savePairing()
 		return nil
 	}
 
@@ -1014,20 +1051,45 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 
 	// Pairing
 	paired := false
+	// Once this machine has paired with a receiver, nothing falls back to
+	// transient pairing for it; airplay.AfterSavedPairing says why.
+	mustPairWithCode := false
 	if savedCreds != nil && savedCreds.HasPairingCredentials() {
-		verifyErr := restoreSavedPairing(client, savedCreds)
-		if verifyErr == nil {
-			verifyErr = client.PairVerify(ctx)
-		}
-		if verifyErr != nil {
-			log.Printf("[daemon] pair-verify with saved creds failed: %v", verifyErr)
-			if err := reconnect(); err != nil {
-				removeStream(fmt.Sprintf("reconnect failed: %v", err))
-				return
+		var verifyErr error
+		step := airplay.AfterSavedPairing(savedCreds, func() error {
+			verifyErr = restoreSavedPairing(client, savedCreds)
+			if verifyErr == nil {
+				verifyErr = client.PairVerify(ctx)
 			}
-		} else {
+			return verifyErr
+		})
+		switch step {
+		case airplay.SavedPairingVerified:
 			paired = true
 			log.Printf("[daemon] pair-verify succeeded for %s", info.Name)
+		case airplay.SavedPairingRefuse:
+			if errors.Is(verifyErr, airplay.ErrReceiverNotAuthenticated) {
+				removeStream(fmt.Sprintf("%s did not prove it is the receiver this machine paired with "+
+					"(%v); refusing to cast. If you reset or replaced that receiver, remove its saved "+
+					"pairing and connect again; it must then show a code -- a receiver that shows "+
+					"none is not the one you paired with.", info.Name, verifyErr))
+			} else {
+				removeStream(fmt.Sprintf("pair-verify with the saved pairing for %s failed (%v); "+
+					"refusing to replace it with an unauthenticated one. Remove its saved pairing "+
+					"to pair with it again.", info.Name, verifyErr))
+			}
+			return
+		case airplay.SavedPairingPairWithCode, airplay.SavedPairingPairAsNew:
+			if verifyErr != nil {
+				log.Printf("[daemon] pair-verify with saved creds failed: %v", verifyErr)
+				if err := reconnect(); err != nil {
+					removeStream(fmt.Sprintf("reconnect failed: %v", err))
+					return
+				}
+			} else {
+				log.Printf("[daemon] saved pairing for %s predates receiver authentication; pairing again", info.Name)
+			}
+			mustPairWithCode = step == airplay.SavedPairingPairWithCode
 		}
 	} else if savedCreds != nil {
 		log.Printf("[daemon] saved credentials have no usable pair-verify keys, skipping")
@@ -1053,38 +1115,74 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		// Legacy password receivers consume the password in SRP. Modern receivers
 		// keep it solely for Digest and still perform transient HAP pairing, even
 		// when the receiver also publishes the on-screen PIN bit.
-		switch requiredPairingCredentialKind(info) {
-		case CredentialKindPassword:
-			if err := pairWithCredential(CredentialKindPassword); err != nil {
+		// pairAgainWithCode pairs again with a receiver this machine has paired
+		// with before. It goes through PairWithCode, which never falls back to
+		// transient pairing whatever /info claims: only the real receiver can
+		// show its PIN on its own screen.
+		pairAgainWithCode := func() error {
+			kind, code := CredentialKindPIN, ""
+			if requiredPairingCredentialKind(info) == CredentialKindPassword {
+				// A legacy receiver's configured pairing password.
+				kind, code = CredentialKindPassword, credential
+			}
+			// A PIN is shown afresh each time, so a preset value cannot be it:
+			// show one and wait for it.
+			if code == "" {
+				value, err := waitForCredential(kind)
+				if err != nil {
+					return fmt.Errorf("wait for %s: %w", kind, err)
+				}
+				code = value
+			}
+			if kind == CredentialKindPassword {
+				credential = code
+				client.SetPassword(code)
+			}
+			if err := client.PairWithCode(ctx, code); err != nil {
+				return fmt.Errorf("%s pairing: %w", kind, err)
+			}
+			savePairing()
+			return nil
+		}
+		if mustPairWithCode {
+			if err := pairAgainWithCode(); err != nil {
 				removeStream(err.Error())
 				return
 			}
-		case CredentialKindPIN:
-			if err := pairWithCredential(CredentialKindPIN); err != nil {
-				removeStream(err.Error())
-				return
-			}
-		default:
-			if err := client.Pair(ctx, ""); err != nil {
-				log.Printf("[daemon] transient pairing failed: %v", err)
-				// A modern fixed password is an HTTP Digest credential, not an SRP
-				// secret. Do not turn a transient failure into an invalid full setup.
-				if info.RequiresPassword() {
-					removeStream(fmt.Sprintf("transient pairing failed for password-protected receiver: %v", err))
+		} else {
+			switch requiredPairingCredentialKind(info) {
+			case CredentialKindPassword:
+				if err := pairWithCredential(CredentialKindPassword); err != nil {
+					removeStream(err.Error())
 					return
 				}
-				// A failed setup may leave pairing state attached to this socket. Start
-				// and finish the explicit PIN exchange on a fresh connection.
-				if err := reconnect(); err != nil {
-					removeStream(fmt.Sprintf("reconnect for credential pairing failed: %v", err))
-					return
-				}
+			case CredentialKindPIN:
 				if err := pairWithCredential(CredentialKindPIN); err != nil {
 					removeStream(err.Error())
 					return
 				}
-			} else {
-				log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
+			default:
+				if err := client.Pair(ctx, ""); err != nil {
+					log.Printf("[daemon] transient pairing failed: %v", err)
+					// A modern fixed password is an HTTP Digest credential, not an SRP
+					// secret. Do not turn a transient failure into an invalid full setup.
+					if info.RequiresPassword() {
+						removeStream(fmt.Sprintf("transient pairing failed for password-protected receiver: %v", err))
+						return
+					}
+					// A failed setup may leave pairing state attached to this socket. Start
+					// and finish the explicit PIN exchange on a fresh connection.
+					if err := reconnect(); err != nil {
+						removeStream(fmt.Sprintf("reconnect for credential pairing failed: %v", err))
+						return
+					}
+					if err := pairWithCredential(CredentialKindPIN); err != nil {
+						removeStream(err.Error())
+						return
+					}
+				} else {
+					log.Printf("[daemon] transient pairing succeeded for %s", info.Name)
+				}
 			}
 		}
 	}

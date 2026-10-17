@@ -92,7 +92,12 @@ func TestCredentialStorePersistsNegotiatedPairingProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
-	if err := store.SavePairing("raw-device", "pair-id", pub, priv, PairingProtocolRaw); err != nil {
+	receiverPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	receiver := &ReceiverIdentity{PublicKey: receiverPub}
+	if err := store.SavePairing("raw-device", "pair-id", pub, priv, PairingProtocolRaw, receiver); err != nil {
 		t.Fatalf("SavePairing: %v", err)
 	}
 	if err := store.SaveRestoreToken("raw-device", "restore-token"); err != nil {
