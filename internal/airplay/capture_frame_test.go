@@ -351,3 +351,47 @@ func ntpFromTime(value time.Time) uint64 {
 	fraction := (uint64(value.Nanosecond()) << 32) / uint64(time.Second)
 	return seconds<<32 | fraction
 }
+
+// testUntimedRTPPacketBytes builds a packet without the ONVIF extension, as
+// GStreamer before 1.22 emits for every buffer-list entry after the first.
+func testUntimedRTPPacketBytes(packet testRTPPacket) []byte {
+	rtp := make([]byte, 12+len(packet.payload))
+	rtp[0] = 0x80
+	rtp[1] = rtpVideoPayloadType
+	if packet.marker {
+		rtp[1] |= 0x80
+	}
+	binary.BigEndian.PutUint16(rtp[2:4], packet.sequence)
+	binary.BigEndian.PutUint32(rtp[4:8], packet.timestamp)
+	binary.BigEndian.PutUint32(rtp[8:12], testVideoSSRC)
+	copy(rtp[12:], packet.payload)
+	return frameRFC4571(rtp)
+}
+
+func TestRTPVideoAccessUnitReaderAcceptsUntimedContinuationPackets(t *testing.T) {
+	wallPTS := time.Unix(1787276400, 0).UTC()
+	now := time.Now()
+	var stream []byte
+	stream = append(stream, testRTPPacketBytes(testRTPPacket{20, 9000, ntpFromTime(wallPTS), false, []byte{0x7c, 0x85, 1, 2}})...)
+	stream = append(stream, testUntimedRTPPacketBytes(testRTPPacket{21, 9000, 0, true, []byte{0x7c, 0x45, 3, 4}})...)
+	reader := newRTPVideoAccessUnitReaderWithNow(bytes.NewReader(stream), func() time.Time { return now })
+
+	unit, err := reader.ReadVideoAccessUnit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte{0, 0, 0, 1, 0x65, 1, 2, 3, 4}; !bytes.Equal(unit.AnnexB, want) {
+		t.Fatalf("Annex-B access unit = %x, want %x", unit.AnnexB, want)
+	}
+	if !unit.PTS.Equal(wallPTS) {
+		t.Fatalf("PTS wall time = %v, want %v", unit.PTS, wallPTS)
+	}
+}
+
+func TestRTPVideoAccessUnitReaderRejectsUntimedAccessUnitStart(t *testing.T) {
+	stream := testUntimedRTPPacketBytes(testRTPPacket{20, 9000, 0, true, []byte{0x65, 1}})
+	reader := newRTPVideoAccessUnitReaderWithNow(bytes.NewReader(stream), time.Now)
+	if _, err := reader.ReadVideoAccessUnit(); err == nil || !strings.Contains(err.Error(), "extension is absent") {
+		t.Fatalf("error = %v, want missing extension", err)
+	}
+}
