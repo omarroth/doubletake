@@ -435,3 +435,22 @@ func TestLookupReceiverUsesTheReceiverMeant(t *testing.T) {
 		})
 	}
 }
+
+// lockedBackend is a credential store that cannot be read, like a locked
+// keyring.
+type lockedBackend struct{ CredentialBackend }
+
+func (lockedBackend) Lookup(string) (*SavedCredentials, error) {
+	return nil, errors.New("keyring is locked")
+}
+
+// Unreadable is not "never paired": that would pair from scratch with
+// whatever answers.
+func TestLookupReceiverRefusesWhenTheStoreCannotBeRead(t *testing.T) {
+	store := &CredentialStore{backend: lockedBackend{}}
+	for _, expected := range []string{"", "AA:BB:CC:DD:EE:01", "11:22:33:44:55:66"} {
+		if saved, err := store.LookupReceiver(expected, "AA:BB:CC:DD:EE:01"); err == nil {
+			t.Errorf("expected %q: LookupReceiver = (%v, nil) from an unreadable store", expected, saved)
+		}
+	}
+}

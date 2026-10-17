@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -947,6 +948,9 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		}
 		d.mu.Unlock()
 	}
+	if expectedDeviceID == "" {
+		log.Printf("[daemon] warning: no device_id for %s and none discovered; a device there naming itself as a new receiver would be paired with from scratch", target)
+	}
 	savedCreds, err := d.credStore.LookupReceiver(expectedDeviceID, deviceID)
 	if err != nil {
 		removeStream(fmt.Sprintf("%v; refusing to cast", err))
@@ -963,9 +967,15 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		if err != nil {
 			return err
 		}
+		// Whatever is paired with next is saved under this ID, so the device
+		// may not change it between connections.
+		if !strings.EqualFold(nextInfo.DeviceID, deviceID) {
+			_ = next.Close()
+			return fmt.Errorf("the receiver named itself %q, then %q after reconnecting; refusing to cast",
+				deviceID, nextInfo.DeviceID)
+		}
 		client = next
 		info = nextInfo
-		deviceID = info.DeviceID
 		return nil
 	}
 
