@@ -180,20 +180,40 @@ func (cs *CredentialStore) Lookup(deviceID string) *SavedCredentials {
 // also claims to need no code. So when the caller knows which receiver it
 // means, that receiver's pairing is the one that applies, and a device naming
 // itself differently is refused while that pairing exists.
+//
+// A store that cannot be read is an error, not "never paired": treating a
+// locked keyring as a first contact would pair from scratch with whatever
+// answers.
 func (cs *CredentialStore) LookupReceiver(expectedID, reportedID string) (*SavedCredentials, error) {
 	if expectedID == "" || strings.EqualFold(expectedID, reportedID) {
-		if saved := cs.Lookup(reportedID); saved != nil || expectedID == "" {
-			return saved, nil
+		saved, err := cs.lookup(reportedID)
+		if err != nil || saved != nil || expectedID == "" {
+			return saved, err
 		}
-		return cs.Lookup(expectedID), nil
+		return cs.lookup(expectedID)
 	}
-	if saved := cs.Lookup(expectedID); saved.HasPairingCredentials() {
-		return nil, fmt.Errorf("%w: the device at this address names itself %q, not %q, which this machine paired with",
-			ErrReceiverNotAuthenticated, reportedID, expectedID)
+	saved, err := cs.lookup(expectedID)
+	if err != nil {
+		return nil, err
+	}
+	if saved.HasPairingCredentials() {
+		return nil, fmt.Errorf("%w: the device at this address names itself %q, not %q, which this machine "+
+			"paired with (if %q has left and another receiver now has its address, discover again)",
+			ErrReceiverNotAuthenticated, reportedID, expectedID, expectedID)
 	}
 	// Not paired with the receiver meant, so this is a first contact either
 	// way; the device's own ID is what its pairing will be saved under.
-	return cs.Lookup(reportedID), nil
+	return cs.lookup(reportedID)
+}
+
+func (cs *CredentialStore) lookup(deviceID string) (*SavedCredentials, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	creds, err := cs.backend.Lookup(deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("read saved pairing for %s: %w", deviceID, err)
+	}
+	return creds, nil
 }
 
 // Len returns the number of stored credential entries.

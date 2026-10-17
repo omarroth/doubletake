@@ -215,7 +215,16 @@ func main() {
 
 	// Looked up even for -pair: a receiver this machine has paired with is
 	// paired with again only with a code, never transiently.
-	savedCreds, err := credStore.LookupReceiver(*expectedDeviceID, info.DeviceID)
+	// The receiver meant: as given, or as discovery advertised it when it was
+	// picked. Without either, the device at -target is taken at its word.
+	expectedID := *expectedDeviceID
+	if expectedID == "" && advertisement != nil {
+		expectedID = advertisement.DeviceID
+	}
+	if expectedID == "" {
+		log.Printf("warning: no -device-id; a device at %s naming itself as a new receiver would be paired with from scratch", addr)
+	}
+	savedCreds, err := credStore.LookupReceiver(expectedID, info.DeviceID)
 	if err != nil {
 		log.Fatalf("%v; refusing to cast", err)
 	}
@@ -229,9 +238,16 @@ func main() {
 			log.Fatalf("reconnect failed: %v", err)
 		}
 		var err error
+		previousID := info.DeviceID
 		info, err = client.GetInfo()
 		if err != nil {
 			log.Fatalf("get info after reconnect failed: %v", err)
+		}
+		// Whatever is paired with next is saved under this ID, so the device
+		// may not change it between connections.
+		if !strings.EqualFold(info.DeviceID, previousID) {
+			log.Fatalf("the receiver named itself %q, then %q after reconnecting; refusing to cast",
+				previousID, info.DeviceID)
 		}
 	}
 
