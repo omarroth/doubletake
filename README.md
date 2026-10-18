@@ -46,7 +46,10 @@ provided by the plugins-bad package. Check availability with
 
 For AMD/Intel Wayland capture, also install `gst-plugin-va` on Arch Linux and
 check `gst-inspect-1.0 vapostproc`. This supplies the VA DMA-BUF import and
-scaling path, including when the video encoder uses a different backend.
+path, including when the video encoder uses a different backend. When downloading
+frames for another backend, Doubletake fits and pads them with `videoscale` in
+system memory to produce initialized black borders. This uses more CPU than VA
+scaling and works from actual video dimensions, including rotated captures.
 The software fallback can stall on some compositor/PipeWire combinations;
 see [#62](https://github.com/omarroth/doubletake/issues/62). Other distributions
 may package `vapostproc` separately from their older `vaapipostproc` plugin.
@@ -347,8 +350,9 @@ Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
 `nvh264enc`, `vah264enc`, `openh264enc`, then `x264enc`. Explicit selections
 fail if their required GStreamer encoder is unavailable; `none` forces x264 for
 H.264 or x265 for explicitly requested HEVC.
-The normal `-video-codec auto` path uses H.264 at the receiver's nominal canvas
-for compatibility across AirPlay receiver generations. Explicit
+The normal `-video-codec auto` path uses H.264 and includes valid advertised
+maximum dimensions within the ordinary 1920x1080 canvas. Larger maxima retain
+the nominal canvas. Explicit
 `-video-codec hevc` remains available with `nvh265enc` or `x265enc`; use
 `-hwaccel none` to force the software path.
 

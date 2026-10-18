@@ -22,8 +22,8 @@ func TestWaylandOrientationAppliedBeforeCanvas(t *testing.T) {
 		buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true),
 	} {
 		joined := strings.Join(pipeline, " ")
-		if !strings.Contains(joined, "vapostproc disable-passthrough=true add-borders=true video-direction=auto !") {
-			t.Fatalf("VA orientation and fitting must use the same transform: %s", joined)
+		if !strings.Contains(joined, "video-direction=auto !") {
+			t.Fatalf("VA orientation must be applied during import: %s", joined)
 		}
 		if strings.Contains(joined, "videoflip") {
 			t.Fatalf("VA path unexpectedly maps frames for CPU rotation: %s", joined)

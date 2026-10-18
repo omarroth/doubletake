@@ -1127,23 +1127,25 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
-// buildVAPostprocPlainRawWaylandVideoPipeline imports and scales a portal frame
+// buildVAPostprocPlainRawWaylandVideoPipeline imports and orients a portal frame
 // with VA, then requests a freshly allocated plain video/x-raw result. Drivers
 // may expose that result as ordinary memory or a CPU-mappable VA allocation;
 // either way, downstream never retains the portal-owned source buffer.
+// Fit and pad the downloaded frame with videoscale: some VA drivers leave
+// padding as zero NV12 (green), even when add-borders requests black. Keeping
+// native geometry until videoscale also avoids trusting portal logical sizes.
 func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
 	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
 	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
-	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true", "video-direction=auto"})
+	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=false", "video-direction=auto"})
 	postprocFormat, ok := vaPostprocSystemFormat(encoder.rawFormat)
 	if !ok {
 		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
 	}
-	caps := fmt.Sprintf("video/x-raw,format=%s", postprocFormat)
-	if maxWidth > 1 && maxHeight > 1 {
-		caps += fmt.Sprintf(",width=%d,height=%d,pixel-aspect-ratio=1/1", maxWidth&^1, maxHeight&^1)
+	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", postprocFormat)})
+	for _, stage := range receiverScaleStages(maxWidth, maxHeight) {
+		args = appendGstStage(args, stage)
 	}
-	args = appendGstStage(args, gstStage{caps})
 	if postprocFormat != encoder.rawFormat {
 		args = appendGstStage(args, gstStage{"videoconvert"})
 		args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
