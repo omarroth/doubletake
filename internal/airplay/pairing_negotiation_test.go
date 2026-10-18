@@ -84,7 +84,7 @@ func TestTransientPairingFallsBackFromUnsupportedHAPToRawByProtocol(t *testing.T
 	}
 }
 
-func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
+func TestRawLegacyPairingRequestsPDIndependentlyOfFeature27(t *testing.T) {
 	state := newReceiverPairingTestState(t, "", newReceiverControllerStore())
 	clientConn, serverConn := newPairingNegotiationPipe(t)
 	defer clientConn.Close()
@@ -108,8 +108,12 @@ func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
 				serverDone <- err
 				return
 			}
-			if got := request.headers["x-apple-pd"]; got != "" {
-				serverDone <- fmt.Errorf("request %d X-Apple-PD = %q, want omitted", requestIndex+1, got)
+			wantPD := ""
+			if request.uri == "/pair-verify" {
+				wantPD = "1"
+			}
+			if got := request.headers["x-apple-pd"]; got != wantPD {
+				serverDone <- fmt.Errorf("request %d X-Apple-PD = %q, want %q", requestIndex+1, got, wantPD)
 				return
 			}
 			var response []byte
@@ -139,8 +143,8 @@ func TestRawLegacyPairingOmitsPDAndDoesNotMixFairPlayKey(t *testing.T) {
 		t.Fatalf("Pair: %v", err)
 	}
 	waitPairingTestServer(t, serverDone)
-	if client.PairKeys == nil || client.PairKeys.MixFairPlayKey {
-		t.Fatal("legacy raw pairing unexpectedly enabled FairPlay key mixing")
+	if client.PairKeys == nil || !client.PairKeys.MixFairPlayKey {
+		t.Fatal("raw pairing did not record the requested FairPlay key mixing")
 	}
 }
 

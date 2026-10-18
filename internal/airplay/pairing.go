@@ -39,8 +39,7 @@ type PairKeys struct {
 	ReadKey        []byte
 	// MixFairPlayKey records the transformation negotiated by pair-verify.
 	// HAP always mixes its shared secret. The raw protocol requests the same
-	// transformation with X-Apple-PD unless the receiver advertises feature 27,
-	// the empirical compatibility signal for the original unmixed key path.
+	// transformation with X-Apple-PD, independently of advertised feature bits.
 	MixFairPlayKey bool
 }
 
@@ -1016,15 +1015,11 @@ func nonceBytes(n uint64) []byte {
 //	key = SHA-512("Pair-Verify-AES-Key" || X25519_shared_secret)[:16]
 //	iv  = SHA-512("Pair-Verify-AES-IV"  || X25519_shared_secret)[:16]
 func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
-	// X-Apple-PD asks the receiver to apply the pair-verify shared secret to
-	// FairPlay key derivation. Raw receivers split on feature 27: those advertising
-	// the original legacy-pairing capability require the unmixed key path, while
-	// those without it require PD mixing. Keep this exception capability-based.
-	mixFairPlayKey := c.info == nil || !c.info.SupportsLegacyPairing()
-	var verifyHeaders map[string]string
-	if mixFairPlayKey {
-		verifyHeaders = map[string]string{"X-Apple-PD": "1"}
-	}
+	// Apple's legacyPairing_PerformVerification sends X-Apple-PD: 1 on every
+	// pair-verify request. The receiver selects shared-secret key derivation
+	// from that request header, not from its legacy-pairing feature bit.
+	// AirPlaySender.c:279500; AirPlayReceiver.c:77375 (26A5388g).
+	verifyHeaders := map[string]string{"X-Apple-PD": "1"}
 
 	// Generate ephemeral X25519 key pair
 	var clientPrivate [32]byte
@@ -1134,7 +1129,7 @@ func (c *AirPlayClient) rawPairVerify(ctx context.Context) error {
 	// Store shared secret for potential stream key derivation,
 	// but do NOT enable HAP encryption on the control channel
 	c.PairKeys.SharedSecret = shared
-	c.PairKeys.MixFairPlayKey = mixFairPlayKey
+	c.PairKeys.MixFairPlayKey = true
 	c.pairType = pairingTypeLegacy
 	c.pairingProtocol = pairingProtocolRaw
 	return nil

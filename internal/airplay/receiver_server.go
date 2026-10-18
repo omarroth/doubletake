@@ -555,6 +555,7 @@ type receiverConnection struct {
 	legacyFairPlayKey [16]byte
 	legacyFairPlayIV  []byte
 	legacyFairPlaySet bool
+	legacyPairDerive  bool
 	sessionState      receiverSessionState
 }
 
@@ -761,6 +762,11 @@ func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse
 
 	case request.method == "POST" && path == "/pair-verify":
 		s.stats.pairVerify.Add(1)
+		// Apple's receiver records X-Apple-PD from the request and uses it for
+		// FairPlay key derivation. Profile feature bits do not select this mode.
+		if value, ok := request.headers["x-apple-pd"]; ok {
+			c.legacyPairDerive = value == "1"
+		}
 		body, err := c.pairing.pairVerify(request.body)
 		if err != nil {
 			s.logf("pair-verify rejected: %v", err)
@@ -1301,6 +1307,10 @@ func (c *receiverConnection) configureLegacyVideo(stream map[string]any) error {
 	mode := c.server.profile.legacyVideoKey
 	if mode == receiverLegacyVideoNone {
 		return nil
+	}
+	mode = receiverLegacyVideoRaw
+	if c.legacyPairDerive {
+		mode = receiverLegacyVideoMixed
 	}
 	if c.hap != nil {
 		return fmt.Errorf("legacy AES video profile unexpectedly uses HAP control")
