@@ -157,6 +157,17 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 	if got := run("get-default-sink"); got != "local_test_output" {
 		t.Fatalf("cleanup changed default output: %s", got)
 	}
+	if !aacELDEncoderAvailable {
+		// Encoder construction happens after source selection. A build missing
+		// the optional codec must roll back the output it just acquired.
+		if failed, err := StartAudioCapture(ctx, false, AudioCodecAACELD); err == nil {
+			failed.Stop()
+			t.Fatal("unavailable AAC-ELD encoder unexpectedly started")
+		}
+		if strings.Contains(run("list", "short", "sinks"), "doubletake_") {
+			t.Fatal("encoder startup failure leaked its output")
+		}
+	}
 	// Cleanup must also happen on context cancellation without an explicit Stop.
 	restartCtx, stopRestart := context.WithCancel(ctx)
 	restart, err := StartAudioCapture(restartCtx, false, AudioCodecALAC)
