@@ -55,8 +55,8 @@ type videoSelection struct {
 }
 
 // selectVideo chooses one concrete codec and canvas from the final receiver
-// snapshot. The interoperable screen sender path uses AVC at the receiver's
-// nominal canvas. HEVC remains an explicit diagnostic override.
+// snapshot. The ordinary AVC path can use the advertised maximum up to 1080p;
+// larger canvases require a separate high-resolution codec path.
 func (i *ReceiverInfo) selectVideo(requested VideoCodec, automaticHEVCAvailable bool) (videoSelection, error) {
 	_ = automaticHEVCAvailable // Retained for programmatic compatibility.
 	if requested == "" {
@@ -68,7 +68,7 @@ func (i *ReceiverInfo) selectVideo(requested VideoCodec, automaticHEVCAvailable 
 
 	switch requested {
 	case VideoCodecH264:
-		width, height := i.MirrorSize()
+		width, height := i.h264VideoCanvas()
 		return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "explicit H.264"}, nil
 	case VideoCodecHEVC:
 		width, height, err := i.videoCanvas(VideoCodecHEVC)
@@ -77,11 +77,26 @@ func (i *ReceiverInfo) selectVideo(requested VideoCodec, automaticHEVCAvailable 
 		}
 		return videoSelection{codec: VideoCodecHEVC, width: width, height: height, reason: "explicit HEVC"}, nil
 	case VideoCodecAuto:
-		width, height := i.MirrorSize()
+		width, height := i.h264VideoCanvas()
 		return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "automatic compatibility path"}, nil
 	default:
 		panic("validated video codec has no selection policy")
 	}
+}
+
+// h264VideoCanvas follows screenstream_init's default screenEnableMaxDisplaySize
+// and screenstream_initDisplayInfo's ordinary 1920x1080 limit. A receiver's
+// nominal 720p canvas is not its decoder limit when it advertises a usable
+// 1080p maximum. Above that limit Apple's sender requires another local codec
+// gate; keep the nominal canvas rather than inferring that gate from a model.
+// AirPlaySender.c:188161,188237,191104-191143 (26A5388g).
+func (i *ReceiverInfo) h264VideoCanvas() (int, int) {
+	width, height := i.MirrorSize()
+	maximumW, maximumH := i.MaxVideoSize()
+	if width > 0 && height > 0 && maximumW > 0 && maximumH > 0 && maximumW <= 1920 && maximumH <= 1080 {
+		return max(width, maximumW), max(height, maximumH)
+	}
+	return width, height
 }
 
 // highResolutionVideoCanvas implements the high-resolution display-size gate.
@@ -128,12 +143,10 @@ func (i *ReceiverInfo) videoCanvas(codec VideoCodec) (int, int, error) {
 		return 0, 0, fmt.Errorf("receiver does not advertise AirPlay feature 42 (SupportsScreenMultiCodec) required for HEVC")
 	}
 	if codec == VideoCodecHEVC {
-		// The high-resolution screen path uses PixelSizeMax only after HEVC/HDR
-		// support has been established. The ordinary H.264 path uses the nominal
-		// PixelSize instead.
+		// The high-resolution screen path can exceed the ordinary H.264 limit.
 		width, height := i.maximumVideoCanvas()
 		return width, height, nil
 	}
-	width, height := i.MirrorSize()
+	width, height := i.h264VideoCanvas()
 	return width, height, nil
 }

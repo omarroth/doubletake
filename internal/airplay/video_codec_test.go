@@ -117,3 +117,35 @@ func TestLegacyMirrorPreparationAPIRejectsAutomaticCodec(t *testing.T) {
 		t.Fatalf("legacy preparation(auto) error = %v", err)
 	}
 }
+
+func TestH264UsesAdvertisedMaximumWithin1080p(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		maxW, maxH   int
+		wantW, wantH int
+	}{
+		{"1080p maximum", 1920, 1080, 1920, 1080},
+		{"intermediate maximum", 1600, 900, 1600, 900},
+		{"missing maximum", 0, 0, 1280, 720},
+		{"incomplete maximum", 1920, 0, 1280, 720},
+		{"smaller maximum", 640, 360, 1280, 720},
+		{"high resolution needs separate codec gate", 3840, 2160, 1280, 720},
+		{"oversized width", 1921, 1080, 1280, 720},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			info := &ReceiverInfo{Model: "IndependentModel", Displays: []DisplayInfo{{
+				WidthPixels: 1280, HeightPixels: 720,
+				WidthPixelsMax: plistNumber(test.maxW), HeightPixelsMax: plistNumber(test.maxH),
+			}}}
+			for _, codec := range []VideoCodec{VideoCodecAuto, VideoCodecH264} {
+				selection, err := info.selectVideo(codec, false)
+				if err != nil || selection.codec != VideoCodecH264 || selection.width != test.wantW || selection.height != test.wantH {
+					t.Fatalf("selection(%s) = %+v, err=%v, want H.264 %dx%d", codec, selection, err, test.wantW, test.wantH)
+				}
+			}
+			if w, h, err := info.videoCanvas(VideoCodecH264); err != nil || w != test.wantW || h != test.wantH {
+				t.Fatalf("canvas = %dx%d err=%v, want %dx%d", w, h, err, test.wantW, test.wantH)
+			}
+		})
+	}
+}
