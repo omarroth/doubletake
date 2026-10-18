@@ -145,12 +145,47 @@ local playback. The default `-audio-source output` requires `pactl` and GStreame
 created. `-test` generates a tone without using the sound server, and `-no-audio`
 creates no output.
 
+### Multiroom playback
+
+Daemon mode uses one timestamped audio capture and one encoder per negotiated
+audio codec. New receivers reuse an active codec when they advertise it; otherwise
+the daemon prefers lossless ALAC when offered. Receivers requiring another format
+get one shared encoder for that format. AAC-ELD remains available in builds that
+enable it. Encryption, RTP epochs,
+retransmission and network-clock conversion remain independent for each receiver.
+
+Video receivers sharing a codec and canvas use one capture/encoder and encoded
+fan-out. Different canvases or codecs retain separate encoders to respect receiver
+limits and image quality. They reuse the same selected source and Wayland portal
+session. Joining or leaving does not restart capture for the other receivers.
+
+All daemon destinations use a common audio/video playout budget of **250 ms**,
+including the first receiver, so later joins do not require shifting an existing
+stream's timeline. `-target-latency-ms` sets a different joint budget at daemon
+startup. A capture whose measured requirement exceeds that budget is rejected;
+increase the budget rather than giving that receiver a different deadline.
+The foreground sender retains its ordinary connection-aware latency policy.
+
+Capture PTS and audio sample positions determine presentation time, regardless of
+when an individual sender drains its queue. Queues are bounded: a stalled audio
+consumer loses its subscription instead of blocking the other rooms. Shared
+capture requires GStreamer's RTP/ONVIF timestamp elements; output-time timestamp
+fallback cannot align rooms. The daemon's status JSON reports `shared_audio`
+source/encoder/receiver counts, `video_encoders`, and `playout_latency_ms`.
+
+These changes align the sender's media timelines. Physical playback alignment
+still depends on receiver clock mapping, decoder and output-device latency.
+Headless timing and packet tests do not certify audible synchronization on real
+receivers, particularly across different timing protocols and audio codecs.
+
 ### Optional AAC-ELD support
 
 Doubletake selects screen audio from the receiver's advertised
 `supportedFormats.screenStream` mask. Default builds use the built-in ALAC
 encoder when the receiver advertises it and require no FDK-AAC dependency.
-An optional build enables AAC-ELD and prefers it when advertised. This codec
+An optional build enables AAC-ELD and the foreground sender prefers it when
+advertised; the daemon reuses an active codec or prefers offered ALAC for sharing.
+This codec
 is distinct from AAC-LC: the ordinary GStreamer `avenc_aac` encoder cannot
 replace it. AAC-ELD requires the system `libfdk-aac` development files and cgo:
 
@@ -334,7 +369,7 @@ doubletake-ctl disconnect
 | `-pair` | false | Force new pairing |
 | `-fps` | 30 | Frames per second |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
-| `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = automatic wired/wireless profiles with separate audio/video defaults) |
+| `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
 | `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |

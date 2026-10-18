@@ -65,12 +65,15 @@ type StreamInfo struct {
 
 // Response is returned to the caller for every request.
 type Response struct {
-	OK         bool   `json:"ok"`
-	State      State  `json:"state"`
-	Device     string `json:"device,omitempty"`
-	DeviceIP   string `json:"device_ip,omitempty"`
-	HasAudio   bool   `json:"has_audio"`
-	AudioMuted bool   `json:"audio_muted"`
+	SharedAudio      airplay.SharedAudioStats `json:"shared_audio"`
+	VideoEncoders    int                      `json:"video_encoders"`
+	PlayoutLatencyMS int64                    `json:"playout_latency_ms"`
+	OK               bool                     `json:"ok"`
+	State            State                    `json:"state"`
+	Device           string                   `json:"device,omitempty"`
+	DeviceIP         string                   `json:"device_ip,omitempty"`
+	HasAudio         bool                     `json:"has_audio"`
+	AudioMuted       bool                     `json:"audio_muted"`
 	// NeedsPIN is retained for older clients and is true only for an on-screen
 	// PIN. NeedsCredential and CredentialKind distinguish configured passwords.
 	NeedsPIN        bool           `json:"needs_pin,omitempty"`
@@ -113,14 +116,16 @@ type Config struct {
 
 func (d *Daemon) mirrorStreamConfig() airplay.StreamConfig {
 	return airplay.StreamConfig{
-		FPS:        d.cfg.FPS,
-		Bitrate:    d.cfg.Bitrate,
-		VideoCodec: d.cfg.VideoCodec,
-		NoEncrypt:  d.cfg.NoEncrypt,
-		DirectKey:  d.cfg.DirectKey,
-		NoAudio:    d.cfg.NoAudio,
-		PortMin:    d.cfg.PortMin,
-		PortMax:    d.cfg.PortMax,
+		FPS:                 d.cfg.FPS,
+		Bitrate:             d.cfg.Bitrate,
+		VideoCodec:          d.cfg.VideoCodec,
+		NoEncrypt:           d.cfg.NoEncrypt,
+		DirectKey:           d.cfg.DirectKey,
+		NoAudio:             d.cfg.NoAudio,
+		PlayoutLatency:      d.playoutLatency,
+		PreferredAudioCodec: d.audioCapture.PreferredCodec(),
+		PortMin:             d.cfg.PortMin,
+		PortMax:             d.cfg.PortMax,
 	}
 }
 
@@ -247,11 +252,12 @@ type videoCaptureGroup struct {
 // afterwards keeps cancellation, pipe closure, RTSP teardown, socket closure,
 // and process shutdown from blocking unrelated daemon requests.
 type daemonCleanup struct {
-	cancels  []context.CancelFunc
-	sinks    []*airplay.BroadcastSink
-	sessions []*airplay.MirrorSession
-	clients  []*airplay.AirPlayClient
-	captures []*airplay.ScreenCapture
+	cancels      []context.CancelFunc
+	sinks        []*airplay.BroadcastSink
+	sessions     []*airplay.MirrorSession
+	clients      []*airplay.AirPlayClient
+	captures     []*airplay.ScreenCapture
+	preparations []*airplay.CapturePreparation
 }
 
 func (cleanup *daemonCleanup) addStream(entry *activeStream) {
@@ -302,6 +308,9 @@ func (cleanup *daemonCleanup) run() {
 	for _, client := range cleanup.clients {
 		_ = client.Close()
 	}
+	for _, p := range cleanup.preparations {
+		p.Close()
+	}
 	for _, capture := range cleanup.captures {
 		capture.Stop()
 	}
@@ -316,6 +325,9 @@ type Daemon struct {
 	credStore      *airplay.CredentialStore
 
 	// Multi-stream state
+	videoSource     *airplay.CapturePreparation
+	audioCapture    airplay.SharedAudioCapture
+	playoutLatency  time.Duration
 	streams         map[string]*activeStream               // keyed by target IP
 	captureGroups   map[videoCaptureKey]*videoCaptureGroup // one encoder/fan-out per advertised canvas
 	capturePortalMu sync.Mutex                             // serializes interactive Wayland portal access
@@ -371,6 +383,7 @@ func New(cfg Config) (*Daemon, error) {
 
 	return &Daemon{
 		cfg:            cfg,
+		playoutLatency: airplay.SharedPlayoutLatency(),
 		deviceLastSeen: make(map[string]time.Time),
 		streams:        make(map[string]*activeStream),
 		captureGroups:  make(map[videoCaptureKey]*videoCaptureGroup),
@@ -467,6 +480,7 @@ func (d *Daemon) Shutdown() {
 	// Network handshakes, capture callbacks, and a concurrent control request's
 	// detached cleanup may still be unwinding. Do not let them run into the next
 	// test or process lifecycle.
+	d.audioCapture.Close()
 	d.streamWorkers.Wait()
 	os.Remove(d.cfg.SocketPath)
 }
@@ -646,17 +660,20 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 	}
 
 	return Response{
-		OK:              ok,
-		State:           overall,
-		Device:          device,
-		DeviceIP:        deviceIP,
-		HasAudio:        hasAudio,
-		AudioMuted:      audioMuted,
-		NeedsPIN:        credentialKind == CredentialKindPIN,
-		NeedsCredential: credentialKind != "",
-		CredentialKind:  credentialKind,
-		Error:           errMsg,
-		Streams:         streams,
+		SharedAudio:      d.audioCapture.Stats(),
+		VideoEncoders:    len(d.captureGroups),
+		PlayoutLatencyMS: d.playoutLatency.Milliseconds(),
+		OK:               ok,
+		State:            overall,
+		Device:           device,
+		DeviceIP:         deviceIP,
+		HasAudio:         hasAudio,
+		AudioMuted:       audioMuted,
+		NeedsPIN:         credentialKind == CredentialKindPIN,
+		NeedsCredential:  credentialKind != "",
+		CredentialKind:   credentialKind,
+		Error:            errMsg,
+		Streams:          streams,
 	}
 }
 
@@ -1332,7 +1349,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	var audioDone chan error
 	if !d.cfg.NoAudio && session.HasAudio() {
 		var audioErr error
-		audioCapture, audioErr = airplay.StartAudioCaptureWithSource(ctx, d.cfg.TestMode, session.AudioCodec(), d.cfg.AudioSource)
+		audioCapture, audioErr = d.audioCapture.Acquire(ctx, d.cfg.TestMode, session.AudioCodec(), d.cfg.AudioSource)
 		if audioErr != nil {
 			log.Printf("[daemon] audio capture failed: %v (continuing without audio)", audioErr)
 		} else {
@@ -1439,10 +1456,51 @@ func (d *Daemon) prepareVideoCapture(ctx context.Context, restoreToken, deviceID
 			return d.credStore.SaveRestoreToken(deviceID, token)
 		}
 	}
-	if d.cfg.TestMode {
-		return airplay.PrepareTestCapture(ctx, cfg)
+	d.mu.Lock()
+	source := d.videoSource
+	d.mu.Unlock()
+	if source != nil {
+		if fork, err := source.Fork(ctx, codec); err == nil {
+			return fork, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
-	return airplay.PrepareCapture(ctx, cfg)
+	var prepared *airplay.CapturePreparation
+	var err error
+	if d.cfg.TestMode {
+		prepared, err = airplay.PrepareTestCapture(ctx, cfg)
+	} else {
+		prepared, err = airplay.PrepareCapture(ctx, cfg)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !prepared.HasSourceTimestamps() {
+		prepared.Close()
+		return nil, fmt.Errorf("shared video capture requires GStreamer RTP/ONVIF source timestamps")
+	}
+	d.mu.Lock()
+	if d.shuttingDown || ctx.Err() != nil || len(d.streams) == 0 {
+		d.mu.Unlock()
+		prepared.Close()
+		return nil, context.Canceled
+	}
+	previous := d.videoSource
+	d.videoSource = prepared
+	d.mu.Unlock()
+	if previous != nil {
+		previous.Close()
+	}
+	return prepared.Fork(ctx, codec)
+}
+
+func (d *Daemon) releaseVideoSourceIfIdleLocked(cleanup *daemonCleanup) {
+	if len(d.streams) == 0 && len(d.captureGroups) == 0 && d.videoSource != nil {
+		cleanup.preparations = append(cleanup.preparations, d.videoSource)
+		d.videoSource = nil
+	}
 }
 
 // getOrStartPreparedCaptureGroup consumes an already-authorized capture source
@@ -1661,6 +1719,7 @@ func (d *Daemon) detachStreamLocked(target string) daemonCleanup {
 	delete(d.streams, target)
 	cleanup.addStream(entry)
 	cleanup.merge(d.detachCaptureGroupIfUnusedLocked(group))
+	d.releaseVideoSourceIfIdleLocked(&cleanup)
 	return cleanup
 }
 
@@ -1684,12 +1743,13 @@ func (cleanup *daemonCleanup) merge(other daemonCleanup) {
 	cleanup.sessions = append(cleanup.sessions, other.sessions...)
 	cleanup.clients = append(cleanup.clients, other.clients...)
 	cleanup.captures = append(cleanup.captures, other.captures...)
+	cleanup.preparations = append(cleanup.preparations, other.preparations...)
 }
 
 func (cleanup *daemonCleanup) empty() bool {
 	return len(cleanup.cancels) == 0 && len(cleanup.sinks) == 0 &&
 		len(cleanup.sessions) == 0 && len(cleanup.clients) == 0 &&
-		len(cleanup.captures) == 0
+		len(cleanup.captures) == 0 && len(cleanup.preparations) == 0
 }
 
 // detachCaptureGroupIfUnusedLocked transfers an encoder group to a cleanup plan
@@ -1729,6 +1789,7 @@ func (d *Daemon) detachCaptureGroupStreamsLocked(group *videoCaptureGroup) daemo
 		cleanup.addStream(entry)
 	}
 	cleanup.merge(d.detachCaptureGroupLocked(group))
+	d.releaseVideoSourceIfIdleLocked(&cleanup)
 	return cleanup
 }
 
@@ -1868,6 +1929,7 @@ func (d *Daemon) detachAllLocked() daemonCleanup {
 		cleanup.addCaptureGroup(group)
 	}
 	clear(d.captureGroups)
+	d.releaseVideoSourceIfIdleLocked(&cleanup)
 	return cleanup
 }
 

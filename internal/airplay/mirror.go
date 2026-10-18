@@ -547,6 +547,12 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	if err != nil {
 		return nil, fmt.Errorf("negotiate screen audio: %w", err)
 	}
+	if cfg.PreferredAudioCodec == AudioCodecALAC && (c.info == nil || uint64(c.info.effectiveSupportedFormats().ScreenStream)&screenAudioFormatALAC != 0) {
+		// A shared lossless stream avoids redundant codec work and format-specific
+		// priming differences when peers offer both codecs. Never override an
+		// ELD-only offer or infer support from receiver identity.
+		policy.audioCodec = AudioCodecALAC
+	}
 	if timingOverride != "" {
 		policy.timing = timingOverride
 	}
@@ -650,6 +656,15 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	// interface latency hint. Timing protocol only changes clock conversion.
 	latencyHint, routeInterface := connectionLatencyHintForConnection(c.conn)
 	latencies := screenLatenciesForHint(latencyHint)
+	if cfg.PlayoutLatency > 0 {
+		if cfg.PlayoutLatency > 2*time.Second {
+			return nil, fmt.Errorf("shared playout latency exceeds two seconds")
+		}
+		latencies = screenLatencyTargets{video: cfg.PlayoutLatency, audio: cfg.PlayoutLatency}
+		if cfg.MeasuredVideoLatency > cfg.PlayoutLatency {
+			return nil, fmt.Errorf("capture requires %v but shared playout budget is %v; raise -target-latency-ms for the daemon", cfg.MeasuredVideoLatency, cfg.PlayoutLatency)
+		}
+	}
 	if routeInterface == "" {
 		dbg("[SETUP] base screen latency policy: hint=%s interface=unknown video=%v audio=%v",
 			connectionLatencyHintName(latencyHint), latencies.video, latencies.audio)
@@ -698,6 +713,9 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	measuredLatencyApplied := false
 	audioSetupCommitted := false
 	applyMeasuredCaptureLatency := func(codec VideoCodec, minimumVideoLead time.Duration) error {
+		if cfg.PlayoutLatency > 0 && minimumVideoLead > latencies.video {
+			return fmt.Errorf("capture requires %v but shared playout budget is %v; raise -target-latency-ms for the daemon", minimumVideoLead, latencies.video)
+		}
 		if measuredLatencyApplied || codec != VideoCodecHEVC || targetLatencyIsExplicit() || minimumVideoLead <= latencies.video {
 			return nil
 		}

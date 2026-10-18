@@ -201,3 +201,13 @@ func samplesFor44k1(d time.Duration) uint32 {
 	}
 	return uint32(samples)
 }
+
+// SharedPlayoutLatency provides a common budget for all daemon destinations.
+// A quarter second absorbs the existing bounded capture/fan-out stall window;
+// the explicit joint latency option remains authoritative.
+func SharedPlayoutLatency() time.Duration {
+	if explicit := time.Duration(targetLatencyNS.Load()); explicit > 0 {
+		return explicit
+	}
+	return audioCaptureStallBuffer
+}

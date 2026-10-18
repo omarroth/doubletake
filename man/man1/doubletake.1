@@ -88,6 +88,8 @@ Target bitrate in kbps (0 = auto, default: 0)
 .B \-target-latency-ms \fIMS\fR
 Override both audio and video playout latency in milliseconds. Zero selects the
 automatic AirPlay policy with separate screen and audio defaults (default: 0).
+Daemon mode instead uses one common 250 ms audio/video budget for all receivers
+when this option is zero. A nonzero value sets that common budget at startup.
 .TP
 .B \-no-audio
 Disable audio for video-only mirroring

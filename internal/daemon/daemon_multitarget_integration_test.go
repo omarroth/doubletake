@@ -79,7 +79,7 @@ func TestDaemonStreamsToTwoPasswordReceivers(t *testing.T) {
 		Bitrate:     500,
 		HWAccel:     "openh264",
 		TestMode:    true,
-		NoAudio:     true,
+		NoAudio:     false,
 	})
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
@@ -173,7 +173,7 @@ func TestDaemonStreamsToTwoPasswordReceivers(t *testing.T) {
 	for {
 		firstStats := receivers[0].server.Stats()
 		secondStats := receivers[1].server.Stats()
-		if firstStats.VideoPackets >= 3 && secondStats.VideoPackets >= 3 {
+		if firstStats.VideoPackets >= 3 && secondStats.VideoPackets >= 3 && firstStats.AudioPackets >= 5 && secondStats.AudioPackets >= 5 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -186,6 +186,17 @@ func TestDaemonStreamsToTwoPasswordReceivers(t *testing.T) {
 		t.Errorf("equal receiver ceilings created %d capture groups, want 1", len(d.captureGroups))
 	}
 	d.mu.Unlock()
+	status = sendDaemonSocketRequest(t, socketPath, Request{Cmd: "status"})
+	if status.SharedAudio.Sources != 1 || status.SharedAudio.Encoders != 1 || status.SharedAudio.Receivers != 2 || status.VideoEncoders != 1 || status.PlayoutLatencyMS != 250 {
+		t.Fatalf("multiroom sharing = %+v", status)
+	}
+	before := receivers[1].server.Stats().AudioPackets
+	if resp := sendDaemonSocketRequest(t, socketPath, Request{Cmd: "disconnect", Target: firstAddr.IP.String()}); !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	waitForDaemonSocketStatus(t, socketPath, 5*time.Second, func(resp Response) bool {
+		return len(resp.Streams) == 1 && resp.SharedAudio.Sources == 1 && resp.SharedAudio.Encoders == 1 && resp.SharedAudio.Receivers == 1 && receivers[1].server.Stats().AudioPackets > before+5
+	})
 }
 
 func TestDaemonCaptureGroupsRespectReceiverCeilingsInEitherOrder(t *testing.T) {

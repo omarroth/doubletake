@@ -1402,13 +1402,18 @@ func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
 // StreamConfig holds the configuration for a mirroring session.
 type StreamConfig struct {
 	FPS                    int
-	Bitrate                int           // Video bitrate in kbps
-	VideoCodec             VideoCodec    // empty/h264, auto (H.264), or explicitly requested hevc
-	AutomaticHEVCAvailable bool          // retained for programmatic compatibility
-	MeasuredVideoLatency   time.Duration // measured minimum lead for the local HEVC capture path
-	NoEncrypt              bool          // Disable encryption for debugging
-	DirectKey              bool          // Use shk/shiv directly without SHA-512 derivation
-	NoAudio                bool          // Disable audio streaming
+	Bitrate                int        // Video bitrate in kbps
+	VideoCodec             VideoCodec // empty/h264, auto (H.264), or explicitly requested hevc
+	AutomaticHEVCAvailable bool       // retained for programmatic compatibility
+	// PreferredAudioCodec changes preference only when that format is offered.
+	PreferredAudioCodec AudioCodec
+	// PlayoutLatency fixes both media leads for a shared sender timeline. Zero
+	// retains the ordinary per-connection policy. It cannot grow mid-session.
+	PlayoutLatency       time.Duration
+	MeasuredVideoLatency time.Duration // measured minimum lead for the local HEVC capture path
+	NoEncrypt            bool          // Disable encryption for debugging
+	DirectKey            bool          // Use shk/shiv directly without SHA-512 derivation
+	NoAudio              bool          // Disable audio streaming
 
 	// PortMin/PortMax bound the local ports used for the audio UDP triple
 	// (timing/control/data, 3 consecutive ports). The receiver's event channel
