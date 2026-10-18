@@ -395,3 +395,44 @@ func TestRTPVideoAccessUnitReaderRejectsUntimedAccessUnitStart(t *testing.T) {
 		t.Fatalf("error = %v, want missing extension", err)
 	}
 }
+
+func TestRTPVideoAccessUnitReaderUntimedPacketBoundaries(t *testing.T) {
+	pts := ntpFromTime(time.Unix(1787276300, 0))
+	for _, test := range []struct {
+		name    string
+		first   testRTPPacket
+		second  testRTPPacket
+		wantErr string
+	}{
+		{"new timestamp", testRTPPacket{1, 90, pts, false, []byte{0x65, 1}}, testRTPPacket{2, 180, 0, true, []byte{0x61, 2}}, "extension is absent"},
+		{"sequence gap", testRTPPacket{1, 90, pts, false, []byte{0x65, 1}}, testRTPPacket{3, 90, 0, true, []byte{0x61, 2}}, "sequence discontinuity"},
+		{"new access unit reusing timestamp", testRTPPacket{1, 90, pts, true, []byte{0x65, 1}}, testRTPPacket{2, 90, 0, true, []byte{0x61, 2}}, "extension is absent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stream := append(testRTPPacketBytes(test.first), testUntimedRTPPacketBytes(test.second)...)
+			reader := newRTPVideoAccessUnitReaderWithNow(bytes.NewReader(stream), time.Now)
+			if test.first.marker {
+				if _, err := reader.ReadVideoAccessUnit(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := reader.ReadVideoAccessUnit(); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestRTPVideoAccessUnitReaderUntimedHEVCContinuation(t *testing.T) {
+	pts := time.Unix(1787276300, 0)
+	stream := append(testRTPPacketBytes(testRTPPacket{1, 90, ntpFromTime(pts), false, []byte{0x62, 1, 0x93, 0x11}}),
+		testUntimedRTPPacketBytes(testRTPPacket{2, 90, 0, true, []byte{0x62, 1, 0x53, 0x22}})...)
+	reader := newRTPVideoAccessUnitReaderForCodecWithNow(bytes.NewReader(stream), VideoCodecHEVC, time.Now)
+	unit, err := reader.ReadVideoAccessUnit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(unit.AnnexB, []byte{0, 0, 0, 1, 0x26, 1, 0x11, 0x22}) || !unit.PTS.Equal(pts) {
+		t.Fatalf("HEVC unit = %+v, want reassembled IDR with original PTS", unit)
+	}
+}
