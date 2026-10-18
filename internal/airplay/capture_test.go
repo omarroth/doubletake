@@ -999,6 +999,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34", "provide-clock=false",
 		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=NV12",
+		"!", "videoflip", "video-direction=auto",
 		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=I420",
 		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
@@ -1024,7 +1025,7 @@ func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 	wantOrder := []string{
 		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34", "provide-clock=false",
 		"!", "video/x-raw(ANY),pixel-aspect-ratio=1/1",
-		"!", "vapostproc", "disable-passthrough=true", "add-borders=true",
+		"!", "vapostproc", "disable-passthrough=true", "add-borders=true", "video-direction=auto",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
 		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
@@ -1040,7 +1041,7 @@ func TestVAPostprocPlainRawWaylandPipelineConvertsX265LayoutAfterScale(t *testin
 	encoder := encoderResult{parts: gstStage{"x265enc"}, rawFormat: "I420_10LE", codec: VideoCodecHEVC}
 	pipeline := buildVAPostprocPlainRawWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
 	wantOrder := []string{
-		"vapostproc", "disable-passthrough=true", "add-borders=true",
+		"vapostproc", "disable-passthrough=true", "add-borders=true", "video-direction=auto",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1",
 		"!", "videoconvert", "!", "video/x-raw,format=I420_10LE",
 		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",

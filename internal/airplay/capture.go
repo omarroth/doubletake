@@ -1018,7 +1018,7 @@ func buildVAWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoder
 	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
 	// Force a fresh surface even when the source already matches the output.
 	// Downstream retains the converted surface instead of another portal buffer.
-	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true"})
+	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true", "video-direction=auto"})
 	caps := "video/x-raw(memory:VAMemory),format=NV12"
 	if maxWidth > 1 && maxHeight > 1 {
 		caps += fmt.Sprintf(",width=%d,height=%d,pixel-aspect-ratio=1/1", maxWidth&^1, maxHeight&^1)
@@ -1106,6 +1106,10 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 	stagingFormat := systemMemoryStagingFormat(encoder.rawFormat)
 	args = appendGstStage(args, gstStage{"videoconvert"})
 	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", stagingFormat)})
+	// pipewiresrc translates SPA_META_VideoTransform into image-orientation
+	// tags. Apply these before fitting the receiver canvas; portal dimensions
+	// are logical coordinates and cannot identify the buffer's orientation.
+	args = appendGstStage(args, gstStage{"videoflip", "video-direction=auto"})
 	// Scale in the staging layout so the forced final conversion runs at the
 	// receiver canvas rather than at a potentially much larger HiDPI source size.
 	for _, stage := range receiverScaleStages(maxWidth, maxHeight) {
@@ -1130,7 +1134,7 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
 	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
 	args = appendGstStage(args, gstStage{"video/x-raw(ANY),pixel-aspect-ratio=1/1"})
-	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true"})
+	args = appendGstStage(args, gstStage{"vapostproc", "disable-passthrough=true", "add-borders=true", "video-direction=auto"})
 	postprocFormat, ok := vaPostprocSystemFormat(encoder.rawFormat)
 	if !ok {
 		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, encoder, maxWidth, maxHeight, timestampedOutput)
