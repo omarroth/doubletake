@@ -488,6 +488,17 @@ func (p *CapturePreparation) MeasuredVideoLatency() time.Duration {
 	return p.measuredVideoLatency
 }
 
+// HasSourceTimestamps reports whether the prepared source can retain capture
+// time across encoding and fan-out. Output-time fallback cannot align rooms.
+func (p *CapturePreparation) HasSourceTimestamps() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.timestampedOutput
+}
+
 // Close releases an unconsumed portal preparation. Once Start has taken
 // ownership, ScreenCapture.Stop owns the corresponding resources.
 func (p *CapturePreparation) Close() {
