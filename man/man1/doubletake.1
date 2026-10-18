@@ -32,6 +32,12 @@ Daemon mode with multi-target streaming control via
 .B \-target \fIIP\fR
 Connect to a specific Apple TV by IP address (skips mDNS discovery)
 .TP
+.B \-device-id \fIID\fR
+Expected receiver device ID. Use the saved pairing for this receiver and refuse
+a device reporting a different ID when that pairing exists. Interactive
+discovery supplies an expected ID automatically. Without one, an unknown
+reported device ID is treated as a first connection.
+.TP
 .B \-port \fIPORT\fR
 AirPlay port (default: 7000)
 .TP
@@ -60,6 +66,12 @@ below.
 .TP
 .B \-pair
 Force new pairing even if credentials exist
+.IP
+Saved PIN/password pairings authenticate the receiver on reconnect. Older
+credentials without a receiver key require pairing again once. A failed
+identity check stops the connection; it never falls back to unauthenticated
+pairing. After resetting or replacing a receiver, use this option and enter
+the new on-screen code to establish its replacement identity.
 .TP
 .B \-cred-backend \fIBACKEND\fR
 Credential storage backend: \fBfile\fR or \fBkeyring\fR (default: file)

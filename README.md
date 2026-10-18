@@ -19,7 +19,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 
 ## Requirements
 
-- Go 1.23+
+- Go 1.25+
 - GStreamer 1.0 (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
 - PulseAudio utilities (`pactl`; `pulseaudio-utils` on Ubuntu/Debian or the equivalent package on other distributions)
 - PipeWire (Wayland) or X11 for screen capture
@@ -29,7 +29,8 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 ```sh
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-ugly gstreamer1.0-libav pulseaudio-utils
+  gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools \
+  gstreamer1.0-pipewire pulseaudio-utils
 ```
 
 ### Arch Linux
@@ -42,6 +43,13 @@ sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
 The `openh264` encoder requires the GStreamer `openh264enc` element, normally
 provided by the plugins-bad package. Check availability with
 `gst-inspect-1.0 openh264enc`.
+
+For AMD/Intel Wayland capture, also install `gst-plugin-va` on Arch Linux and
+check `gst-inspect-1.0 vapostproc`. This supplies the VA DMA-BUF import and
+scaling path, including when the video encoder uses a different backend.
+The software fallback can stall on some compositor/PipeWire combinations;
+see [#62](https://github.com/omarroth/doubletake/issues/62). Other distributions
+may package `vapostproc` separately from their older `vaapipostproc` plugin.
 
 You can also install from the AUR:
 
@@ -116,8 +124,10 @@ make test
 
 Doubletake selects screen audio from the receiver's advertised
 `supportedFormats.screenStream` mask. Default builds use the built-in ALAC
-encoder when the receiver advertises it. AAC-ELD remains an explicit opt-in
-because it depends on the system `libfdk-aac` development files and cgo:
+encoder when the receiver advertises it and require no FDK-AAC dependency.
+An optional build enables AAC-ELD and prefers it when advertised. This codec
+is distinct from AAC-LC: the ordinary GStreamer `avenc_aac` encoder cannot
+replace it. AAC-ELD requires the system `libfdk-aac` development files and cgo:
 
 ```sh
 CGO_ENABLED=1 go build -tags fdk_aac -o bin/doubletake ./cmd/doubletake
@@ -216,6 +226,24 @@ Run with `-debug` to see the challenge and whether the retry was accepted.
 
 ## Usage
 
+H.264 uses the receiver's advertised maximum canvas when it fits within
+1920x1080, even when its nominal display canvas is 720p. Missing maxima retain
+the nominal size; larger maxima require the separate high-resolution codec
+path. This selection applies to every receiver without a model-specific flag.
+
+Saved PIN/password pairings record the receiver's identity and verify it on
+every reconnect. A failed identity check stops the connection; it does not
+fall back to unauthenticated pairing. Older credentials without a receiver key
+require pairing again once. If a receiver was reset or replaced, use `-pair`
+and enter its new on-screen code to establish the replacement identity.
+
+When connecting directly by IP, pass `-device-id ID` to identify the receiver
+you intend to reach. Interactive discovery supplies this ID automatically.
+Daemon clients can include `device_id` in a connect request; otherwise the
+daemon uses the ID currently advertised by discovery. Without an expected ID,
+an unknown device ID is treated as a first connection. Discovery and transient
+pairing alone do not authenticate a receiver.
+
 ```sh
 # Discover Apple TVs on the network and stream
 doubletake
@@ -272,6 +300,7 @@ doubletake-ctl disconnect
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-target` | | Apple TV IP (skip mDNS discovery) |
+| `-device-id` | | Expected receiver device ID for saved-pairing lookup and identity checking |
 | `-port` | 7000 | AirPlay port |
 | `-code` | | Pairing PIN shown on the receiver, or its configured password when "Require Password" is enabled (see [Password-protected receivers](#password-protected-receivers)); prefer `$DOUBLETAKE_CODE` |
 | `-port-range` | | Local UDP range for timing/audio and receiver control traffic (at least 3 ports) |
