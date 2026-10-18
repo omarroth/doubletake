@@ -73,6 +73,7 @@ func main() {
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
 	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
+	audioSource := flag.String("audio-source", "output", "Audio route: output (selectable Doubletake sink) or monitor (copy default output)")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	portRange := flag.String("port-range", "", "Local UDP port range for receiver timing/audio (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 3 ports.")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
@@ -87,6 +88,9 @@ func main() {
 	}
 	if err := airplay.ValidateVideoCodec(*videoCodec); err != nil {
 		log.Fatalf("invalid -video-codec: %v", err)
+	}
+	if err := airplay.ValidateAudioSource(*audioSource); err != nil {
+		log.Fatalf("invalid -audio-source: %v", err)
 	}
 	portMin, portMax, err := parsePortRange(*portRange)
 	if err != nil {
@@ -119,6 +123,7 @@ func main() {
 			NoEncrypt:   *noEncrypt,
 			DirectKey:   *directKey,
 			NoAudio:     *noAudio,
+			AudioSource: airplay.AudioSource(*audioSource),
 			ShowCursor:  !*noCursor,
 			Code:        credential,
 		})
@@ -544,12 +549,13 @@ func main() {
 
 	// Start audio capture and streaming unless disabled.
 	if !*noAudio && session.HasAudio() {
-		audioCapture, err := airplay.StartAudioCapture(ctx, *testMode, session.AudioCodec())
+		audioCapture, err := airplay.StartAudioCaptureWithSource(ctx, *testMode, session.AudioCodec(), airplay.AudioSource(*audioSource))
 		if err != nil {
 			log.Printf("warning: audio capture failed: %v (continuing without audio)", err)
 		} else {
 			defer audioCapture.Stop()
 			go func() {
+				defer audioCapture.Stop()
 				if err := session.StreamAudio(ctx, audioCapture, session.AudioStream()); err != nil && ctx.Err() == nil {
 					log.Printf("audio streaming error: %v", err)
 				}

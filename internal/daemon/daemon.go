@@ -106,6 +106,7 @@ type Config struct {
 	NoEncrypt   bool
 	DirectKey   bool
 	NoAudio     bool
+	AudioSource airplay.AudioSource
 	ShowCursor  bool
 	Code        string // default pairing/Digest credential; request Pin overrides it
 }
@@ -330,6 +331,9 @@ type Daemon struct {
 
 // New creates a new Daemon with the given configuration.
 func New(cfg Config) (*Daemon, error) {
+	if err := airplay.ValidateAudioSource(string(cfg.AudioSource)); err != nil {
+		return nil, fmt.Errorf("audio source: %w", err)
+	}
 	if err := airplay.ValidateHWAccel(cfg.HWAccel); err != nil {
 		return nil, fmt.Errorf("hwaccel: %w", err)
 	}
@@ -1328,12 +1332,13 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	var audioDone chan error
 	if !d.cfg.NoAudio && session.HasAudio() {
 		var audioErr error
-		audioCapture, audioErr = airplay.StartAudioCapture(ctx, d.cfg.TestMode, session.AudioCodec())
+		audioCapture, audioErr = airplay.StartAudioCaptureWithSource(ctx, d.cfg.TestMode, session.AudioCodec(), d.cfg.AudioSource)
 		if audioErr != nil {
 			log.Printf("[daemon] audio capture failed: %v (continuing without audio)", audioErr)
 		} else {
 			audioDone = make(chan error, 1)
 			go func() {
+				defer audioCapture.Stop()
 				aerr := session.StreamAudio(ctx, audioCapture, session.AudioStream())
 				if aerr != nil && ctx.Err() == nil {
 					log.Printf("[daemon] audio streaming error: %v", aerr)

@@ -122,7 +122,7 @@ type AudioCapture struct {
 	cancel          context.CancelFunc
 	waitCh          chan struct{}
 	waitErr         error
-	stopped         bool
+	stopOnce        sync.Once
 	codec           AudioCodec
 	alac            *alacEncoder
 	pcmLevelFrames  uint64
@@ -240,10 +240,18 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 	return append(args, "!", "fdsink", "fd=1", "sync=false", "async=false")
 }
 
-// StartAudioCapture launches a pipeline that captures system audio (monitor source)
-// and feeds raw PCM into the encoder negotiated by SETUP. ALAC is built in;
-// AAC-ELD is available in builds made with -tags fdk_aac and libfdk-aac.
+// StartAudioCapture captures the dedicated Doubletake audio output. Test mode
+// generates a tone without creating or connecting to a sound-server output.
 func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*AudioCapture, error) {
+	return StartAudioCaptureWithSource(ctx, testTone, codec, AudioSourceOutput)
+}
+
+// StartAudioCaptureWithSource optionally retains default-output monitoring for
+// users who want local playback as well as the remote stream.
+func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec AudioCodec, source AudioSource) (*AudioCapture, error) {
+	if err := ValidateAudioSource(string(source)); err != nil {
+		return nil, err
+	}
 	captureCtx, cancel := context.WithCancel(ctx)
 	if codec != AudioCodecALAC && codec != AudioCodecAACELD {
 		cancel()
@@ -251,6 +259,13 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*A
 	}
 	_, codecSPF, _, _, _, _ := codec.Info()
 
+	var releaseOutput func()
+	started := false
+	defer func() {
+		if !started && releaseOutput != nil {
+			releaseOutput()
+		}
+	}()
 	// Detect audio source
 	var srcArgs []string
 	if testTone {
@@ -261,12 +276,23 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*A
 		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
 		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil
 		monitor := ""
-		if hasPulseSource {
+		if source == "" || source == AudioSourceOutput {
+			if !hasPulseSource {
+				cancel()
+				return nil, fmt.Errorf("dedicated audio output requires GStreamer pulsesrc")
+			}
+			var err error
+			monitor, releaseOutput, err = sharedAudioOutput.acquire(captureCtx)
+			if err != nil {
+				cancel()
+				return nil, err
+			}
+		} else if hasPulseSource {
 			monitor = detectPulseMonitor()
 		}
-		var source string
-		srcArgs, source = selectAudioMonitorSource(hasPulseSource, monitor, hasPipeWireSource, codec)
-		switch source {
+		var backend string
+		srcArgs, backend = selectAudioMonitorSource(hasPulseSource, monitor, hasPipeWireSource, codec)
+		switch backend {
 		case "pulse":
 			fragmentTime := audioCaptureFragmentTime(codec)
 			dbg("[AUDIO] using pulsesrc device=%s (buffer=%s fragment=%s)",
@@ -335,9 +361,13 @@ func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*A
 	}
 	go func() {
 		ac.waitErr = <-waitResult
+		if releaseOutput != nil {
+			releaseOutput()
+		}
 		close(ac.waitCh)
 	}()
 
+	started = true
 	return ac, nil
 }
 
@@ -514,10 +544,10 @@ func (ac *AudioCapture) DrainStale() {
 }
 
 func (ac *AudioCapture) Stop() {
-	if ac.stopped {
-		return
-	}
-	ac.stopped = true
+	ac.stopOnce.Do(ac.stop)
+}
+
+func (ac *AudioCapture) stop() {
 	if ac.cancel != nil {
 		ac.cancel()
 	}

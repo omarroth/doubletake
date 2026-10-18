@@ -92,6 +92,16 @@ automatic AirPlay policy with separate screen and audio defaults (default: 0).
 .B \-no-audio
 Disable audio for video-only mirroring
 .TP
+.B \-audio-source \fISOURCE\fR
+Audio route: \fBoutput\fR (default) creates a selectable Doubletake output;
+\fBmonitor\fR copies the default local output, retaining local playback.
+Select Doubletake in sound settings to send applications or system audio to the
+receivers. Its volume and mute controls apply to the captured audio. The daemon
+shares this output across receivers and removes it when the last audio capture
+stops. Requires pactl and GStreamer's pulsesrc with PulseAudio or pipewire-pulse.
+Default routing and existing application routes are not changed automatically.
+Test mode generates a tone without creating an output.
+.TP
 .B \-hwaccel \fIMETHOD\fR
 Encoder preference: \fBauto\fR, \fBnvenc\fR (NVIDIA), \fBvaapi\fR
 (Intel/AMD), \fBopenh264\fR (software), or \fBnone\fR (x264, or x265 for
