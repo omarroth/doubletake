@@ -68,8 +68,8 @@ type ReceiverConfig struct {
 	// GET /info compatibility fallback.
 	OmitCombinedInfo bool
 	// OmitPTPClockIdentity accepts a PTP session without returning
-	// timingPeerInfo.ClockID. AcceptNTPFallback additionally lets the same
-	// connection create a replacement NTP session after TEARDOWN. These options
+	// timingPeerInfo.ClockID. AcceptNTPFallback additionally accepts an NTP
+	// session on a fresh, authenticated connection after TEARDOWN. These options
 	// exercise sender recovery from receivers with incomplete PTP negotiation.
 	OmitPTPClockIdentity bool
 	AcceptNTPFallback    bool
@@ -552,6 +552,7 @@ type receiverConnection struct {
 	hap               *receiverHAPStream
 	media             *receiverMediaSession
 	timingProbed      bool
+	timingProtocol    string
 	legacyFairPlayKey [16]byte
 	legacyFairPlayIV  []byte
 	legacyFairPlaySet bool
@@ -842,11 +843,7 @@ func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse
 			return c.invalidSessionState(request.method), nil
 		}
 		c.closeMedia()
-		if s.cfg.AcceptNTPFallback {
-			c.sessionState = receiverSessionInitial
-		} else {
-			c.sessionState = receiverSessionTornDown
-		}
+		c.sessionState = receiverSessionTornDown
 		return receiverOK(nil, ""), nil
 	default:
 		return receiverResponse{status: 404}, nil
@@ -990,8 +987,8 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 	if err := c.ensureMedia(); err != nil {
 		return receiverError(500, err)
 	}
-	if c.server.profile.timingProtocol == timingProtocolNTP &&
-		c.server.profile.ntpInitiator == receiverNTPReceiver && !c.timingProbed &&
+	if c.timingProtocol == timingProtocolNTP &&
+		(c.server.profile.ntpInitiator == receiverNTPReceiver || c.server.cfg.AcceptNTPFallback) && !c.timingProbed &&
 		plistInt(setup["timingPort"]) > 0 {
 		c.probeLegacyTiming(setup)
 	}
@@ -1105,6 +1102,7 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 		if protocol != profile.timingProtocol && !acceptFallback {
 			return fmt.Errorf("timingProtocol is %q, want %q", protocol, profile.timingProtocol)
 		}
+		c.timingProtocol = protocol
 		switch protocol {
 		case timingProtocolNTP:
 			if plistInt(setup["timingPort"]) <= 0 {

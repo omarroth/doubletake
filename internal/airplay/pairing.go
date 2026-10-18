@@ -231,7 +231,11 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 		Ed25519Private: priv,
 	}
 
-	return c.performTransientSetupAndVerify(ctx)
+	if err := c.performTransientSetupAndVerify(ctx); err != nil {
+		return err
+	}
+	c.pairedTransient = true
+	return nil
 }
 
 // performTransientSetupAndVerify does transient (PIN-less) pair-setup + pair-verify.
@@ -293,6 +297,11 @@ func (c *AirPlayClient) performRawSetupAndVerify(ctx context.Context) error {
 }
 
 func (c *AirPlayClient) completeRawSetupAndVerify(ctx context.Context, serverPub []byte) error {
+	// A fresh raw setup may be needed on a replacement control connection, but
+	// must not silently replace the receiver key learned on the original one.
+	if c.receiver.valid() && !bytes.Equal(c.receiver.PublicKey, serverPub) {
+		return fmt.Errorf("%w: raw pair-setup returned a different receiver key", ErrReceiverNotAuthenticated)
+	}
 	if c.info == nil {
 		c.info = &ReceiverInfo{}
 	}
@@ -391,6 +400,7 @@ func (c *AirPlayClient) StartPINDisplay() error {
 
 // pairWithPIN performs PIN-based pairing.
 func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
+	c.pairedTransient = false
 	c.pairingProtocol = pairingProtocolUnknown
 	c.pairType = c.pinPairingType()
 
@@ -607,8 +617,8 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	}
 
 	m4 := tlv8Decode(m4Bytes)
-	if errTLV, ok := m4[tlvError]; ok {
-		return fmt.Errorf("pair-setup M4 error: %d", errTLV[0])
+	if err := pairingResponseError("pair-setup M4", m4); err != nil {
+		return err
 	}
 
 	// Verify server proof: H(A, M1, K) — A unpadded
@@ -668,8 +678,8 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 	}
 
 	m6 := tlv8Decode(m6Bytes)
-	if errTLV, ok := m6[tlvError]; ok {
-		return fmt.Errorf("pair-setup M6 error: %d", errTLV[0])
+	if err := pairingResponseError("pair-setup M6", m6); err != nil {
+		return err
 	}
 
 	if pin != "" {
@@ -762,8 +772,8 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	}
 
 	v2 := tlv8Decode(v2Bytes)
-	if errTLV, ok := v2[tlvError]; ok {
-		return fmt.Errorf("pair-verify V2 error: %d", errTLV[0])
+	if err := pairingResponseError("pair-verify V2", v2); err != nil {
+		return err
 	}
 
 	serverKeyData := v2[tlvPublicKey]
@@ -852,8 +862,8 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	// Check V4 response for TLV errors
 	if len(v4Bytes) > 0 {
 		v4 := tlv8Decode(v4Bytes)
-		if errTLV, ok := v4[tlvError]; ok {
-			return fmt.Errorf("pair-verify V4 error: %d", errTLV[0])
+		if err := pairingResponseError("pair-verify V4", v4); err != nil {
+			return err
 		}
 		if state, ok := v4[tlvState]; authenticated && (!ok || len(state) != 1 || state[0] != 0x04) {
 			return fmt.Errorf("%w: pair-verify V4 is not a completed M4", ErrReceiverNotAuthenticated)
@@ -1141,4 +1151,17 @@ func sha512DeriveKey(salt string, secret []byte) []byte {
 	h.Write([]byte(salt))
 	h.Write(secret)
 	return h.Sum(nil)[:16]
+}
+
+// pairingResponseError checks the length before indexing receiver-supplied TLV
+// errors. Malformed replies must fail authentication instead of panicking.
+func pairingResponseError(stage string, message map[byte][]byte) error {
+	value, present := message[tlvError]
+	if !present {
+		return nil
+	}
+	if len(value) != 1 {
+		return fmt.Errorf("%w: %s carried a malformed error TLV", ErrReceiverNotAuthenticated, stage)
+	}
+	return fmt.Errorf("%s error: %d", stage, value[0])
 }

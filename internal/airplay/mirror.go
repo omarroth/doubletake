@@ -520,11 +520,19 @@ func (c *AirPlayClient) closeUnsafeMirrorControlConnection() {
 // release the partial session and retry once with NTP. The fallback is based on
 // the live protocol exchange rather than a receiver model or software version.
 func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig, prepareVideoCapture func(width, height int, codec VideoCodec) (VideoPreparationResult, error), captureMayReportMinimumLead bool) (*MirrorSession, error) {
-	session, err := c.setupMirrorSessionAttempt(ctx, cfg, prepareVideoCapture, captureMayReportMinimumLead, "")
-	if !errors.Is(err, errPTPClockUnavailable) {
+	timingOverride := ""
+	if c.ntpFallback {
+		timingOverride = timingProtocolNTP
+	}
+	session, err := c.setupMirrorSessionAttempt(ctx, cfg, prepareVideoCapture, captureMayReportMinimumLead, timingOverride)
+	if !errors.Is(err, errPTPClockUnavailable) || c.ntpFallback || ctx.Err() != nil {
 		return session, err
 	}
 	dbg("[SETUP] advertised PTP was unavailable during SETUP; retrying the session with NTP")
+	c.ntpFallback = true
+	if reconnectErr := c.reconnectMirrorControl(ctx); reconnectErr != nil {
+		return nil, fmt.Errorf("PTP timing unavailable (%v); reconnect for NTP: %w", err, reconnectErr)
+	}
 	return c.setupMirrorSessionAttempt(ctx, cfg, prepareVideoCapture, captureMayReportMinimumLead, timingProtocolNTP)
 }
 

@@ -124,6 +124,7 @@ func (c *AirPlayClient) RestorePairingCredentials(saved *SavedCredentials) error
 	// accept whatever answers, and the caller pairs again to record it.
 	c.receiver = nil
 	c.transientSetup = false
+	c.pairedTransient = false
 	if saved.HasReceiverIdentity() {
 		c.receiver = &ReceiverIdentity{
 			ID:        saved.ReceiverID,

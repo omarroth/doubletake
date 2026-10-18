@@ -171,6 +171,8 @@ const (
 	hapVerifyBadSignature
 	hapVerifyEmptyV4
 	hapVerifyV4WithoutState
+	hapVerifyMalformedV2Error
+	hapVerifyMalformedV4Error
 )
 
 func TestSavedHAPVerifyRequiresTheReceiversProof(t *testing.T) {
@@ -183,6 +185,8 @@ func TestSavedHAPVerifyRequiresTheReceiversProof(t *testing.T) {
 		{"V2 signature by another key", hapVerifyBadSignature},
 		{"empty V4", hapVerifyEmptyV4},
 		{"V4 without state 4", hapVerifyV4WithoutState},
+		{"V2 empty error TLV", hapVerifyMalformedV2Error},
+		{"V4 empty error TLV", hapVerifyMalformedV4Error},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := verifyAgainstFakeReceiver(t, test.fault)
@@ -273,6 +277,9 @@ func serveFakeHAPVerify(conn net.Conn, receiverKey ed25519.PrivateKey, fault hap
 		v2Items = append(v2Items, tlv8Item{Tag: tlvEncryptedData,
 			Value: aead.Seal(nil, receiverPairingNonce("PV-Msg02"), proof, nil)})
 	}
+	if fault == hapVerifyMalformedV2Error {
+		v2Items = append(v2Items, tlv8Item{Tag: tlvError})
+	}
 	if err := writeRTSPTestResponse(conn, 200, nil, tlv8EncodeOrdered(v2Items)); err != nil {
 		return err
 	}
@@ -283,6 +290,8 @@ func serveFakeHAPVerify(conn net.Conn, receiverKey ed25519.PrivateKey, fault hap
 	var v4 []byte
 	switch fault {
 	case hapVerifyEmptyV4:
+	case hapVerifyMalformedV4Error:
+		v4 = tlv8EncodeOrdered([]tlv8Item{{Tag: tlvError}})
 	case hapVerifyV4WithoutState:
 		v4 = tlv8EncodeOrdered([]tlv8Item{{Tag: tlvSalt, Value: []byte{0}}})
 	default:

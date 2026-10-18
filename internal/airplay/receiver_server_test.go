@@ -909,13 +909,13 @@ func TestReceiverServerCombinedCodePairsAndAnswersDigest(t *testing.T) {
 	}
 
 	stats := server.Stats()
-	if stats.DigestChallenges != 1 {
-		t.Fatalf("Digest challenges = %d, want exactly 1", stats.DigestChallenges)
+	if stats.DigestChallenges != 2 {
+		t.Fatalf("Digest challenges = %d, want one per control connection", stats.DigestChallenges)
 	}
 	// This encrypted profile advertises PTP but rejects it during SETUP, then
 	// deliberately omits feature 59 while requiring streamConnections. Three
 	// bounded PTP probes precede the NTP control/order and descriptor negotiation.
-	if stats.PINStarts != 0 || stats.PairSetup != 3 || stats.PairVerify != 2 || stats.SetupRequests != 7 {
+	if stats.Connections != 2 || stats.PINStarts != 0 || stats.PairSetup != 3 || stats.PairVerify != 4 || stats.SetupRequests != 7 {
 		t.Fatalf("combined auth stats = %+v", stats)
 	}
 	if got := server.stats.audioControlPort.Load(); got != 1 {
