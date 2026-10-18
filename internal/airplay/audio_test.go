@@ -371,6 +371,7 @@ func (r *positionedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (audioPCMF
 }
 
 type steadyTimestampedPCMFramesForTest struct {
+	now       func() time.Time
 	remaining int
 	sourceRTP uint32
 	spf       uint32
@@ -386,8 +387,12 @@ func (r *steadyTimestampedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (au
 	if r.remaining == 0 {
 		return audioPCMFramePosition{}, io.EOF
 	}
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
 	position := audioPCMFramePosition{
-		PTS:          time.Now().Add(-r.age),
+		PTS:          now().Add(-r.age),
 		SourceRTP:    r.sourceRTP,
 		HasSourceRTP: true,
 	}
@@ -399,7 +404,11 @@ func (r *steadyTimestampedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (au
 
 func TestStreamAudioKeepsTimestampedFramesWithPositivePlayoutLead(t *testing.T) {
 	const frames = 6
+	// Freeze the fixture's host clock: encoding/scheduler time is unrelated to
+	// this test's ten milliseconds of positive source playout lead.
+	instant := time.Now()
 	reader := &steadyTimestampedPCMFramesForTest{
+		now:       func() time.Time { return instant },
 		remaining: frames,
 		spf:       352,
 		age:       75 * time.Millisecond,
@@ -470,6 +479,9 @@ func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioP
 	firstVideo := make(chan struct{})
 	close(firstVideo)
 	session := &MirrorSession{firstFrameSent: firstVideo, timingProtocol: timingProtocolNTP}
+	if r, ok := frames.(*steadyTimestampedPCMFramesForTest); ok && r.now != nil {
+		session.frameClockNow = r.now
+	}
 	if err := session.StreamAudio(context.Background(), capture, stream); !errors.Is(err, io.EOF) {
 		t.Fatalf("StreamAudio = %v, want EOF after %d source frames", err, count)
 	}

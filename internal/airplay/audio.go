@@ -116,6 +116,8 @@ func randomRTPTime(reader io.Reader) (uint32, error) {
 
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.
 type AudioCapture struct {
+	encodedFrames   audioEncodedFrameReader
+	stopShared      func()
 	gstCmd          *exec.Cmd
 	pcmPipe         io.ReadCloser
 	pcmFrames       audioPCMFrameReader
@@ -386,37 +388,14 @@ func (ac *AudioCapture) ReadFrameAt(buf []byte) (int, time.Time, error) {
 }
 
 func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePosition, error) {
-	select {
-	case <-ac.waitCh:
-		if ac.waitErr != nil {
-			return 0, audioPCMFramePosition{}, fmt.Errorf("audio capture exited: %w", ac.waitErr)
-		}
-		return 0, audioPCMFramePosition{}, io.EOF
-	default:
+	if ac.encodedFrames != nil {
+		return ac.encodedFrames.readEncodedFrame(buf)
 	}
-
 	_, codecSPF, _, _, _, _ := ac.codec.Info()
-	spf := int(codecSPF)
-	const channels = 2
-	const bytesPerSample = 2
-	pcmSize := spf * channels * bytesPerSample // 1408 bytes
-	pcm := make([]byte, pcmSize)
-	var position audioPCMFramePosition
-	var err error
-	if ac.pcmFrames != nil {
-		if positioned, ok := ac.pcmFrames.(audioPCMFramePositionReader); ok {
-			position, err = positioned.ReadPCMFramePosition(pcm)
-		} else {
-			position.PTS, err = ac.pcmFrames.ReadPCMFrame(pcm)
-		}
-	} else {
-		_, err = io.ReadFull(ac.pcmPipe, pcm)
-	}
+	pcm := make([]byte, int(codecSPF)*audioBytesPerSampleFrame)
+	position, err := ac.readPCMFramePosition(pcm)
 	if err != nil {
 		return 0, audioPCMFramePosition{}, err
-	}
-	if DebugMode() {
-		ac.recordPCMLevels(pcm)
 	}
 	if ac.codec == AudioCodecAACELD {
 		ac.eldMu.Lock()
@@ -432,6 +411,36 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 	}
 	n := ac.alac.Encode(buf, pcm)
 	return n, position, nil
+}
+
+func (ac *AudioCapture) readPCMFramePosition(pcm []byte) (audioPCMFramePosition, error) {
+	select {
+	case <-ac.waitCh:
+		if ac.waitErr != nil {
+			return audioPCMFramePosition{}, fmt.Errorf("audio capture exited: %w", ac.waitErr)
+		}
+		return audioPCMFramePosition{}, io.EOF
+	default:
+	}
+
+	var position audioPCMFramePosition
+	var err error
+	if ac.pcmFrames != nil {
+		if positioned, ok := ac.pcmFrames.(audioPCMFramePositionReader); ok {
+			position, err = positioned.ReadPCMFramePosition(pcm)
+		} else {
+			position.PTS, err = ac.pcmFrames.ReadPCMFrame(pcm)
+		}
+	} else {
+		_, err = io.ReadFull(ac.pcmPipe, pcm)
+	}
+	if err != nil {
+		return audioPCMFramePosition{}, err
+	}
+	if DebugMode() {
+		ac.recordPCMLevels(pcm)
+	}
+	return position, nil
 }
 
 func (ac *AudioCapture) recordPCMLevels(pcm []byte) {
@@ -506,6 +515,9 @@ func (ac *AudioCapture) recordPCMLevels(pcm []byte) {
 // from the freshest sample. It removes whatever backlog actually accumulated —
 // no fixed latency value is assumed.
 func (ac *AudioCapture) DrainStale() {
+	if ac.encodedFrames != nil {
+		return // framed fan-out retains source PTS; StreamAudio drops stale frames
+	}
 	if ac.pcmFrames != nil {
 		// RFC4571 is a framed stream; arbitrary byte reads would corrupt it. The
 		// timestamp-aware media loop catches up by discarding whole codec frames.
@@ -548,6 +560,10 @@ func (ac *AudioCapture) Stop() {
 }
 
 func (ac *AudioCapture) stop() {
+	if ac.stopShared != nil {
+		ac.stopShared()
+		return
+	}
 	if ac.cancel != nil {
 		ac.cancel()
 	}
@@ -1425,6 +1441,10 @@ func (as *AudioStream) Close() {
 // StreamAudio reads encoded frames from the capture pipeline and sends
 // RTP audio packets to the receiver. It also sends periodic sync packets.
 func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, audioStream *AudioStream) error {
+	mediaNow := time.Now
+	if s.frameClockNow != nil {
+		mediaNow = s.frameClockNow
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	defer func() {
@@ -1497,7 +1517,7 @@ videoReady:
 			}
 			return fmt.Errorf("audio read first frame: %w", err)
 		}
-		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, time.Now(), audioStream.latencySamples, minimumAudioSendLead) {
+		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, mediaNow(), audioStream.latencySamples, minimumAudioSendLead) {
 			catchupFrames++
 			if catchupFrames >= maximumInitialCatchupFrames {
 				age := time.Since(firstFramePosition.PTS)
@@ -1521,7 +1541,7 @@ videoReady:
 	}
 	if firstFramePosition.PTS.IsZero() {
 		// Transparent raw fallback: preserve the historical read-time anchor.
-		firstFramePosition.PTS = time.Now()
+		firstFramePosition.PTS = mediaNow()
 	}
 	rtpClock := newAudioRTPClock(nextRtp)
 	firstFrameRTP, _ := rtpClock.mapFramePosition(firstFramePosition, spf)
@@ -1562,7 +1582,7 @@ videoReady:
 				// mapping to a codec-frame boundary makes successive one-second
 				// announces jump by either 125 or 126 frames and invites receiver
 				// phase corrections.
-				announcedAt := time.Now()
+				announcedAt := mediaNow()
 				rtpNow, ok := rtpClock.rtpAt(announcedAt)
 				if !ok {
 					announceMu.Unlock()
@@ -1688,7 +1708,7 @@ videoReady:
 		// Keep every frame whose render deadline is still in the future and let the
 		// bounded burst sender catch up. Discarding a recoverable frame creates an
 		// RTP hole that the receiver can only render as missing audio.
-		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, time.Now(), audioStream.latencySamples, 0) {
+		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, mediaNow(), audioStream.latencySamples, 0) {
 			staleFrames++
 			if staleFrames == 1 || staleFrames%100 == 0 {
 				dbg("[AUDIO] dropping stale source frame %v old (latency=%v, dropped=%d)",
@@ -1778,7 +1798,7 @@ videoReady:
 		}
 
 		frameSeq++
-		now := time.Now()
+		now := mediaNow()
 		if !lastFrameSentAt.IsZero() {
 			gap := now.Sub(lastFrameSentAt)
 			if frameSendGaps == 0 || gap < minFrameSendGap {
