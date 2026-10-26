@@ -701,12 +701,12 @@ func (s *MirrorSession) AudioCodec() AudioCodec {
 //   - ctrlConn: the declared controlPort socket → sends sync/control to receiver's controlPort
 //   - dataConn: a separate socket at controlPort+1 → sends audio data to receiver's dataPort
 func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, latencyOverride uint32, rfc2198 bool, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
-	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.host, fmt.Sprintf("%d", dataPort)))
+	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.mediaHost(), fmt.Sprintf("%d", dataPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve audio remote: %w", err)
 	}
 
-	ctrlAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.host, fmt.Sprintf("%d", controlPort)))
+	ctrlAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.mediaHost(), fmt.Sprintf("%d", controlPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve audio control remote: %w", err)
 	}

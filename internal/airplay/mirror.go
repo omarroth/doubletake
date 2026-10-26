@@ -734,7 +734,7 @@ func (c *AirPlayClient) setupMirrorSession(ctx context.Context, cfg StreamConfig
 			return
 		}
 		timingProbesStarted = true
-		go sendNTPTimingProbes(sessionCtx, timingConn, c.host, receiverTimingPort)
+		go sendNTPTimingProbes(sessionCtx, timingConn, c.mediaHost(), receiverTimingPort)
 	}
 	configurePTPClock := func(response map[string]interface{}, headers map[string]string, receivedAt time.Time) error {
 		if timingProtocol != timingProtocolPTP {

@@ -509,6 +509,24 @@ func (c *AirPlayClient) Connect(ctx context.Context) error {
 	return nil
 }
 
+// mediaHost returns the receiver address that UDP media and timing traffic must
+// use: the IP (and IPv6 zone) of the established RTSP connection. Re-resolving
+// c.host is wrong for dual-stack names such as "receiver.local": the TCP dial
+// prefers IPv6 while net.ResolveUDPAddr prefers IPv4, so audio and timing would
+// go to a different address family than the session, and receivers that bind
+// their media sockets to the session's family (e.g. UxPlay) never see them.
+func (c *AirPlayClient) mediaHost() string {
+	if c.conn != nil {
+		if tcp, ok := c.conn.RemoteAddr().(*net.TCPAddr); ok {
+			if tcp.Zone != "" {
+				return tcp.IP.String() + "%" + tcp.Zone
+			}
+			return tcp.IP.String()
+		}
+	}
+	return c.host
+}
+
 func (c *AirPlayClient) Close() error {
 	if c.conn != nil {
 		return c.conn.Close()
