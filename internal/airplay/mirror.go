@@ -1474,291 +1474,107 @@ func (s *MirrorSession) stopCaptureOnStreamFailure(capture *ScreenCapture) func(
 	return func() { close(watchDone) }
 }
 
-// StreamFrames reads H.264 frames from the capture pipeline and sends them to the Apple TV.
-// Protocol (from UxPlay/raop_rtp_mirror.c):
-//   - SPS+PPS: sent as unencrypted codec frame (header[4]=0x01) in avcC format
-//   - IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
-//   - non-IDR VCL: sent encrypted, header[4]=0x00 header[5]=0x00, AVCC payload
+// StreamFrames forwards complete encoded pictures with their capture PTS.
+// Decoder configuration is sent separately; picture samples retain encoder SEI.
 func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture, startDelay time.Duration) error {
+	if capture == nil {
+		return fmt.Errorf("video capture is nil")
+	}
 	stopWatching := s.stopCaptureOnStreamFailure(capture)
 	defer stopWatching()
 	if err := s.streamFailure(); err != nil {
 		return err
 	}
-	if normalizeVideoCodec(s.videoCodec) == VideoCodecHEVC {
-		return s.streamHEVCFrames(ctx, capture, startDelay)
+	codec := normalizeVideoCodec(s.videoCodec)
+	var reader videoAccessUnitReader = capture
+	if capture.frames == nil {
+		if codec == VideoCodecHEVC {
+			return fmt.Errorf("HEVC requires timestamped access-unit capture")
+		}
+		reader = newRawH264AccessUnitReader(capture)
 	}
 	if startDelay > 0 {
-		dbg("[STREAM] waiting %v before sending first frame...", startDelay)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-s.streamDone:
 			return s.streamFailure()
 		case <-time.After(startDelay):
-			dbg("[STREAM] delay complete, starting frame send")
 		}
 	}
 
-	buf := make([]byte, 256*1024)
-	parser := newH264Parser()
-
-	var latestSPS, latestPPS []byte // raw NAL data WITHOUT start code
-	var sentSPS, sentPPS []byte     // most recently advertised decoder configuration
-	var vclBuf []byte               // AVCC-formatted data accumulating for current access unit
-	var vclPTS time.Time            // capture PTS for the access unit in vclBuf
-	var pendingKeyframe bool        // true if vclBuf contains IDR slice(s)
-	var codecSent bool              // true if codec frame sent for current keyframe
-	var streamPrimed bool           // true after first SPS/PPS+IDR has been sent
-	var frameCount int
-	var lastProgressLog time.Time
-	var nalLog strings.Builder
-
-	resetVCL := func() {
-		vclBuf = vclBuf[:0]
-		vclPTS = time.Time{}
-		pendingKeyframe = false
-		codecSent = false
-		nalLog.Reset()
-	}
-
-	// flushVCL sends the accumulated VCL data as a single encrypted frame.
-	// This handles multi-slice frames by combining all slices of one access unit.
-	flushVCL := func() error {
-		if len(vclBuf) == 0 {
-			return nil
-		}
-
-		// New sessions can attach mid-stream when using broadcast capture. Until we
-		// have an IDR plus current SPS/PPS, drop VCL units to avoid sending
-		// undecodable non-IDR frames that may cause receivers to close the stream.
-		if !streamPrimed {
-			if !pendingKeyframe || latestSPS == nil || latestPPS == nil {
-				resetVCL()
-				return nil
-			}
-		}
-
-		packetTimestamp, packetTimeline, mapped := s.frameTimeAt(vclPTS)
-		if !mapped {
-			return fmt.Errorf("map capture PTS %v to receiver clock", vclPTS)
-		}
-
-		// Send SPS+PPS as an unencrypted avcC codec frame initially and whenever
-		// the encoder changes them. Repeating an identical configuration before
-		// every IDR is unnecessary and some receivers treat it as reconfiguration.
-		if pendingKeyframe && !codecSent && latestSPS != nil && latestPPS != nil &&
-			codecConfigNeedsSend(streamPrimed, latestSPS, latestPPS, sentSPS, sentPPS) {
-			// Derive the encoded content dimensions from the SPS itself so the
-			// codec header reports exactly what the encoder produced, regardless
-			// of the captured surface size (which we no longer pin to a config
-			// value — Wayland surfaces in particular are not pixel-perfect).
-			if w, h, ok := spsDimensions(latestSPS); ok && (s.videoWidth != w || s.videoHeight != h) {
-				dbg("[STREAM] encoded content size from SPS: %dx%d", w, h)
-				s.videoWidth, s.videoHeight = w, h
-			}
-			avcC := buildAVCCConfig(latestSPS, latestPPS)
-			if frameCount < 20 {
-				dbg("[STREAM] sending codec frame avcC len=%d hdr=%02x", len(avcC), avcC[:min(8, len(avcC))])
-			}
-			if err := s.sendCodecFrame(avcC, packetTimestamp); err != nil {
-				return fmt.Errorf("send codec: %w", err)
-			}
-			codecSent = true
-			streamPrimed = true
-			sentSPS = append(sentSPS[:0], latestSPS...)
-			sentPPS = append(sentPPS[:0], latestPPS...)
-		}
-
-		frameData := vclBuf
-		if s.streamCipher != nil {
-			if frameCount < 5 {
-				dbg("[CRYPTO] frame %d plain[0:20]=%02x", frameCount, vclBuf[:min(20, len(vclBuf))])
-			}
-			frameData = s.streamCipher(vclBuf)
-			if frameCount < 5 {
-				dbg("[CRYPTO] frame %d  enc[0:20]=%02x", frameCount, frameData[:min(20, len(frameData))])
-			}
-		}
-
-		keyframeStr := "non-IDR"
-		if pendingKeyframe {
-			keyframeStr = "IDR"
-		}
-		if frameCount < 20 {
-			dbg("[STREAM] %s frame %d: avcc_payload=%d encrypted=%v", keyframeStr, frameCount, len(vclBuf), s.streamCipher != nil)
-			dbg("[STREAM] NAL sequence for frame %d: %s", frameCount, nalLog.String())
-		}
-		nalLog.Reset()
-
-		sentPTS := vclPTS
-		if err := s.sendFrame(frameData, pendingKeyframe, packetTimestamp, packetTimeline); err != nil {
-			return fmt.Errorf("send %s: %w", keyframeStr, err)
-		}
-		// Codec configuration alone is not a displayed picture. Start audio and
-		// data heartbeats only after the receiver has a successfully written VCL
-		// frame to present against the shared media clock.
-		if frameCount == 0 {
-			select {
-			case <-s.firstFrameSent:
-			default:
-				close(s.firstFrameSent)
-			}
-		}
-		resetVCL()
-		frameCount++
-		if time.Since(lastProgressLog) >= 5*time.Second {
-			if sentPTS.IsZero() {
-				dbg("[STREAM] video progress: sent frame %d (%s, %d bytes), source PTS unavailable",
-					frameCount, keyframeStr, len(frameData))
-			} else {
-				age := time.Since(sentPTS)
-				dbg("[STREAM] video progress: sent frame %d (%s, %d bytes), source age=%v local presentation slack=%v",
-					frameCount, keyframeStr, len(frameData), age, s.timestampBias-age)
-			}
-			lastProgressLog = time.Now()
-		}
-		return nil
-	}
-
-	processNAL := func(nal []byte, capturedAt time.Time) error {
-		nt := nalType(nal)
-		raw := stripStartCode(nal)
-
-		if frameCount < 20 {
-			fmt.Fprintf(&nalLog, "NAL type=%d len=%d ", nt, len(raw))
-			if len(raw) > 0 {
-				fmt.Fprintf(&nalLog, "hdr=%02x", raw[0])
-			}
-			nalLog.WriteByte('|')
-		}
-
-		setPTS := func() {
-			if len(vclBuf) == 0 {
-				vclPTS = capturedAt
-			}
-		}
-		switch nt {
-		case 9: // AUD — access unit delimiter, flush previous frame
-			return flushVCL()
-		case 7: // SPS — flush before keyframe
-			if err := flushVCL(); err != nil {
-				return err
-			}
-			latestSPS = raw
-		case 8: // PPS
-			latestPPS = raw
-		case 6: // SEI — skip, don't include in VCL data
-		case 5: // IDR VCL slice — accumulate (may be multi-slice)
-			if len(vclBuf) > 0 && !pendingKeyframe {
-				if err := flushVCL(); err != nil {
-					return err
-				}
-			}
-			if len(vclBuf) > 0 && pendingKeyframe && isFirstSlice(raw) {
-				if err := flushVCL(); err != nil {
-					return err
-				}
-			}
-			setPTS()
-			pendingKeyframe = true
-			vclBuf = append(vclBuf, avccWrap(raw)...)
-		case 1, 2, 3, 4: // non-IDR VCL slice — accumulate
-			if len(vclBuf) > 0 && pendingKeyframe {
-				if err := flushVCL(); err != nil {
-					return err
-				}
-			}
-			if len(vclBuf) > 0 && !pendingKeyframe && isFirstSlice(raw) {
-				if err := flushVCL(); err != nil {
-					return err
-				}
-			}
-			setPTS()
-			vclBuf = append(vclBuf, avccWrap(raw)...)
-		default:
-			if frameCount < 20 {
-				dbg("[STREAM] ignoring NAL type=%d len=%d", nt, len(raw))
-			}
-		}
-		return nil
-	}
-
-	if capture.frames != nil {
-		for {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			accessUnit, err := capture.ReadVideoAccessUnit()
-			if len(accessUnit.AnnexB) > 0 {
-				if frameCount == 0 {
-					dbg("[CAPTURE] read timestamped access unit: %d bytes pts=%v", len(accessUnit.AnnexB), accessUnit.PTS)
-				}
-				for _, nal := range splitAnnexBAccessUnit(accessUnit.AnnexB) {
-					if processErr := processNAL(nal, accessUnit.PTS); processErr != nil {
-						return processErr
-					}
-				}
-				// RTP's marker bit gives us the exact end of this access unit, so
-				// there is no one-frame lookahead before its timestamp is sent.
-				if flushErr := flushVCL(); flushErr != nil {
-					return flushErr
-				}
-			}
-			if err != nil {
-				if streamErr := s.streamFailure(); streamErr != nil {
-					return streamErr
-				}
-				if err == io.EOF {
-					if ctx.Err() != nil {
-						return ctx.Err()
-					}
-					return fmt.Errorf("capture process exited unexpectedly (EOF)")
-				}
-				return fmt.Errorf("read timestamped capture: %w", err)
-			}
-		}
-	}
-
+	packetizer := mirrorVideoPacketizer{codec: codec}
+	frameCount := 0
+	var lastProgress time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-
-		n, err := capture.Read(buf)
-		if err != nil {
+		unit, readErr := reader.ReadVideoAccessUnit()
+		if len(unit.AnnexB) != 0 {
+			frame := packetizer.packetize(unit.AnnexB)
+			if packetizer.ready(frame) {
+				timestamp, timeline, ok := s.frameTimeAt(unit.PTS)
+				if !ok {
+					return fmt.Errorf("map %s capture PTS %v to receiver clock", codec, unit.PTS)
+				}
+				if frame.keyframe && packetizer.needsConfiguration() {
+					config, width, height, err := packetizer.configuration()
+					if err != nil {
+						return err
+					}
+					if width > 0 && height > 0 {
+						s.videoWidth, s.videoHeight = width, height
+					}
+					if err := s.sendCodecFrame(config, timestamp); err != nil {
+						return fmt.Errorf("send %s codec: %w", codec, err)
+					}
+					packetizer.configured()
+				}
+				payload := frame.payload
+				if s.streamCipher != nil {
+					payload = s.streamCipher(payload)
+				}
+				if err := s.sendFrame(payload, frame.keyframe, timestamp, timeline); err != nil {
+					return fmt.Errorf("send %s frame: %w", codec, err)
+				}
+				// Configuration alone does not start audio: wait for a picture.
+				if frameCount == 0 {
+					select {
+					case <-s.firstFrameSent:
+					default:
+						close(s.firstFrameSent)
+					}
+				}
+				frameCount++
+				if frameCount <= 12 {
+					dbg("[STREAM] %s frame %d key=%v bytes=%d", codec, frameCount, frame.keyframe, len(payload))
+				}
+				if time.Since(lastProgress) >= 5*time.Second {
+					if unit.PTS.IsZero() {
+						dbg("[STREAM] %s video progress: sent frame %d, source PTS unavailable", codec, frameCount)
+					} else {
+						age := time.Since(unit.PTS)
+						dbg("[STREAM] %s video progress: sent frame %d, source age=%v local presentation slack=%v",
+							codec, frameCount, age, s.timestampBias-age)
+					}
+					lastProgress = time.Now()
+				}
+			}
+		}
+		if readErr != nil {
 			if streamErr := s.streamFailure(); streamErr != nil {
 				return streamErr
 			}
-			if err == io.EOF {
-				// Flush any remaining VCL data
-				if flushErr := flushVCL(); flushErr != nil {
-					return flushErr
-				}
+			if readErr == io.EOF {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
 				return fmt.Errorf("capture process exited unexpectedly (EOF)")
 			}
-			return fmt.Errorf("read capture: %w", err)
-		}
-		if n == 0 {
-			continue
-		}
-		if frameCount == 0 {
-			dbg("[CAPTURE] read %d bytes start=% x", n, buf[:min(n, 16)])
-		}
-
-		nals := parser.Push(buf[:n])
-		for _, nal := range nals {
-			if err := processNAL(nal, time.Time{}); err != nil {
-				return err
-			}
+			return fmt.Errorf("read %s capture: %w", codec, readErr)
 		}
 	}
 }
@@ -1892,21 +1708,13 @@ func splitAnnexBAccessUnit(data []byte) [][]byte {
 
 // stripStartCode removes the Annex-B start code prefix (00 00 01 or 00 00 00 01).
 func stripStartCode(nal []byte) []byte {
-	if len(nal) > 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1 {
+	if len(nal) >= 4 && nal[0] == 0 && nal[1] == 0 && nal[2] == 0 && nal[3] == 1 {
 		return nal[4:]
 	}
-	if len(nal) > 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1 {
+	if len(nal) >= 3 && nal[0] == 0 && nal[1] == 0 && nal[2] == 1 {
 		return nal[3:]
 	}
 	return nal
-}
-
-// avccWrap prepends a 4-byte big-endian length to a raw NAL unit (AVCC format).
-func avccWrap(raw []byte) []byte {
-	b := make([]byte, 4+len(raw))
-	binary.BigEndian.PutUint32(b[:4], uint32(len(raw)))
-	copy(b[4:], raw)
-	return b
 }
 
 // h264BitReader reads bits and Exp-Golomb codes from an H.264 RBSP byte slice.
@@ -2098,19 +1906,6 @@ func buildAVCCConfig(sps, pps []byte) []byte {
 	// 4-byte trailer
 	payload[avcCLen] = 0x02
 	return payload
-}
-
-// nalType returns the H.264 NAL unit type from a NAL that may begin with a start code.
-func nalType(nal []byte) byte {
-	// Skip start code: 00 00 01 or 00 00 00 01
-	for i := 0; i+1 < len(nal); i++ {
-		if nal[i] == 0x01 && i >= 2 && nal[i-1] == 0x00 && nal[i-2] == 0x00 {
-			if i+1 < len(nal) {
-				return nal[i+1] & 0x1f
-			}
-		}
-	}
-	return 0
 }
 
 // isFirstSlice returns true if the raw NAL (without start code) represents the

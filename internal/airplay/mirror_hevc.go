@@ -2,12 +2,8 @@ package airplay
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
-	"strings"
-	"time"
 )
 
 type hevcSPSInfo struct {
@@ -161,123 +157,4 @@ func buildHEVCSampleDescription(vps, sps, pps []byte) ([]byte, error) {
 
 func hevcCodecConfigNeedsSend(primed bool, current, sent [3][]byte) bool {
 	return !primed || !bytes.Equal(current[0], sent[0]) || !bytes.Equal(current[1], sent[1]) || !bytes.Equal(current[2], sent[2])
-}
-
-func (s *MirrorSession) streamHEVCFrames(ctx context.Context, capture *ScreenCapture, startDelay time.Duration) error {
-	if capture == nil || capture.frames == nil {
-		return fmt.Errorf("HEVC requires timestamped access-unit capture")
-	}
-	if startDelay > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-s.streamDone:
-			return s.streamFailure()
-		case <-time.After(startDelay):
-		}
-	}
-	var current, sent [3][]byte // VPS, SPS, PPS
-	primed := false
-	frameCount := 0
-	var lastProgress time.Time
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		unit, err := capture.ReadVideoAccessUnit()
-		if err != nil {
-			if streamErr := s.streamFailure(); streamErr != nil {
-				return streamErr
-			}
-			if err == io.EOF && ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("read timestamped HEVC capture: %w", err)
-		}
-		var frame []byte
-		keyframe, hasVCL := false, false
-		var types strings.Builder
-		for _, wrapped := range splitAnnexBAccessUnit(unit.AnnexB) {
-			raw := stripStartCode(wrapped)
-			typ := hevcNALType(raw)
-			if frameCount < 12 {
-				fmt.Fprintf(&types, "%d|", typ)
-			}
-			switch typ {
-			case 32:
-				current[0] = append(current[0][:0], raw...)
-			case 33:
-				current[1] = append(current[1][:0], raw...)
-			case 34:
-				current[2] = append(current[2][:0], raw...)
-			case 35: // access-unit delimiter is not part of the codec sample
-			default:
-				// Preserve prefix/suffix SEI: HDR mastering/content-light metadata is
-				// carried there when the source and encoder actually provide it.
-				frame = append(frame, avccWrap(raw)...)
-				if typ <= 31 {
-					hasVCL = true
-					if typ >= 16 && typ <= 21 {
-						keyframe = true
-					}
-				}
-			}
-		}
-		if !hasVCL {
-			continue
-		}
-		if !primed && (!keyframe || len(current[0]) == 0 || len(current[1]) == 0 || len(current[2]) == 0) {
-			continue
-		}
-		timestamp, timeline, ok := s.frameTimeAt(unit.PTS)
-		if !ok {
-			return fmt.Errorf("map HEVC capture PTS %v to receiver clock", unit.PTS)
-		}
-		if keyframe && hevcCodecConfigNeedsSend(primed, current, sent) {
-			config, configErr := buildHEVCSampleDescription(current[0], current[1], current[2])
-			if configErr != nil {
-				return configErr
-			}
-			if info, parsed := parseHEVCSPS(current[1]); parsed {
-				s.videoWidth, s.videoHeight = info.width, info.height
-				dbg("[STREAM] encoded HEVC content size from SPS: %dx%d", info.width, info.height)
-			}
-			if err := s.sendCodecFrame(config, timestamp, VideoCodecHEVC); err != nil {
-				return fmt.Errorf("send HEVC codec: %w", err)
-			}
-			for n := range current {
-				sent[n] = append(sent[n][:0], current[n]...)
-			}
-			primed = true
-		}
-		if s.streamCipher != nil {
-			frame = s.streamCipher(frame)
-		}
-		if err := s.sendFrame(frame, keyframe, timestamp, timeline); err != nil {
-			return fmt.Errorf("send HEVC frame: %w", err)
-		}
-		if frameCount == 0 {
-			select {
-			case <-s.firstFrameSent:
-			default:
-				close(s.firstFrameSent)
-			}
-		}
-		frameCount++
-		if frameCount <= 12 {
-			dbg("[STREAM] HEVC frame %d key=%v bytes=%d NALs=%s", frameCount, keyframe, len(frame), types.String())
-		}
-		if time.Since(lastProgress) >= 5*time.Second {
-			if unit.PTS.IsZero() {
-				dbg("[STREAM] HEVC video progress: sent frame %d, source PTS unavailable", frameCount)
-			} else {
-				age := time.Since(unit.PTS)
-				dbg("[STREAM] HEVC video progress: sent frame %d, source age=%v local presentation slack=%v",
-					frameCount, age, s.timestampBias-age)
-			}
-			lastProgress = time.Now()
-		}
-	}
 }
