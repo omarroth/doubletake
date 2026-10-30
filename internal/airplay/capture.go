@@ -45,6 +45,68 @@ type CaptureConfig struct {
 
 	RestoreToken     string
 	SaveRestoreToken func(string) error
+
+	// OnSource receives the display the portal selected, once per stream start.
+	// It lets a caller verify that the capture is the source it asked for; a
+	// nil callback keeps the previous behaviour.
+	OnSource func(SourceInfo)
+}
+
+// SourceInfo describes the display the portal actually handed us.
+//
+// The portal reports these properties for every selected stream, and until now
+// this package read only the stream size. A caller that promised to send one
+// specific monitor needs the identity too: without it there is no way to tell a
+// physical output from a window, a region, or a virtual output another
+// application created, and no way to notice that the user picked something other
+// than what was requested.
+type SourceInfo struct {
+	// Type is the portal's source_type value (1 = monitor, 2 = window).
+	Type uint32
+	// Width and Height are the selected source's size in pixels.
+	Width  int
+	Height int
+	// X and Y are the selected source's position in the compositor layout.
+	X int
+	Y int
+}
+
+// IsMonitor reports whether the portal returned a monitor source.
+func (s SourceInfo) IsMonitor() bool { return s.Type == 1 }
+
+// portalStreamSource reads the identity properties the portal reports alongside
+// a stream. It returns false when the properties are absent or malformed, so a
+// caller can refuse an unverifiable capture rather than assume one.
+func portalStreamSource(properties map[string]dbus.Variant) (SourceInfo, bool) {
+	var info SourceInfo
+	usable := false
+	if properties == nil {
+		return info, false
+	}
+	if v, ok := properties["source_type"]; ok {
+		if sourceType, ok := v.Value().(uint32); ok {
+			info.Type = sourceType
+			usable = true
+		}
+	}
+	if width, height, ok := portalStreamDimensions(properties); ok {
+		info.Width, info.Height = width, height
+		usable = true
+	}
+	if v, ok := properties["position"]; ok {
+		if pos, ok := v.Value().([]interface{}); ok && len(pos) == 2 {
+			if x, ok := pos[0].(int32); ok {
+				if y, ok2 := pos[1].(int32); ok2 {
+					info.X, info.Y = int(x), int(y)
+				}
+			} else if x, ok := pos[0].(int64); ok {
+				if y, ok2 := pos[1].(int64); ok2 {
+					info.X, info.Y = int(x), int(y)
+				}
+			}
+		}
+	}
+	return info, usable
 }
 
 // ValidateHWAccel checks a capture encoder preference. An empty value keeps the
@@ -278,7 +340,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := probeWaylandDisplay(ctx, os.Getenv("WAYLAND_DISPLAY")); err != nil {
 		return nil, err
 	}
-	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
+	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize, cfg.OnSource)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -2436,7 +2498,7 @@ func normalizeContext(ctx context.Context) context.Context {
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
 // the retained portal session (which must stay open for capture and retries), and a
 // fresh restore token when the portal grants persistence.
-func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int) (uint32, *os.File, pipeWirePortalSession, string, error) {
+func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int, onSource func(SourceInfo)) (uint32, *os.File, pipeWirePortalSession, string, error) {
 	ctx = normalizeContext(ctx)
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
@@ -2634,6 +2696,15 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 			dbg("[CAPTURE] portal stream size: %dx%d", width, height)
 		} else {
 			dbg("[CAPTURE] portal stream properties did not contain a usable size: %#v", streamProperties)
+		}
+	}
+	if onSource != nil {
+		if source, ok := portalStreamSource(streamProperties); ok {
+			dbg("[CAPTURE] portal stream source: type=%d size=%dx%d position=%d,%d",
+				source.Type, source.Width, source.Height, source.X, source.Y)
+			onSource(source)
+		} else {
+			dbg("[CAPTURE] portal stream properties carried no usable source identity: %#v", streamProperties)
 		}
 	}
 
