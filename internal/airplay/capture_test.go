@@ -3,6 +3,7 @@ package airplay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -454,6 +455,139 @@ func TestPortalStreamDimensions(t *testing.T) {
 			width, height, ok := portalStreamDimensions(map[string]dbus.Variant{"size": dbus.MakeVariant(tt.value)})
 			if width != tt.wantW || height != tt.wantH || ok != tt.want {
 				t.Fatalf("portalStreamDimensions() = (%d, %d, %t), want (%d, %d, %t)", width, height, ok, tt.wantW, tt.wantH, tt.want)
+			}
+		})
+	}
+}
+
+func TestPortalStreamSource(t *testing.T) {
+	position := func(values ...interface{}) dbus.Variant {
+		return dbus.MakeVariant(values)
+	}
+	for _, tt := range []struct {
+		name   string
+		props  map[string]dbus.Variant
+		want   SourceInfo
+		wantOK bool
+	}{
+		{
+			name: "monitor with identity",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(1)),
+				"size":        dbus.MakeVariant([]int32{3840, 2160}),
+				"position":    position(int32(-1920), int32(0)),
+			},
+			want:   SourceInfo{Type: 1, Width: 3840, Height: 2160, X: -1920, Y: 0, HasPosition: true},
+			wantOK: true,
+		},
+		{
+			name: "window without position",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(2)),
+				"size":        dbus.MakeVariant([]interface{}{int32(1280), int32(720)}),
+			},
+			want:   SourceInfo{Type: 2, Width: 1280, Height: 720},
+			wantOK: true,
+		},
+		{
+			name: "size only leaves type unknown",
+			props: map[string]dbus.Variant{
+				"size": dbus.MakeVariant([]uint32{2560, 1440}),
+			},
+			want:   SourceInfo{Width: 2560, Height: 1440},
+			wantOK: true,
+		},
+		{
+			name: "type only leaves size unknown",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(1)),
+			},
+			want:   SourceInfo{Type: 1},
+			wantOK: true,
+		},
+		{
+			name: "wide position tuple",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(1)),
+				"position":    position(int64(3840), int64(1080)),
+			},
+			want:   SourceInfo{Type: 1, X: 3840, Y: 1080, HasPosition: true},
+			wantOK: true,
+		},
+		{
+			name:   "missing properties",
+			props:  map[string]dbus.Variant{},
+			wantOK: false,
+		},
+		{
+			name:   "nil properties",
+			props:  nil,
+			wantOK: false,
+		},
+		{
+			name: "malformed identity",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant("monitor"),
+				"size":        dbus.MakeVariant([]int32{1920}),
+				"position":    position(int32(0)),
+			},
+			wantOK: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := portalStreamSource(tt.props)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("portalStreamSource() = (%+v, %t), want (%+v, %t)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestPortalStreamSourceDistinguishesUnknownPositionFromOrigin(t *testing.T) {
+	// Losing the position-availability bit must fail even when the retained
+	// coordinates equal a real monitor's origin.
+	for _, test := range []struct {
+		name         string
+		position     interface{}
+		wantKnown    bool
+		wantX, wantY int
+	}{
+		{name: "absent"},
+		{name: "wrong type", position: "not a position"},
+		{name: "short tuple", position: []interface{}{int32(0)}},
+		{name: "mixed tuple", position: []interface{}{int32(0), int64(0)}},
+		{name: "malformed second coordinate", position: []interface{}{int32(0), "0"}},
+		{name: "confirmed origin", position: []interface{}{int32(0), int32(0)}, wantKnown: true},
+		{name: "negative coordinate", position: []interface{}{int32(-1920), int32(1080)}, wantKnown: true, wantX: -1920, wantY: 1080},
+		{name: "wide tuple", position: []interface{}{int64(3840), int64(-1080)}, wantKnown: true, wantX: 3840, wantY: -1080},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			properties := map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(1)),
+				"size":        dbus.MakeVariant([]int32{1920, 1080}),
+			}
+			if test.position != nil {
+				properties["position"] = dbus.MakeVariant(test.position)
+			}
+			source, ok := portalStreamSource(properties)
+			if !ok {
+				t.Fatal("valid monitor metadata was dropped")
+			}
+			if source.X != test.wantX || source.Y != test.wantY {
+				t.Fatalf("position = (%d,%d), want (%d,%d)", source.X, source.Y, test.wantX, test.wantY)
+			}
+			raw, err := json.Marshal(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire struct {
+				HasPosition *bool `json:"has_position"`
+			}
+			if err := json.Unmarshal(raw, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if wire.HasPosition == nil || *wire.HasPosition != test.wantKnown {
+				t.Fatalf("source JSON = %s, want explicit has_position=%t", raw, test.wantKnown)
 			}
 		})
 	}

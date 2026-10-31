@@ -45,6 +45,71 @@ type CaptureConfig struct {
 
 	RestoreToken     string
 	SaveRestoreToken func(string) error
+
+	// OnSource receives metadata when portal selection succeeds, before the
+	// PipeWire connection is opened or an encoder is started. It can run even
+	// if later preparation fails, so it does not signal successful capture.
+	// A nil callback ignores the metadata.
+	OnSource func(SourceInfo)
+}
+
+// SourceInfo contains the metadata the portal reported for a selected stream.
+// These properties are optional, so the result may be partial. The metadata
+// alone does not prove a physical output's identity or ownership; callers must
+// correlate it with their compositor's outputs and reject ambiguous matches.
+type SourceInfo struct {
+	// Type is the portal's source_type value (0 = unknown, 1 = monitor,
+	// 2 = window, 4 = a virtual output created through the portal).
+	Type uint32 `json:"type"`
+	// Width and Height are the source's size in compositor coordinates, which
+	// may differ from pixels. Zero means no usable size was reported.
+	Width  int `json:"width"`
+	Height int `json:"height"`
+	// X and Y are compositor coordinates, valid only when HasPosition is true.
+	X int `json:"x"`
+	Y int `json:"y"`
+	// HasPosition distinguishes an unknown position from a real (0,0) origin.
+	HasPosition bool `json:"has_position"`
+}
+
+// IsMonitor reports the portal's monitor classification. It does not prove
+// that the source is physical, belongs to the caller, or is the desired output.
+func (s SourceInfo) IsMonitor() bool { return s.Type == 1 }
+
+// portalStreamSource decodes the optional stream metadata. It returns false
+// when neither a source type nor a usable size was reported. A true result can
+// still be partial; in particular, callers must check HasPosition before using
+// X and Y to identify an output.
+func portalStreamSource(properties map[string]dbus.Variant) (SourceInfo, bool) {
+	var info SourceInfo
+	usable := false
+	if properties == nil {
+		return info, false
+	}
+	if v, ok := properties["source_type"]; ok {
+		if sourceType, ok := v.Value().(uint32); ok {
+			info.Type = sourceType
+			usable = true
+		}
+	}
+	if width, height, ok := portalStreamDimensions(properties); ok {
+		info.Width, info.Height = width, height
+		usable = true
+	}
+	if v, ok := properties["position"]; ok {
+		if pos, ok := v.Value().([]interface{}); ok && len(pos) == 2 {
+			if x, ok := pos[0].(int32); ok {
+				if y, ok2 := pos[1].(int32); ok2 {
+					info.X, info.Y, info.HasPosition = int(x), int(y), true
+				}
+			} else if x, ok := pos[0].(int64); ok {
+				if y, ok2 := pos[1].(int64); ok2 {
+					info.X, info.Y, info.HasPosition = int(x), int(y), true
+				}
+			}
+		}
+	}
+	return info, usable
 }
 
 // ValidateHWAccel checks a capture encoder preference. An empty value keeps the
@@ -123,6 +188,8 @@ type CapturePreparation struct {
 
 	pwNodeID   uint32
 	pwFd       *os.File
+	source     SourceInfo
+	hasSource  bool
 	portal     pipeWirePortalSession
 	streamSize [2]int
 }
@@ -278,7 +345,12 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := probeWaylandDisplay(ctx, os.Getenv("WAYLAND_DISPLAY")); err != nil {
 		return nil, err
 	}
-	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
+	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize, func(source SourceInfo) {
+		preparation.source, preparation.hasSource = source, true
+		if cfg.OnSource != nil {
+			cfg.OnSource(source)
+		}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -327,6 +399,16 @@ func PrepareTestCapture(ctx context.Context, cfg CaptureConfig) (*CapturePrepara
 		return nil, fmt.Errorf("HEVC capture requires GStreamer h265parse")
 	}
 	return preparation, nil
+}
+
+// Source reports the portal metadata retained by a completed preparation, if
+// any. The result can be partial; check its field availability before using it
+// to identify an output.
+func (p *CapturePreparation) Source() (SourceInfo, bool) {
+	if p == nil || !p.hasSource {
+		return SourceInfo{}, false
+	}
+	return p.source, true
 }
 
 // Start launches the prepared encoder using the supplied nominal receiver
@@ -2436,7 +2518,7 @@ func normalizeContext(ctx context.Context) context.Context {
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
 // the retained portal session (which must stay open for capture and retries), and a
 // fresh restore token when the portal grants persistence.
-func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int) (uint32, *os.File, pipeWirePortalSession, string, error) {
+func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int, onSource func(SourceInfo)) (uint32, *os.File, pipeWirePortalSession, string, error) {
 	ctx = normalizeContext(ctx)
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
@@ -2634,6 +2716,15 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 			dbg("[CAPTURE] portal stream size: %dx%d", width, height)
 		} else {
 			dbg("[CAPTURE] portal stream properties did not contain a usable size: %#v", streamProperties)
+		}
+	}
+	if onSource != nil {
+		if source, ok := portalStreamSource(streamProperties); ok {
+			dbg("[CAPTURE] portal stream source: type=%d size=%dx%d position=%d,%d has_position=%t",
+				source.Type, source.Width, source.Height, source.X, source.Y, source.HasPosition)
+			onSource(source)
+		} else {
+			dbg("[CAPTURE] portal stream properties carried no usable source metadata: %#v", streamProperties)
 		}
 	}
 

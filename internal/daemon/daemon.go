@@ -55,6 +55,10 @@ type StreamInfo struct {
 	HasAudio       bool           `json:"has_audio"`
 	AudioMuted     bool           `json:"audio_muted"`
 	CredentialKind CredentialKind `json:"credential_kind,omitempty"`
+	// Source is the portal metadata retained by this stream's capture group.
+	// Properties may be missing; callers must correlate available metadata
+	// with compositor outputs before claiming a particular display is captured.
+	Source *airplay.SourceInfo `json:"source,omitempty"`
 }
 
 // Response is returned to the caller for every request.
@@ -231,6 +235,7 @@ type videoCaptureGroup struct {
 	key              videoCaptureKey
 	broadcast        *airplay.BroadcastCapture
 	capture          *airplay.ScreenCapture
+	source           *airplay.SourceInfo
 	minimumVideoLead time.Duration
 	cancel           context.CancelFunc
 }
@@ -581,6 +586,15 @@ func (d *Daemon) overallStateLocked() State {
 	return StateIdle
 }
 
+// groupSource returns the capture group's portal metadata, if available.
+// Callers hold d.mu, which also guards captureGroup.source.
+func groupSource(group *videoCaptureGroup) *airplay.SourceInfo {
+	if group == nil {
+		return nil
+	}
+	return group.source
+}
+
 func (d *Daemon) handleStatus() Response {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -600,6 +614,7 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 			HasAudio:       s.session != nil && s.session.HasAudio(),
 			AudioMuted:     s.audioMuted,
 			CredentialKind: waitingCredentialKind(s),
+			Source:         groupSource(s.captureGroup),
 		})
 	}
 	// Sort for deterministic output
@@ -1419,6 +1434,12 @@ func (d *Daemon) getOrStartPreparedCaptureGroup(ctx context.Context, entry *acti
 	}
 	group.broadcast = broadcast
 	group.capture = capture
+	// The prepared path retains the selected stream's portal metadata; the
+	// legacy StartCapture path does not expose it, so it reports no source.
+	if selected, ok := preparation.Source(); ok {
+		stored := selected
+		group.source = &stored
+	}
 	group.minimumVideoLead = minimumVideoLead
 	d.streamWorkers.Add(1)
 	d.mu.Unlock()
