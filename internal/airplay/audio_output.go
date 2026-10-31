@@ -68,7 +68,7 @@ func (m *audioOutputManager) acquire(ctx context.Context) (string, func(), error
 		// PulseAudio's software null sink already applies these to the mix.
 		out, err := m.run(ctx, "load-module", "module-null-sink", "sink_name="+name,
 			"format=s16le", "rate=44100", "channels=2", "channel_map=front-left,front-right",
-			"sink_properties='device.description=Doubletake device.class=sound monitor.channel-volumes=true'")
+			"sink_properties='device.description=doubletake device.class=sound monitor.channel-volumes=true'")
 		module := strings.TrimSpace(string(out))
 		if _, parseErr := strconv.ParseUint(module, 10, 32); err != nil || parseErr != nil {
 			// A canceled load may have reached the server without returning its ID.
@@ -77,10 +77,10 @@ func (m *audioOutputManager) acquire(ctx context.Context) (string, func(), error
 			if err == nil {
 				err = fmt.Errorf("invalid module ID %q", module)
 			}
-			return "", nil, fmt.Errorf("create Doubletake audio output (requires pactl and PulseAudio or pipewire-pulse): %w", err)
+			return "", nil, fmt.Errorf("create doubletake audio output (requires pactl and PulseAudio or pipewire-pulse): %w", err)
 		}
 		m.name, m.module = name, module
-		log.Printf("[AUDIO] output Doubletake is available; select it in your sound settings to route applications here")
+		log.Printf("[AUDIO] output doubletake is available; select it in your sound settings to route applications here")
 	}
 	m.users++
 	name := m.name

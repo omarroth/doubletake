@@ -1,4 +1,4 @@
-.TH DOUBLETAKE 1 "May 2026" "doubletake" "User Commands"
+.TH doubletake 1 "May 2026" "doubletake" "User Commands"
 .SH NAME
 doubletake \- AirPlay screen mirroring sender for Linux
 .SH SYNOPSIS
@@ -54,7 +54,7 @@ pairing and a later HTTP Digest challenge when the receiver requires both.
 .PP
 Interactive mode prompts only once after identifying the receiver's security
 mode. In the Plasma applet, an on-screen PIN uses a visible four-digit field and
-a configured receiver password uses an unrestricted masked field. Doubletake
+a configured receiver password uses an unrestricted masked field. doubletake
 does not request an on-screen PIN in password mode.
 .TP
 .B \-port-range \fIMIN-MAX\fR
@@ -95,9 +95,9 @@ when this option is zero. A nonzero value sets that common budget at startup.
 Disable audio for video-only mirroring
 .TP
 .B \-audio-source \fISOURCE\fR
-Audio route: \fBoutput\fR (default) creates a selectable Doubletake output;
+Audio route: \fBoutput\fR (default) creates a selectable doubletake output;
 \fBmonitor\fR copies the default local output, retaining local playback.
-Select Doubletake in sound settings to send applications or system audio to the
+Select doubletake in sound settings to send applications or system audio to the
 receivers. Its volume and mute controls apply to the captured audio. The daemon
 shares this output across receivers and removes it when the last audio capture
 stops. Requires pactl and GStreamer's pulsesrc with PulseAudio or pipewire-pulse.
@@ -176,7 +176,7 @@ but the receiver can still send audio retransmission requests to the control
 port.
 .PP
 The event and video data channels are outbound TCP connections to ports returned
-by the receiver. Doubletake does not require an inbound TCP firewall rule.
+by the receiver. doubletake does not require an inbound TCP firewall rule.
 Router port forwarding and Internet exposure are not required.
 .PP
 The operating system selects ephemeral UDP ports unless

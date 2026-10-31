@@ -47,7 +47,7 @@ provided by the plugins-bad package. Check availability with
 For AMD/Intel Wayland capture, also install `gst-plugin-va` on Arch Linux and
 check `gst-inspect-1.0 vapostproc`. This supplies the VA DMA-BUF import and
 path, including when the video encoder uses a different backend. When downloading
-frames for another backend, Doubletake fits and pads them with `videoscale` in
+frames for another backend, doubletake fits and pads them with `videoscale` in
 system memory to produce initialized black borders. This uses more CPU than VA
 scaling and works from actual video dimensions, including rotated captures.
 The software fallback can stall on some compositor/PipeWire combinations;
@@ -127,15 +127,15 @@ make test
 
 ### Audio output
 
-When audio streaming starts, Doubletake creates a **Doubletake** output in your
+When audio streaming starts, doubletake creates a **doubletake** output in your
 sound settings (PulseAudio or PipeWire with `pipewire-pulse`). Select that output
 for the applications you want to send, or make it your default output for system
 audio. Sound routed there goes to the receivers without playing through your local
 speakers. Its volume and mute controls affect the captured audio, including media
-keys when Doubletake is the selected system output.
+keys when doubletake is the selected system output.
 
 The daemon shares this output across its receivers. It removes it when the last
-audio capture stops, including cancellation or a capture-process failure. Doubletake
+audio capture stops, including cancellation or a capture-process failure. doubletake
 does not change your default output or move applications automatically. Your sound
 server manages their routing when an output disappears. An unclean process kill
 (such as `SIGKILL`) can leave a null sink behind; remove that output's
@@ -182,7 +182,7 @@ receivers, particularly across different timing protocols and audio codecs.
 
 ### Optional AAC-ELD support
 
-Doubletake selects screen audio from the receiver's advertised
+doubletake selects screen audio from the receiver's advertised
 `supportedFormats.screenStream` mask. Default builds use the built-in ALAC
 encoder when the receiver advertises it and require no FDK-AAC dependency.
 An optional build enables AAC-ELD and the foreground sender prefers it when
@@ -213,7 +213,7 @@ doubletake binds three consecutive local UDP ports for each stream:
 PTP and sender-initiated NTP sessions do not require a new inbound timing
 connection, but the receiver can still send audio retransmission requests to
 the control port. The event and video data channels are outbound TCP
-connections from doubletake to ports returned by the receiver. Doubletake does
+connections from doubletake to ports returned by the receiver. doubletake does
 not listen for inbound TCP connections.
 
 No router port forwarding or Internet exposure is needed. If the host firewall
@@ -274,7 +274,7 @@ requires it.
 
 The CLI and Plasma applet prompt once after inspecting the receiver's security
 mode. In the Plasma applet, an on-screen PIN uses a visible four-digit field,
-while a configured password uses an unrestricted masked field. Doubletake does
+while a configured password uses an unrestricted masked field. doubletake does
 not request or claim that a PIN is visible in password mode. The daemon exposes
 the distinction while retaining `doubletake-ctl pin <PIN-or-password>` for
 command compatibility when exactly one receiver is waiting. With concurrent
@@ -377,7 +377,7 @@ doubletake-ctl disconnect
 | `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |
 | `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |
 | `-no-audio` | false | Disable audio streaming |
-| `-audio-source` | output | Selectable Doubletake output, or `monitor` to copy the default local output |
+| `-audio-source` | output | Selectable doubletake output, or `monitor` to copy the default local output |
 | `-test` | false | Use synthetic video source |
 | `-daemonize` | false | Run as background daemon with Unix socket control interface |
 | `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock` | Daemon control socket path |

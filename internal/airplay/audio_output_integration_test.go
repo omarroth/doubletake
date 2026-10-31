@@ -50,7 +50,7 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 	if !strings.Contains(run("list", "short", "sinks"), name) {
 		t.Fatal("dedicated output missing")
 	}
-	// Play exclusively to Doubletake. Nothing is routed to a physical output.
+	// Play exclusively to doubletake. Nothing is routed to a physical output.
 	tone := exec.CommandContext(ctx, "gst-launch-1.0", "--quiet", "audiotestsrc", "is-live=true", "wave=sine", "volume=0.8",
 		"!", "audioconvert", "!", "audioresample", "!", "pulsesink", "device="+name, "buffer-time=100000", "latency-time=10000")
 	if err := tone.Start(); err != nil {

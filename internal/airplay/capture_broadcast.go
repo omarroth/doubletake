@@ -397,7 +397,7 @@ func (s *BroadcastSink) frameQueueExceedsLimitsLocked(frame VideoAccessUnit) boo
 // The same backing bytes can safely be referenced by every receiver queue.
 // An explicitly single-destination sink waits once one AU is pending, rather
 // than accumulating encoded references which cannot safely be dropped. Shared
-// fan-out is nonblocking and detaches only the sink which exceeds Doubletake's
+// fan-out is nonblocking and detaches only the sink which exceeds doubletake's
 // nominal-duration relay budget. Detachment does not discard individual
 // encoded references.
 func (s *BroadcastSink) enqueueFrame(frame VideoAccessUnit) error {

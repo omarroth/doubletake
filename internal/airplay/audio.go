@@ -254,7 +254,7 @@ func audioTestToneSourceArgs(codecSPF int64) []string {
 	}
 }
 
-// StartAudioCapture captures the dedicated Doubletake audio output. Test mode
+// StartAudioCapture captures the dedicated doubletake audio output. Test mode
 // generates a tone without creating or connecting to a sound-server output.
 func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*AudioCapture, error) {
 	return StartAudioCaptureWithSource(ctx, testTone, codec, AudioSourceOutput)
