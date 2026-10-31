@@ -43,6 +43,21 @@ func TestAudioCapturePipelineUsesTimestampedFramingWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestAudioTestToneUsesSafeExplicitAmplitude(t *testing.T) {
+	joined := strings.Join(audioTestToneSourceArgs(352), " ")
+	for _, want := range []string{
+		"audiotestsrc", "wave=sine", "freq=440", "volume=0.01",
+		"is-live=true", "samplesperbuffer=352",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("test-tone source %q does not contain %q", joined, want)
+		}
+	}
+	if strings.Count(joined, "volume=") != 1 {
+		t.Fatalf("test-tone source %q must set exactly one volume", joined)
+	}
+}
+
 func TestPulseMonitorSourceSeparatesStallBufferFromFragment(t *testing.T) {
 	args := strings.Join(pulseMonitorSourceArgs("test.monitor", AudioCodecALAC), " ")
 	for _, want := range []string{

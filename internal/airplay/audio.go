@@ -67,6 +67,11 @@ const (
 	// PCM. This queue has no minimum threshold, so it does not add steady-state
 	// latency; source PTS still decides whether a recovered frame is timely.
 	audioCaptureStallBuffer = 250 * time.Millisecond
+
+	// A diagnostic tone can reach speakers whose receiver resets to full volume
+	// when an AirPlay session starts. Keep it safely below full scale: 0.01
+	// linear amplitude is approximately -40 dBFS.
+	audioTestToneVolume = "0.01"
 )
 
 // ErrAACELDUnavailable means this build does not contain the optional FDK-AAC
@@ -242,6 +247,13 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 	return append(args, "!", "fdsink", "fd=1", "sync=false", "async=false")
 }
 
+func audioTestToneSourceArgs(codecSPF int64) []string {
+	return []string{
+		"audiotestsrc", "wave=sine", "freq=440", "volume=" + audioTestToneVolume,
+		"is-live=true", fmt.Sprintf("samplesperbuffer=%d", codecSPF),
+	}
+}
+
 // StartAudioCapture captures the dedicated Doubletake audio output. Test mode
 // generates a tone without creating or connecting to a sound-server output.
 func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*AudioCapture, error) {
@@ -271,9 +283,8 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 	// Detect audio source
 	var srcArgs []string
 	if testTone {
-		srcArgs = []string{"audiotestsrc", "wave=sine", "freq=440", "is-live=true",
-			fmt.Sprintf("samplesperbuffer=%d", codecSPF)}
-		dbg("[AUDIO] using test tone (440 Hz sine wave, live, spf=%d)", codecSPF)
+		srcArgs = audioTestToneSourceArgs(codecSPF)
+		dbg("[AUDIO] using test tone (440 Hz sine wave, volume=%s, live, spf=%d)", audioTestToneVolume, codecSPF)
 	} else {
 		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
 		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil
