@@ -62,13 +62,13 @@ type CaptureConfig struct {
 // than what was requested.
 type SourceInfo struct {
 	// Type is the portal's source_type value (1 = monitor, 2 = window).
-	Type uint32
+	Type uint32 `json:"type"`
 	// Width and Height are the selected source's size in pixels.
-	Width  int
-	Height int
+	Width  int `json:"width"`
+	Height int `json:"height"`
 	// X and Y are the selected source's position in the compositor layout.
-	X int
-	Y int
+	X int `json:"x"`
+	Y int `json:"y"`
 }
 
 // IsMonitor reports whether the portal returned a monitor source.
@@ -185,6 +185,8 @@ type CapturePreparation struct {
 
 	pwNodeID   uint32
 	pwFd       *os.File
+	source     SourceInfo
+	hasSource  bool
 	portal     pipeWirePortalSession
 	streamSize [2]int
 }
@@ -340,7 +342,12 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := probeWaylandDisplay(ctx, os.Getenv("WAYLAND_DISPLAY")); err != nil {
 		return nil, err
 	}
-	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize, cfg.OnSource)
+	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize, func(source SourceInfo) {
+		preparation.source, preparation.hasSource = source, true
+		if cfg.OnSource != nil {
+			cfg.OnSource(source)
+		}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -389,6 +396,15 @@ func PrepareTestCapture(ctx context.Context, cfg CaptureConfig) (*CapturePrepara
 		return nil, fmt.Errorf("HEVC capture requires GStreamer h265parse")
 	}
 	return preparation, nil
+}
+
+// Source reports which display the portal selected, when the reply carried a
+// usable identity. It is available once the preparation has been created.
+func (p *CapturePreparation) Source() (SourceInfo, bool) {
+	if p == nil || !p.hasSource {
+		return SourceInfo{}, false
+	}
+	return p.source, true
 }
 
 // Start launches the prepared encoder using the supplied nominal receiver

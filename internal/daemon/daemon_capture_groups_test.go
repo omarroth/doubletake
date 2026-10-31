@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -296,5 +297,62 @@ func assertDaemonMutexAvailable(t *testing.T, d *Daemon, release, done chan stru
 		close(release)
 		<-done
 		t.Fatal("daemon mutex remained locked during blocking cleanup")
+	}
+}
+
+func TestStatusReportsSourceForEachStreamsCaptureGroup(t *testing.T) {
+	monitorGroup := &videoCaptureGroup{source: &airplay.SourceInfo{Type: 1, Width: 3840, Height: 2160}}
+	windowGroup := &videoCaptureGroup{source: &airplay.SourceInfo{Type: 2, Width: 1280, Height: 720, X: 3840}}
+	d := &Daemon{streams: map[string]*activeStream{
+		"192.0.2.20": {deviceIP: "192.0.2.20", device: "Window TV", state: StateStreaming, captureGroup: windowGroup},
+		"192.0.2.10": {deviceIP: "192.0.2.10", device: "Monitor TV", state: StateStreaming, captureGroup: monitorGroup},
+	}}
+
+	status := d.handleStatus()
+	if len(status.Streams) != 2 {
+		t.Fatalf("status streams = %+v, want both streams", status.Streams)
+	}
+	want := map[string]airplay.SourceInfo{
+		"192.0.2.10": *monitorGroup.source,
+		"192.0.2.20": *windowGroup.source,
+	}
+	for _, stream := range status.Streams {
+		if stream.Source == nil {
+			t.Fatalf("stream %s reported no source: %+v", stream.DeviceIP, stream)
+		}
+		if *stream.Source != want[stream.DeviceIP] {
+			t.Fatalf("stream %s reported source %+v, want %+v", stream.DeviceIP, *stream.Source, want[stream.DeviceIP])
+		}
+	}
+
+	// The status reply is a wire format, so pin the keys a caller parses.
+	raw, err := json.Marshal(*status.Streams[0].Source)
+	if err != nil {
+		t.Fatalf("marshal source: %v", err)
+	}
+	if got, want := string(raw), `{"type":1,"width":3840,"height":2160,"x":0,"y":0}`; got != want {
+		t.Fatalf("source JSON = %s, want %s", got, want)
+	}
+}
+
+func TestStatusOmitsCaptureSourceWhenPortalReportedNone(t *testing.T) {
+	d := &Daemon{streams: map[string]*activeStream{
+		"192.0.2.10": {deviceIP: "192.0.2.10", device: "TV", state: StateStreaming, captureGroup: &videoCaptureGroup{}},
+	}}
+
+	stream := d.handleStatus().Streams[0]
+	if stream.Source != nil {
+		t.Fatalf("unknown source reported as %+v", *stream.Source)
+	}
+	raw, err := json.Marshal(stream)
+	if err != nil {
+		t.Fatalf("marshal stream: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("unmarshal stream: %v", err)
+	}
+	if _, present := fields["source"]; present {
+		t.Fatalf("unknown source is present in JSON: %s", raw)
 	}
 }
