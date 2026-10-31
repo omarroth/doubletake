@@ -72,7 +72,9 @@ These are devices that have been tested with doubletake. If there are devices no
 - Mac16,10 (Mac mini, M4)
 - Roku Streaming Stick 4K (3820R2)
 - Samsung TV TU8300 Series 4K UHD
+- TCL 55R617 Roku TV (7120X)
 - TCL 55Q6C
+- Hisense 55H5BR
 - Hisense 55A6QU
 - Xiaomi 4K HDR TV (AFTBR92D74) (currently non-functional, see [#4](https://github.com/omarroth/doubletake/issues/4))
 
