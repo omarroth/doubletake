@@ -459,6 +459,89 @@ func TestPortalStreamDimensions(t *testing.T) {
 	}
 }
 
+func TestPortalStreamSource(t *testing.T) {
+	position := func(values ...interface{}) dbus.Variant {
+		return dbus.MakeVariant(values)
+	}
+	for _, tt := range []struct {
+		name   string
+		props  map[string]dbus.Variant
+		want   SourceInfo
+		wantOK bool
+	}{
+		{
+			name: "monitor with identity",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(1)),
+				"size":        dbus.MakeVariant([]int32{3840, 2160}),
+				"position":    position(int32(-1920), int32(0)),
+			},
+			want:   SourceInfo{Type: 1, Width: 3840, Height: 2160, X: -1920, Y: 0},
+			wantOK: true,
+		},
+		{
+			name: "window without position",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(2)),
+				"size":        dbus.MakeVariant([]interface{}{int32(1280), int32(720)}),
+			},
+			want:   SourceInfo{Type: 2, Width: 1280, Height: 720},
+			wantOK: true,
+		},
+		{
+			name: "size only leaves type unknown",
+			props: map[string]dbus.Variant{
+				"size": dbus.MakeVariant([]uint32{2560, 1440}),
+			},
+			want:   SourceInfo{Width: 2560, Height: 1440},
+			wantOK: true,
+		},
+		{
+			name: "type only leaves size unknown",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(1)),
+			},
+			want:   SourceInfo{Type: 1},
+			wantOK: true,
+		},
+		{
+			name: "wide position tuple",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant(uint32(1)),
+				"position":    position(int64(3840), int64(1080)),
+			},
+			want:   SourceInfo{Type: 1, X: 3840, Y: 1080},
+			wantOK: true,
+		},
+		{
+			name:   "missing properties",
+			props:  map[string]dbus.Variant{},
+			wantOK: false,
+		},
+		{
+			name:   "nil properties",
+			props:  nil,
+			wantOK: false,
+		},
+		{
+			name: "malformed identity",
+			props: map[string]dbus.Variant{
+				"source_type": dbus.MakeVariant("monitor"),
+				"size":        dbus.MakeVariant([]int32{1920}),
+				"position":    position(int32(0)),
+			},
+			wantOK: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := portalStreamSource(tt.props)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("portalStreamSource() = (%+v, %t), want (%+v, %t)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestVbvBufferKbit(t *testing.T) {
 	tests := []struct {
 		name    string
