@@ -70,7 +70,7 @@ func (c *AirPlayClient) connectEventChannel(ctx context.Context, port int, clock
 	if port <= 0 {
 		return nil, nil
 	}
-	address := net.JoinHostPort(c.host, strconv.Itoa(port))
+	address := net.JoinHostPort(c.sessionPeerHost(), strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial event channel %s: %w", address, err)

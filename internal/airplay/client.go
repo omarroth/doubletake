@@ -522,6 +522,27 @@ func (c *AirPlayClient) Connect(ctx context.Context) error {
 	return nil
 }
 
+// sessionPeerHost returns the receiver address selected by the established
+// RTSP connection. Every additional media, timing, and event socket belongs to
+// that session and must use the same address. Re-resolving a dual-stack name
+// can choose another family (or another host), leaving the receiver's
+// session-bound ports unreachable. Keep an IPv6 scope zone when one was used.
+func (c *AirPlayClient) sessionPeerHost() string {
+	if c != nil && c.conn != nil {
+		if peer, ok := c.conn.RemoteAddr().(*net.TCPAddr); ok && len(peer.IP) != 0 {
+			host := peer.IP.String()
+			if peer.IP.To4() == nil && peer.Zone != "" {
+				host += "%" + peer.Zone
+			}
+			return host
+		}
+	}
+	if c == nil {
+		return ""
+	}
+	return c.host
+}
+
 func (c *AirPlayClient) Close() error {
 	if c.conn != nil {
 		return c.conn.Close()
