@@ -184,105 +184,48 @@ receivers, particularly across different timing protocols and audio codecs.
 
 doubletake selects screen audio from the receiver's advertised
 `supportedFormats.screenStream` mask. Default builds use the built-in ALAC
-encoder when the receiver advertises it and require no FDK-AAC dependency.
-An optional build enables AAC-ELD and the foreground sender prefers it when
-advertised; the daemon reuses an active codec or prefers offered ALAC for sharing.
-This codec
-is distinct from AAC-LC: the ordinary GStreamer `avenc_aac` encoder cannot
-replace it. AAC-ELD requires the system `libfdk-aac` development files and cgo:
+encoder and require no FDK-AAC dependency. AAC-ELD is needed only when a
+receiver advertises it without ALAC; `-no-audio` remains available for those
+receivers in a default build.
+
+AAC-ELD is distinct from AAC-LC and requires the system `libfdk-aac`
+development files and cgo:
 
 ```sh
 CGO_ENABLED=1 go build -tags fdk_aac -o bin/doubletake ./cmd/doubletake
 ```
 
 Install the package that provides the `fdk-aac` pkg-config file and headers for
-your distribution before running that command. A default build reports a clear
-error if advertised capabilities select AAC-ELD. A nonzero screen-audio mask
-which advertises neither ALAC nor AAC-ELD is also rejected instead of silently
-sending an unadvertised format. Use `-no-audio` to keep testing pairing, timing,
-and video when the advertised audio format is unavailable.
+your distribution before running that command. With this build, the foreground
+sender prefers AAC-ELD when offered; the daemon prefers ALAC when it can share
+that encoder across receivers.
 
 ## Firewall
 
-doubletake binds three consecutive local UDP ports for each stream:
-
-- `N`: timing. A receiver-initiated NTP session probes this port during SETUP.
-- `N+1`: audio control and receiver retransmission requests.
-- `N+2`: outgoing audio data.
-
-PTP and sender-initiated NTP sessions do not require a new inbound timing
-connection, but the receiver can still send audio retransmission requests to
-the control port. The event and video data channels are outbound TCP
-connections from doubletake to ports returned by the receiver. doubletake does
-not listen for inbound TCP connections.
-
-No router port forwarding or Internet exposure is needed. If the host firewall
-allows local-network traffic, no firewall configuration is necessary. With a
-default-deny host firewall, use `-port-range MIN-MAX` to replace unpredictable
-ephemeral UDP ports with a range you can allow from the receiver. The range
-must contain at least three ports:
+No router port forwarding or Internet exposure is needed. With a default-deny
+host firewall, select a local UDP range instead of using ephemeral ports:
 
 ```sh
 doubletake -target 192.168.1.77 -port-range 60000-60010
 ```
 
-Daemon mode uses the same range for every managed stream. Reserve at least
-three available ports per receiver that may stream simultaneously.
-
-For example, restrict a UFW rule to the receiver's address:
-
-```sh
-sudo ufw allow from 192.168.1.77 proto udp to any port 60000:60010
-```
-
-Add a rule for each receiver, or use the trusted LAN subnet as the source. For
-nftables/firewalld, add an equivalent inbound UDP rule for the selected source
-and range.
-
-NTP and PTP use the same presentation policy; the timing protocol only changes
-how timestamps are represented. In automatic mode, an ordinary connection uses
-a 75 ms video lead and an 85 ms screen-audio lead.
+Allow that range from the receiver or trusted LAN. Reserve at least three ports
+per simultaneous receiver for timing, audio control, and audio data. Event and
+video connections are outbound TCP.
 
 ## Password-protected receivers
 
-If the receiver has **Require Password** enabled (on an Apple TV: Settings →
-AirPlay and HomeKit), it challenges the mirroring `SETUP` request with HTTP
-Digest auth and mirroring fails with `HTTP 401` until doubletake answers it.
-Pass the password with `-code`:
+For an Apple TV with **Require Password** enabled, provide its configured
+password with `DOUBLETAKE_CODE`:
 
 ```sh
 DOUBLETAKE_CODE='...' doubletake -target 192.168.1.77
 ```
 
-`-code` carries whatever the receiver is asking for — the onscreen pairing PIN
-during `-pair`, or the fixed password when "Require Password" is enabled.
-`$DOUBLETAKE_CODE` is preferred over the flag: a command line is visible to
-other users via `ps` and lands in shell history. The environment variable takes
-precedence when both are set.
-
-Pairing and Digest authentication remain separate wire protocols, but
-doubletake deliberately uses one credential flow for both: a PIN/password
-entered during pairing is retained for later Digest challenges and reconnects.
-A receiver may consume that value during pairing, Digest auth, both, or neither.
-Supplying `-code` does not by itself trigger re-pairing.
-
-When the capability policy selects first-party CoreUtils/HAP pairing, a
-configured fixed password is reserved for Digest authentication and is never
-reused as an SRP pairing PIN, including with `-pair`. A legacy/HKP pairing flow
-may consume the same entered value during both SRP and Digest when its protocol
-requires it.
-
-The CLI and Plasma applet prompt once after inspecting the receiver's security
-mode. In the Plasma applet, an on-screen PIN uses a visible four-digit field,
-while a configured password uses an unrestricted masked field. doubletake does
-not request or claim that a PIN is visible in password mode. The daemon exposes
-the distinction while retaining `doubletake-ctl pin <PIN-or-password>` for
-command compatibility when exactly one receiver is waiting. With concurrent
-prompts, submit each value with `doubletake-ctl connect TARGET PIN-or-password`.
-
-One thing that makes this confusing to diagnose: **"Require Password" is a
-fixed password you set, not a rotating onscreen code.** Nothing appears on the
-TV during `-pair`, and the prompt is asking for that configured password.
+The same option carries the onscreen PIN during `-pair`. The environment
+variable takes precedence over `-code` and avoids exposing the credential in
+shell history or process listings. **Require Password** uses a fixed configured
+password; it does not display a pairing PIN.
 
 Run with `-debug` to see the challenge and whether the retry was accepted.
 
