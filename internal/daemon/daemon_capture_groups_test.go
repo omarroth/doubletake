@@ -301,8 +301,8 @@ func assertDaemonMutexAvailable(t *testing.T, d *Daemon, release, done chan stru
 }
 
 func TestStatusReportsSourceForEachStreamsCaptureGroup(t *testing.T) {
-	monitorGroup := &videoCaptureGroup{source: &airplay.SourceInfo{Type: 1, Width: 3840, Height: 2160}}
-	windowGroup := &videoCaptureGroup{source: &airplay.SourceInfo{Type: 2, Width: 1280, Height: 720, X: 3840}}
+	monitorGroup := &videoCaptureGroup{source: &airplay.SourceInfo{Type: 1, Width: 3840, Height: 2160, HasPosition: true}}
+	windowGroup := &videoCaptureGroup{source: &airplay.SourceInfo{Type: 2, Width: 1280, Height: 720}}
 	d := &Daemon{streams: map[string]*activeStream{
 		"192.0.2.20": {deviceIP: "192.0.2.20", device: "Window TV", state: StateStreaming, captureGroup: windowGroup},
 		"192.0.2.10": {deviceIP: "192.0.2.10", device: "Monitor TV", state: StateStreaming, captureGroup: monitorGroup},
@@ -330,7 +330,7 @@ func TestStatusReportsSourceForEachStreamsCaptureGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal source: %v", err)
 	}
-	if got, want := string(raw), `{"type":1,"width":3840,"height":2160,"x":0,"y":0}`; got != want {
+	if got, want := string(raw), `{"type":1,"width":3840,"height":2160,"x":0,"y":0,"has_position":true}`; got != want {
 		t.Fatalf("source JSON = %s, want %s", got, want)
 	}
 }

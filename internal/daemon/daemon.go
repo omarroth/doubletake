@@ -55,9 +55,9 @@ type StreamInfo struct {
 	HasAudio       bool           `json:"has_audio"`
 	AudioMuted     bool           `json:"audio_muted"`
 	CredentialKind CredentialKind `json:"credential_kind,omitempty"`
-	// Source is the display this stream's capture group selected, when the
-	// portal reported a usable identity. Callers that promised to send one
-	// specific display use it to verify the capture rather than assume it.
+	// Source is the portal metadata retained by this stream's capture group.
+	// Properties may be missing; callers must correlate available metadata
+	// with compositor outputs before claiming a particular display is captured.
 	Source *airplay.SourceInfo `json:"source,omitempty"`
 }
 
@@ -586,8 +586,8 @@ func (d *Daemon) overallStateLocked() State {
 	return StateIdle
 }
 
-// groupSource returns the capture group's selected display, if known. Callers
-// hold d.mu, which also guards captureGroup.source.
+// groupSource returns the capture group's portal metadata, if available.
+// Callers hold d.mu, which also guards captureGroup.source.
 func groupSource(group *videoCaptureGroup) *airplay.SourceInfo {
 	if group == nil {
 		return nil
@@ -1434,8 +1434,8 @@ func (d *Daemon) getOrStartPreparedCaptureGroup(ctx context.Context, entry *acti
 	}
 	group.broadcast = broadcast
 	group.capture = capture
-	// The prepared path knows which display the portal selected; the legacy
-	// StartCapture path does not expose it, so it reports no source.
+	// The prepared path retains the selected stream's portal metadata; the
+	// legacy StartCapture path does not expose it, so it reports no source.
 	if selected, ok := preparation.Source(); ok {
 		stored := selected
 		group.source = &stored
