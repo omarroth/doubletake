@@ -214,7 +214,10 @@ doubletake
 # Disable audio for video-only mirroring
 doubletake -no-audio
 
-# Connect to a specific Apple TV
+# Discover and connect to a receiver by its AirPlay name
+doubletake -receiver-name "Living Room TV"
+
+# Connect to a specific Apple TV by address
 doubletake -target 192.168.1.77
 
 # First-time pairing with PIN (saves credentials for reuse)
@@ -262,7 +265,8 @@ doubletake-ctl disconnect
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-target` | | Apple TV IP (skip mDNS discovery) |
+| `-target` | | Apple TV IP or hostname (skip mDNS discovery) |
+| `-receiver-name` | | Exact AirPlay receiver name to select during discovery (case-insensitive; mutually exclusive with `-target`) |
 | `-port` | 7000 | AirPlay port |
 | `-code` | | Pairing PIN shown on the receiver, or its configured password when "Require Password" is enabled (see [Password-protected receivers](#password-protected-receivers)); prefer `$DOUBLETAKE_CODE` |
 | `-port-range` | | Local UDP range for timing/audio and receiver control traffic (at least 3 ports) |

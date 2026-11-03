@@ -59,6 +59,7 @@ func parsePortRange(s string) (int, int, error) {
 
 func main() {
 	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
+	receiverName := flag.String("receiver-name", "", "AirPlay receiver name to select during discovery")
 	port := flag.Int("port", 7000, "AirPlay port")
 	code := flag.String("code", "", "Pairing PIN shown on the receiver, or the password set on it when \"Require Password\" is enabled; prefer $DOUBLETAKE_CODE so it stays out of shell history and ps output")
 	credFile := flag.String("creds", airplay.DefaultCredentialsPath(), "Path to saved pairing credentials")
@@ -81,6 +82,9 @@ func main() {
 	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
+	if *target != "" && strings.TrimSpace(*receiverName) != "" {
+		log.Fatal("-target and -receiver-name cannot be used together")
+	}
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)
 	}
@@ -155,7 +159,13 @@ func main() {
 	if *target != "" {
 		addr = *target
 	} else {
-		device, err := selectDevice(ctx)
+		var device *airplay.AirPlayDevice
+		var err error
+		if strings.TrimSpace(*receiverName) != "" {
+			device, err = discoverDeviceByName(ctx, *receiverName)
+		} else {
+			device, err = selectDevice(ctx)
+		}
 		if err != nil {
 			log.Fatalf("discovery failed: %v", err)
 		}
@@ -568,7 +578,7 @@ func readCredential(reader *bufio.Reader, prompt string) string {
 	return line
 }
 
-func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
+func discoverDevices(ctx context.Context) ([]airplay.AirPlayDevice, error) {
 	fmt.Println("searching for Apple TVs...")
 	discoverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -579,6 +589,41 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 	}
 	if len(devices) == 0 {
 		return nil, fmt.Errorf("no Apple TVs found")
+	}
+	return devices, nil
+}
+
+func discoverDeviceByName(ctx context.Context, name string) (*airplay.AirPlayDevice, error) {
+	devices, err := discoverDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return selectDeviceByName(devices, name)
+}
+
+func selectDeviceByName(devices []airplay.AirPlayDevice, name string) (*airplay.AirPlayDevice, error) {
+	name = strings.TrimSpace(name)
+	var matches []airplay.AirPlayDevice
+	for _, device := range devices {
+		if strings.EqualFold(strings.TrimSpace(device.Name), name) {
+			matches = append(matches, device)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("no AirPlay receiver named %q found", name)
+	case 1:
+		return &matches[0], nil
+	default:
+		return nil, fmt.Errorf("multiple AirPlay receivers named %q found; use -target", name)
+	}
+}
+
+func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
+	devices, err := discoverDevices(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	sort.Slice(devices, func(i, j int) bool {

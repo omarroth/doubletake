@@ -48,6 +48,53 @@ func TestParsePortRange(t *testing.T) {
 	}
 }
 
+func TestSelectDeviceByName(t *testing.T) {
+	devices := []airplay.AirPlayDevice{
+		{Name: "Gondor", IP: "192.168.1.10", Port: 7000},
+		{Name: "Rohan", IP: "192.168.1.11", Port: 7000},
+	}
+
+	device, err := selectDeviceByName(devices, " roHAN ")
+	if err != nil {
+		t.Fatalf("selectDeviceByName(): %v", err)
+	}
+	if device.Name != "Rohan" || device.IP != "192.168.1.11" {
+		t.Fatalf("selected device = %+v, want Rohan at 192.168.1.11", device)
+	}
+}
+
+func TestSelectDeviceByNameRejectsMissingAndAmbiguousNames(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		devices    []airplay.AirPlayDevice
+		query      string
+		wantErrSub string
+	}{
+		{
+			name:       "missing",
+			devices:    []airplay.AirPlayDevice{{Name: "Gondor"}},
+			query:      "Rohan",
+			wantErrSub: `no AirPlay receiver named "Rohan" found`,
+		},
+		{
+			name: "ambiguous",
+			devices: []airplay.AirPlayDevice{
+				{Name: "Rohan", IP: "192.168.1.11"},
+				{Name: "ROHAN", IP: "192.168.1.12"},
+			},
+			query:      "Rohan",
+			wantErrSub: `multiple AirPlay receivers named "Rohan" found`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := selectDeviceByName(test.devices, test.query)
+			if err == nil || !strings.Contains(err.Error(), test.wantErrSub) {
+				t.Fatalf("selectDeviceByName() error = %v, want substring %q", err, test.wantErrSub)
+			}
+		})
+	}
+}
+
 func TestReadCredentialPreservesPasswordAndEmptyInput(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader("password with spaces\n\n"))
 	if got := readCredential(reader, ""); got != "password with spaces" {
