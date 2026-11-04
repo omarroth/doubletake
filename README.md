@@ -88,7 +88,7 @@ sudo make install
 Use a custom prefix if needed:
 
 ```sh
-make install PREFIX=$HOME/.local
+make install PREFIX=$HOME/.local SYSTEMDUSERDIR=$HOME/.local/share/systemd/user
 ```
 
 Uninstall:

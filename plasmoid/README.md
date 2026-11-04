@@ -57,22 +57,7 @@ kpackagetool6 -t Plasma/Applet -r org.doubletake.plasmoid
 
 ## Autostart
 
-Create a systemd user service for the daemon:
-
-```ini
-# ~/.config/systemd/user/doubletake.service
-[Unit]
-Description=doubletake AirPlay Mirroring Daemon
-After=graphical-session.target
-
-[Service]
-ExecStart=/usr/local/bin/doubletake -daemonize -creds %h/.config/doubletake/credentials.json
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=graphical-session.target
-```
+`make install` installs a systemd user service for the daemon. Enable it with:
 
 ```sh
 systemctl --user enable --now doubletake.service
