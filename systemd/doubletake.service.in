@@ -1,0 +1,11 @@
+[Unit]
+Description=doubletake AirPlay mirroring daemon
+Documentation=https://github.com/omarroth/doubletake
+
+[Service]
+ExecStart=@bindir@/doubletake -daemonize
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

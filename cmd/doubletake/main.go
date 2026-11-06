@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -68,7 +69,7 @@ func main() {
 	fps := flag.Int("fps", 30, "Frames per second")
 	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = auto, default tunes for resolution/FPS)")
 	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon uses shared 250 ms)")
-	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, openh264, none (x264/x265)")
+	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto uses H.264 for receiver compatibility)")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
@@ -640,11 +641,12 @@ func readCredential(reader *bufio.Reader, prompt string) string {
 }
 
 func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
-	fmt.Println("searching for Apple TVs...")
+	stopIndicator := startDiscoveryIndicator(os.Stdout, stdoutIsTerminal())
 	discoverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	devices, err := airplay.DiscoverAirPlayDevices(discoverCtx)
+	stopIndicator()
 	if err != nil {
 		return nil, err
 	}
@@ -674,6 +676,45 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 		return nil, fmt.Errorf("invalid selection")
 	}
 	return &devices[idx-1], nil
+}
+
+func stdoutIsTerminal() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func startDiscoveryIndicator(out io.Writer, animate bool) func() {
+	if !animate {
+		fmt.Fprintln(out, "searching for Apple TVs...")
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		frames := []byte{'|', '/', '-', '\\'}
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		index := 0
+		for {
+			fmt.Fprintf(out, "\rsearching for Apple TVs... %c", frames[index])
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				index = (index + 1) % len(frames)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-finished
+			fmt.Fprint(out, "\rsearching for Apple TVs... done\n")
+		})
+	}
 }
 
 // compareIPs compares two IP address strings numerically.

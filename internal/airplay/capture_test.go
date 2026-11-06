@@ -290,7 +290,7 @@ func TestStartGStreamerCommandSetsParentDeathSignal(t *testing.T) {
 }
 
 func TestValidateHWAccel(t *testing.T) {
-	for _, method := range []string{"", "auto", "nvenc", "vaapi", "openh264", "none"} {
+	for _, method := range []string{"", "auto", "nvenc", "vaapi", "v4l2", "openh264", "none"} {
 		if err := ValidateHWAccel(method); err != nil {
 			t.Errorf("ValidateHWAccel(%q): %v", method, err)
 		}
@@ -484,6 +484,33 @@ func TestPortalStreamDimensions(t *testing.T) {
 	}
 }
 
+func TestPortalStreamSource(t *testing.T) {
+	properties := map[string]dbus.Variant{
+		"source_type": dbus.MakeVariant(uint32(1)),
+		"size":        dbus.MakeVariant([]int32{3840, 2160}),
+		"position":    dbus.MakeVariant([]interface{}{int32(-1920), int32(0)}),
+	}
+	got, ok := portalStreamSource(properties)
+	want := SourceInfo{Type: 1, Width: 3840, Height: 2160, X: -1920, HasPosition: true}
+	if !ok || got != want {
+		t.Fatalf("portalStreamSource() = (%+v, %t), want (%+v, true)", got, ok, want)
+	}
+
+	partial, ok := portalStreamSource(map[string]dbus.Variant{
+		"source_type": dbus.MakeVariant(uint32(2)),
+		"position":    dbus.MakeVariant([]interface{}{int32(0), int64(0)}),
+	})
+	if !ok || partial != (SourceInfo{Type: 2}) {
+		t.Fatalf("partial portal source = (%+v, %t), want a window with unknown position", partial, ok)
+	}
+	if _, ok := portalStreamSource(nil); ok {
+		t.Fatal("nil portal properties produced source metadata")
+	}
+	if !got.IsMonitor() || (SourceInfo{Type: 2}).IsMonitor() {
+		t.Fatal("SourceInfo.IsMonitor did not preserve the portal classification")
+	}
+}
+
 func TestVbvBufferKbit(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -534,6 +561,19 @@ func TestBuildGstVideoPipeline(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GStreamer pipeline = %v, want %v", got, want)
+	}
+}
+
+func TestCaptureFormatReportsEffectiveEncoderSettings(t *testing.T) {
+	got := captureFormat(CaptureConfig{FPS: 30, MaxWidth: 1279, MaxHeight: 719}, encoderResult{
+		codec: VideoCodecH264, name: "vah264enc", hardware: true, bitrateKbps: 1843,
+	})
+	want := CaptureFormat{
+		Width: 1278, Height: 718, FPS: 30, Codec: VideoCodecH264,
+		BitrateKbps: 1843, Encoder: "vah264enc", HardwareEncoded: true,
+	}
+	if got != want {
+		t.Fatalf("capture format = %+v, want %+v", got, want)
 	}
 }
 
@@ -804,6 +844,21 @@ func TestDetectGstEncoderSelectsExplicitOpenH264(t *testing.T) {
 	}
 }
 
+func TestDetectGstEncoderSelectsExplicitV4L2(t *testing.T) {
+	encoder, err := detectGstEncoderWithProbe(CaptureConfig{
+		FPS: 25, Bitrate: 2500, HWAccel: "v4l2",
+	}, func(name string) bool { return name == "v4l2h264enc" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoder.name != "v4l2h264enc" || !encoder.hardware || encoder.rawFormat != "NV12" || encoder.bitrateKbps != 2500 {
+		t.Fatalf("V4L2 metadata = %+v", encoder)
+	}
+	if len(encoder.afterEncoder) != 1 || encoder.afterEncoder[0] != "video/x-h264,level=(string)4" {
+		t.Fatalf("V4L2 post-encoder caps = %v", encoder.afterEncoder)
+	}
+}
+
 func TestDetectGstEncoderRejectsMissingExplicitOpenH264(t *testing.T) {
 	var probes []string
 	_, err := detectGstEncoderWithProbe(CaptureConfig{
@@ -827,7 +882,7 @@ func TestDetectGstEncoderRejectsMissingExplicitOpenH264(t *testing.T) {
 }
 
 func TestDetectGstEncoderSelectionContract(t *testing.T) {
-	allProbes := []string{"vulkanh264enc", "nvh264enc", "vah264enc", "openh264enc", "x264enc"}
+	allProbes := []string{"vulkanh264enc", "nvh264enc", "vah264enc", "v4l2h264enc", "openh264enc", "x264enc"}
 	tests := []struct {
 		name        string
 		method      string
@@ -842,6 +897,13 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			method:      "auto",
 			available:   map[string]bool{"openh264enc": true, "x264enc": true},
 			wantEncoder: "openh264enc",
+			wantProbes:  allProbes[:5],
+		},
+		{
+			name:        "auto prefers V4L2 over software",
+			method:      "auto",
+			available:   map[string]bool{"v4l2h264enc": true, "openh264enc": true},
+			wantEncoder: "v4l2h264enc",
 			wantProbes:  allProbes[:4],
 		},
 		{
@@ -884,6 +946,20 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			available:  map[string]bool{"openh264enc": true, "x264enc": true},
 			wantProbes: []string{"vah264enc"},
 			wantError:  "vah264enc",
+		},
+		{
+			name:        "v4l2 selects only V4L2",
+			method:      "v4l2",
+			available:   map[string]bool{"v4l2h264enc": true, "openh264enc": true},
+			wantEncoder: "v4l2h264enc",
+			wantProbes:  []string{"v4l2h264enc"},
+		},
+		{
+			name:       "missing v4l2 does not cross fallback",
+			method:     "v4l2",
+			available:  map[string]bool{"openh264enc": true},
+			wantProbes: []string{"v4l2h264enc"},
+			wantError:  "v4l2h264enc",
 		},
 		{
 			name:        "none forces x264",
@@ -1405,6 +1481,27 @@ func TestWaylandStartupProbeTimeoutStopsBlockedReader(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("startup timeout cleanup took %v", elapsed)
+	}
+}
+
+func TestWaylandCaptureStartupErrorExplainsPipeWireFormatFailure(t *testing.T) {
+	err := waylandCaptureStartupError([]string{
+		"vah264enc with native VA frame import: capture exited: no more input formats",
+		"vah264enc with system-memory frame staging: pipeline doesn't want to preroll",
+	})
+	for _, want := range []string{
+		"no Wayland capture pipeline produced a decodable startup sequence",
+		"no more input formats",
+		"shared-memory screencast fallback",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("startup error %q does not contain %q", err, want)
+		}
+	}
+
+	ordinary := waylandCaptureStartupError([]string{"x264enc: encoder exited"})
+	if strings.Contains(ordinary.Error(), "shared-memory screencast fallback") {
+		t.Fatalf("ordinary startup error unexpectedly included PipeWire advice: %v", ordinary)
 	}
 }
 

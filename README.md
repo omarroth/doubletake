@@ -8,7 +8,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV u
 - FairPlay SAP authentication (clean Go implementation)
 - SRP-6a pairing with PIN and persistent credential storage
 - Wayland (PipeWire/xdg-desktop-portal) and X11 screen capture
-- H.264 encoding with NVENC, VA-API, OpenH264, and x264
+- H.264 encoding with NVENC, VA-API, V4L2 stateful encoders, OpenH264, and x264
 - Capability-gated HEVC Main10/high-resolution encoding with NVENC or x265
 - ChaCha20-Poly1305 stream encryption
 - mDNS device discovery
@@ -50,9 +50,20 @@ path, including when the video encoder uses a different backend. When downloadin
 frames for another backend, doubletake fits and pads them with `videoscale` in
 system memory to produce initialized black borders. This uses more CPU than VA
 scaling and works from actual video dimensions, including rotated captures.
-The software fallback can stall on some compositor/PipeWire combinations;
-see [#62](https://github.com/omarroth/doubletake/issues/62). Other distributions
-may package `vapostproc` separately from their older `vaapipostproc` plugin.
+Other distributions may package `vapostproc` separately from their older
+`vaapipostproc` plugin.
+
+Hyprland users should use `xdg-desktop-portal-hyprland` 1.5.0 or newer. Version
+1.4.1 can permanently stop producing frames after its buffer pool is exhausted;
+installing `gst-plugin-va` does not reliably avoid that portal bug. See
+[#62](https://github.com/omarroth/doubletake/issues/62).
+
+niri 26.04 offers DMA-BUF-only screencasts that affected versions of
+GStreamer's `pipewiresrc` cannot negotiate. Upgrade to a niri release with
+shared-memory screencast support and, when necessary, enable niri's
+`debug { disable-pipewire-dmabuf }` workaround. Adding caps after `pipewiresrc`
+cannot repair a failure that occurs during PipeWire format negotiation. See
+[#78](https://github.com/omarroth/doubletake/issues/78).
 
 You can also install from the AUR:
 
@@ -71,6 +82,7 @@ These are devices that have been tested with doubletake. If there are devices no
 - Mac17,2 (MacBook Pro, M5 14")
 - Mac16,10 (Mac mini, M4)
 - Roku Streaming Stick 4K (3820R2)
+- Roku TV (K844X)
 - Samsung TV TU8300 Series 4K UHD
 - TCL 55R617 Roku TV (7120X)
 - TCL 55Q6C
@@ -110,7 +122,15 @@ sudo make install
 Use a custom prefix if needed:
 
 ```sh
-make install PREFIX=$HOME/.local
+make install PREFIX=$HOME/.local SYSTEMDUSERDIR=$HOME/.local/share/systemd/user
+```
+
+Installation includes a systemd user unit for daemon mode. Enable it after a
+system install with:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now doubletake.service
 ```
 
 Uninstall:
@@ -277,6 +297,7 @@ doubletake -target 192.168.1.77 -target-latency-ms 100
 # Hardware encoding
 doubletake -target 192.168.1.77 -hwaccel nvenc   # NVIDIA
 doubletake -target 192.168.1.77 -hwaccel vaapi   # Intel/AMD
+doubletake -target 192.168.1.77 -hwaccel v4l2    # Stateful V4L2 encoders (many ARM SoCs)
 
 # OpenH264 software encoding
 doubletake -target 192.168.1.77 -hwaccel openh264
@@ -315,7 +336,7 @@ doubletake-ctl disconnect
 | `-fps` | 30 | Frames per second |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
-| `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `openh264`, `none` |
+| `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
 | `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |
 | `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |
@@ -327,7 +348,7 @@ doubletake-ctl disconnect
 | `-debug` | false | Verbose debug logging |
 
 Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
-`nvh264enc`, `vah264enc`, `openh264enc`, then `x264enc`. Explicit selections
+`nvh264enc`, `vah264enc`, `v4l2h264enc`, `openh264enc`, then `x264enc`. Explicit selections
 fail if their required GStreamer encoder is unavailable; `none` forces x264 for
 H.264 or x265 for explicitly requested HEVC.
 The normal `-video-codec auto` path uses H.264 and includes valid advertised

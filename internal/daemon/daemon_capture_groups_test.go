@@ -298,3 +298,27 @@ func assertDaemonMutexAvailable(t *testing.T, d *Daemon, release, done chan stru
 		t.Fatal("daemon mutex remained locked during blocking cleanup")
 	}
 }
+
+func TestStatusReportsCaptureFormatAndPortalSourcePerStream(t *testing.T) {
+	source := &airplay.SourceInfo{Type: 1, Width: 2560, Height: 1440, X: -2560, HasPosition: true}
+	group := &videoCaptureGroup{
+		format: airplay.CaptureFormat{
+			Width: 1920, Height: 1080, FPS: 30, Codec: airplay.VideoCodecH264,
+			BitrateKbps: 4147, Encoder: "vah264enc", HardwareEncoded: true,
+		},
+		source: source,
+	}
+	d := &Daemon{streams: map[string]*activeStream{
+		"192.0.2.10": {deviceIP: "192.0.2.10", device: "TV", state: StateStreaming, captureGroup: group},
+	}}
+
+	stream := d.handleStatus().Streams[0]
+	if stream.Width != 1920 || stream.Height != 1080 || stream.FPS != 30 ||
+		stream.Codec != airplay.VideoCodecH264 || stream.BitrateKbps != 4147 ||
+		stream.Encoder != "vah264enc" || !stream.HardwareEncoded {
+		t.Fatalf("stream format = %+v", stream)
+	}
+	if stream.Source == nil || *stream.Source != *source {
+		t.Fatalf("stream source = %+v, want %+v", stream.Source, source)
+	}
+}

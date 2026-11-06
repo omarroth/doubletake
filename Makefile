@@ -1,7 +1,8 @@
-.PHONY: all build doubletake doubletake-ctl doubletake-test-receiver doubletake-release doubletake-ctl-release manpages-release install install-man uninstall test clean
+.PHONY: all build doubletake doubletake-ctl doubletake-test-receiver doubletake-release doubletake-ctl-release manpages-release install install-bin install-man install-systemd uninstall test clean
 
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
+SYSTEMDUSERDIR ?= $(PREFIX)/lib/systemd/user
 
 all: doubletake doubletake-ctl
 
@@ -29,20 +30,30 @@ manpages-release:
 test:
 	go test ./...
 
-install: all install-man
-	install -m 755 bin/doubletake $(PREFIX)/bin/
-	install -m 755 bin/doubletake-ctl $(PREFIX)/bin/
+install: all install-bin install-man install-systemd
+
+install-bin:
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 bin/doubletake $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 bin/doubletake-ctl $(DESTDIR)$(PREFIX)/bin/
 
 install-man:
-	install -d $(MANDIR)/man1
-	install -m 644 man/man1/doubletake.1 $(MANDIR)/man1/
-	install -m 644 man/man1/doubletake-ctl.1 $(MANDIR)/man1/
+	install -d $(DESTDIR)$(MANDIR)/man1
+	install -m 644 man/man1/doubletake.1 $(DESTDIR)$(MANDIR)/man1/
+	install -m 644 man/man1/doubletake-ctl.1 $(DESTDIR)$(MANDIR)/man1/
+
+install-systemd:
+	install -d bin
+	sed 's|@bindir@|$(PREFIX)/bin|g' systemd/doubletake.service.in > bin/doubletake.service
+	install -d $(DESTDIR)$(SYSTEMDUSERDIR)
+	install -m 644 bin/doubletake.service $(DESTDIR)$(SYSTEMDUSERDIR)/doubletake.service
 
 uninstall:
-	rm -f $(PREFIX)/bin/doubletake
-	rm -f $(PREFIX)/bin/doubletake-ctl
-	rm -f $(MANDIR)/man1/doubletake.1
-	rm -f $(MANDIR)/man1/doubletake-ctl.1
+	rm -f $(DESTDIR)$(PREFIX)/bin/doubletake
+	rm -f $(DESTDIR)$(PREFIX)/bin/doubletake-ctl
+	rm -f $(DESTDIR)$(MANDIR)/man1/doubletake.1
+	rm -f $(DESTDIR)$(MANDIR)/man1/doubletake-ctl.1
+	rm -f $(DESTDIR)$(SYSTEMDUSERDIR)/doubletake.service
 
 clean:
 	rm -rf bin/

@@ -45,16 +45,53 @@ type CaptureConfig struct {
 
 	RestoreToken     string
 	SaveRestoreToken func(string) error
+
+	// OnSource receives portal metadata after source selection succeeds, before
+	// the PipeWire connection is opened or an encoder is started. It can run
+	// even if later preparation fails, so it does not signal successful capture.
+	OnSource func(SourceInfo)
+}
+
+// SourceInfo contains the metadata a screencast portal reported for the
+// selected stream. Portal properties are optional and use compositor
+// coordinates, which are not necessarily physical output pixels.
+type SourceInfo struct {
+	// Type is the portal source_type value: 1 is a monitor, 2 a window, and 4
+	// a virtual output. Zero means the portal did not identify the source type.
+	Type   uint32 `json:"type"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
+	// HasPosition distinguishes an omitted position from the real origin (0,0).
+	HasPosition bool `json:"has_position"`
+}
+
+// IsMonitor reports the portal's monitor classification. It does not prove
+// that the source is physical, belongs to the caller, or is the desired output.
+func (s SourceInfo) IsMonitor() bool { return s.Type == 1 }
+
+// CaptureFormat describes the encoded video produced by a running capture.
+// Width and Height are the negotiated receiver canvas; zero means the capture
+// was deliberately left at its native source size.
+type CaptureFormat struct {
+	Width           int        `json:"width,omitempty"`
+	Height          int        `json:"height,omitempty"`
+	FPS             int        `json:"fps"`
+	Codec           VideoCodec `json:"codec"`
+	BitrateKbps     int        `json:"bitrate_kbps"`
+	Encoder         string     `json:"encoder"`
+	HardwareEncoded bool       `json:"hardware_encoded"`
 }
 
 // ValidateHWAccel checks a capture encoder preference. An empty value keeps the
 // zero-value CaptureConfig useful and is treated as auto.
 func ValidateHWAccel(method string) error {
 	switch method {
-	case "", "auto", "nvenc", "vaapi", "openh264", "none":
+	case "", "auto", "nvenc", "vaapi", "v4l2", "openh264", "none":
 		return nil
 	default:
-		return fmt.Errorf("unknown encoder %q (want auto, nvenc, vaapi, openh264, or none)", method)
+		return fmt.Errorf("unknown encoder %q (want auto, nvenc, vaapi, v4l2, openh264, or none)", method)
 	}
 }
 
@@ -82,6 +119,7 @@ type ScreenCapture struct {
 	stopped  bool
 	stopOnce sync.Once
 	stderr   *captureStderrTail
+	format   CaptureFormat
 	// Synthetic relays have no process exit status. Their readers own terminal
 	// errors even after waitCh closes; treating that channel as EOF loses them.
 	streamOnly bool
@@ -125,6 +163,8 @@ type CapturePreparation struct {
 	pwFd       *os.File
 	portal     pipeWirePortalSession
 	streamSize [2]int
+	source     SourceInfo
+	hasSource  bool
 }
 
 // StartCapture detects the display server (Wayland or X11) and initiates screen
@@ -278,7 +318,13 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := probeWaylandDisplay(ctx, os.Getenv("WAYLAND_DISPLAY")); err != nil {
 		return nil, err
 	}
-	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
+	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize, func(source SourceInfo) {
+		preparation.source = source
+		preparation.hasSource = true
+		if cfg.OnSource != nil {
+			cfg.OnSource(source)
+		}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -486,6 +532,18 @@ func (p *CapturePreparation) MeasuredVideoLatency() time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.measuredVideoLatency
+}
+
+// Source reports the metadata retained from the Wayland portal selection.
+// Callers must correlate optional coordinates with their compositor before
+// claiming that it identifies a particular physical output.
+func (p *CapturePreparation) Source() (SourceInfo, bool) {
+	if p == nil {
+		return SourceInfo{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.source, p.hasSource
 }
 
 // HasSourceTimestamps reports whether the prepared source can retain capture
@@ -821,11 +879,15 @@ const (
 
 // encoderResult holds the selected encoder stage and its input requirements.
 type encoderResult struct {
-	parts       gstStage
-	needsVulkan bool   // encoder needs vulkanupload immediately before it
-	rawFormat   string // raw format accepted by the encoder
-	codec       VideoCodec
-	inputMemory encoderInputMemory
+	parts        gstStage
+	afterEncoder gstStage // optional caps between the encoder and parser
+	needsVulkan  bool     // encoder needs vulkanupload immediately before it
+	rawFormat    string   // raw format accepted by the encoder
+	codec        VideoCodec
+	inputMemory  encoderInputMemory
+	name         string
+	hardware     bool
+	bitrateKbps  int
 }
 
 type waylandPipelineMode uint8
@@ -867,6 +929,22 @@ func frameIntervalMillis(fps int) int {
 	// PipeWire's timer has millisecond precision. Round up so idle repeats
 	// cannot outrun the requested source rate (33 ms is faster than 30 fps).
 	return 1 + 999/fps
+}
+
+func captureFormat(cfg CaptureConfig, encoder encoderResult) CaptureFormat {
+	fps := cfg.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+	width, height := 0, 0
+	if cfg.MaxWidth > 0 && cfg.MaxHeight > 0 {
+		width, height = cfg.MaxWidth&^1, cfg.MaxHeight&^1
+	}
+	return CaptureFormat{
+		Width: width, Height: height, FPS: fps,
+		Codec: normalizeVideoCodec(encoder.codec), BitrateKbps: encoder.bitrateKbps,
+		Encoder: encoder.name, HardwareEncoded: encoder.hardware,
+	}
 }
 
 // pipeWireSourceHasProvideClock reports whether the installed pipewiresrc
@@ -996,6 +1074,7 @@ func buildGstVideoPipeline(source gstStage, beforeConvert, afterScale []gstStage
 
 func appendGstVideoEncoding(args []string, encoder encoderResult, timestampedOutput bool) []string {
 	args = appendGstStage(args, encoder.parts)
+	args = appendGstStage(args, encoder.afterEncoder)
 	parser, mediaType, payloader := "h264parse", "video/x-h264", "rtph264pay"
 	if encoder.codec == VideoCodecHEVC {
 		parser, mediaType, payloader = "h265parse", "video/x-h265", "rtph265pay"
@@ -1334,7 +1413,17 @@ func startPreparedWaylandCapturePlans(
 		return capture, nil
 	}
 
-	return nil, fmt.Errorf("no Wayland capture pipeline produced a decodable startup sequence:\n  %s", strings.Join(attemptErrors, "\n  "))
+	return nil, waylandCaptureStartupError(attemptErrors)
+}
+
+func waylandCaptureStartupError(attemptErrors []string) error {
+	details := strings.Join(attemptErrors, "\n  ")
+	message := "no Wayland capture pipeline produced a decodable startup sequence:\n  " + details
+	if strings.Contains(strings.ToLower(details), "no more input formats") {
+		message += "\n  hint: PipeWire and GStreamer's pipewiresrc could not negotiate a capture format; " +
+			"update the compositor and PipeWire GStreamer plugin, or enable the compositor's shared-memory screencast fallback"
+	}
+	return errors.New(message)
 }
 
 func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan waylandCapturePlan, nodeID uint32, pwFd *os.File, _ [2]int, timestampedOutput bool) (*ScreenCapture, error) {
@@ -1387,6 +1476,7 @@ func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan way
 		pwNodeID: nodeID,
 		waitCh:   make(chan struct{}),
 		stderr:   stderrTail,
+		format:   captureFormat(cfg, plan.encoder),
 	}
 	if timestampedOutput {
 		capture.frames = newRTPVideoAccessUnitReader(stdout, plan.encoder.codec)
@@ -1785,6 +1875,7 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 		cancel: cancel,
 		waitCh: make(chan struct{}),
 		stderr: stderrTail,
+		format: captureFormat(cfg, encoder),
 	}
 	if timestampedOutput {
 		capture.frames = newRTPVideoAccessUnitReader(stdout, encoder.codec)
@@ -1825,6 +1916,14 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 	default:
 	}
 	return sc.stdout.Read(buf)
+}
+
+// Format returns immutable metadata for the encoded stream.
+func (sc *ScreenCapture) Format() CaptureFormat {
+	if sc == nil {
+		return CaptureFormat{}
+	}
+	return sc.format
 }
 
 // ReadVideoAccessUnit returns one complete encoded frame with its source PTS.
@@ -2060,6 +2159,22 @@ func selectGstEncoderWithProbe(cfg CaptureConfig, hasElement func(string) bool, 
 			}},
 		},
 		{
+			method:  "v4l2",
+			element: "v4l2h264enc",
+			label:   "V4L2 hardware encoding (v4l2h264enc)",
+			result: encoderResult{rawFormat: "NV12", codec: VideoCodecH264, parts: []string{
+				"v4l2h264enc",
+				// V4L2 encoder tuning goes through extra-controls; unsupported
+				// controls are skipped with a warning rather than failing.
+				fmt.Sprintf("extra-controls=controls,video_bitrate=%d,video_bitrate_mode=1,h264_i_frame_period=%d,video_gop_size=%d,video_b_frames=0,repeat_sequence_header=1",
+					bitrate*1000, keyframeInterval, keyframeInterval),
+			},
+				// bcm2835 fails STREAMON unless negotiation fixes the level.
+				// This caps field changes signaling, not the encoded bitstream.
+				afterEncoder: gstStage{"video/x-h264,level=(string)4"},
+			},
+		},
+		{
 			method:  "openh264",
 			element: "openh264enc",
 			label:   "OpenH264 software encoding (openh264enc)",
@@ -2100,7 +2215,11 @@ func selectGstEncoderWithProbe(cfg CaptureConfig, hasElement func(string) bool, 
 			if announce {
 				log.Printf("[CAPTURE] using %s", candidate.label)
 			}
-			return candidate.result, nil
+			result := candidate.result
+			result.name = candidate.element
+			result.hardware = candidate.method == "nvenc" || candidate.method == "vaapi" || candidate.method == "v4l2"
+			result.bitrateKbps = bitrate
+			return result, nil
 		}
 	}
 
@@ -2153,7 +2272,11 @@ func selectGstHEVCEncoder(cfg CaptureConfig, hasElement func(string) bool, annou
 			if announce {
 				log.Printf("[CAPTURE] using %s", candidate.label)
 			}
-			return candidate.result, nil
+			result := candidate.result
+			result.name = candidate.element
+			result.hardware = candidate.method == "nvenc"
+			result.bitrateKbps = bitrate
+			return result, nil
 		}
 	}
 	if hwaccel == "auto" {
@@ -2229,6 +2352,7 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 		stdout: stdout,
 		cancel: cancel,
 		waitCh: make(chan struct{}),
+		format: captureFormat(cfg, encoder),
 	}
 	if timestampedOutput {
 		capture.frames = newRTPVideoAccessUnitReader(stdout, encoder.codec)
@@ -2469,7 +2593,7 @@ func normalizeContext(ctx context.Context) context.Context {
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
 // the retained portal session (which must stay open for capture and retries), and a
 // fresh restore token when the portal grants persistence.
-func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int) (uint32, *os.File, pipeWirePortalSession, string, error) {
+func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int, onSource func(SourceInfo)) (uint32, *os.File, pipeWirePortalSession, string, error) {
 	ctx = normalizeContext(ctx)
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
@@ -2669,6 +2793,15 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 			dbg("[CAPTURE] portal stream properties did not contain a usable size: %#v", streamProperties)
 		}
 	}
+	if onSource != nil {
+		if source, ok := portalStreamSource(streamProperties); ok {
+			dbg("[CAPTURE] portal stream source: type=%d size=%dx%d position=%d,%d has_position=%t",
+				source.Type, source.Width, source.Height, source.X, source.Y, source.HasPosition)
+			onSource(source)
+		} else {
+			dbg("[CAPTURE] portal stream properties carried no usable source metadata: %#v", streamProperties)
+		}
+	}
 
 	// Keep the original bus connection and session path together. Each failed
 	// GStreamer attempt consumes its PipeWire protocol connection, so retry by
@@ -2705,6 +2838,40 @@ func portalStreamDimensions(properties map[string]dbus.Variant) (int, int, bool)
 		}
 	}
 	return width, height, width > 0 && height > 0
+}
+
+// portalStreamSource decodes the optional identity-like metadata from one
+// portal stream. A successful result may still be partial.
+func portalStreamSource(properties map[string]dbus.Variant) (SourceInfo, bool) {
+	var info SourceInfo
+	usable := false
+	if properties == nil {
+		return info, false
+	}
+	if variant, ok := properties["source_type"]; ok {
+		if sourceType, ok := variant.Value().(uint32); ok {
+			info.Type = sourceType
+			usable = true
+		}
+	}
+	if width, height, ok := portalStreamDimensions(properties); ok {
+		info.Width, info.Height = width, height
+		usable = true
+	}
+	if variant, ok := properties["position"]; ok {
+		if position, ok := variant.Value().([]interface{}); ok && len(position) == 2 {
+			if x, ok := position[0].(int32); ok {
+				if y, ok := position[1].(int32); ok {
+					info.X, info.Y, info.HasPosition = int(x), int(y), true
+				}
+			} else if x, ok := position[0].(int64); ok {
+				if y, ok := position[1].(int64); ok {
+					info.X, info.Y, info.HasPosition = int(x), int(y), true
+				}
+			}
+		}
+	}
+	return info, usable
 }
 
 func portalDimension(value interface{}) (int, bool) {

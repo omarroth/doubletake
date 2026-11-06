@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -10,6 +11,21 @@ import (
 
 	"doubletake/internal/airplay"
 )
+
+func TestDiscoveryIndicatorIsStableWhenRedirectedAndAnimatedOnTerminal(t *testing.T) {
+	var redirected bytes.Buffer
+	startDiscoveryIndicator(&redirected, false)()
+	if got := redirected.String(); got != "searching for Apple TVs...\n" {
+		t.Fatalf("redirected indicator = %q", got)
+	}
+
+	var terminal bytes.Buffer
+	stop := startDiscoveryIndicator(&terminal, true)
+	stop()
+	if got := terminal.String(); !strings.Contains(got, "searching for Apple TVs...") || !strings.HasSuffix(got, "done\n") {
+		t.Fatalf("animated indicator = %q", got)
+	}
+}
 
 func TestParsePortRange(t *testing.T) {
 	for _, test := range []struct {

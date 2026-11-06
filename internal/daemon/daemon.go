@@ -55,12 +55,20 @@ type Request struct {
 
 // StreamInfo describes one active (or connecting) mirror stream.
 type StreamInfo struct {
-	Device         string         `json:"device"`
-	DeviceIP       string         `json:"device_ip"`
-	State          State          `json:"state"`
-	HasAudio       bool           `json:"has_audio"`
-	AudioMuted     bool           `json:"audio_muted"`
-	CredentialKind CredentialKind `json:"credential_kind,omitempty"`
+	Device          string              `json:"device"`
+	DeviceIP        string              `json:"device_ip"`
+	State           State               `json:"state"`
+	HasAudio        bool                `json:"has_audio"`
+	AudioMuted      bool                `json:"audio_muted"`
+	CredentialKind  CredentialKind      `json:"credential_kind,omitempty"`
+	Width           int                 `json:"width,omitempty"`
+	Height          int                 `json:"height,omitempty"`
+	FPS             int                 `json:"fps,omitempty"`
+	Codec           airplay.VideoCodec  `json:"codec,omitempty"`
+	BitrateKbps     int                 `json:"bitrate_kbps,omitempty"`
+	Encoder         string              `json:"encoder,omitempty"`
+	HardwareEncoded bool                `json:"hardware_encoded"`
+	Source          *airplay.SourceInfo `json:"source,omitempty"`
 }
 
 // Response is returned to the caller for every request.
@@ -243,6 +251,8 @@ type videoCaptureGroup struct {
 	key              videoCaptureKey
 	broadcast        *airplay.BroadcastCapture
 	capture          *airplay.ScreenCapture
+	format           airplay.CaptureFormat
+	source           *airplay.SourceInfo
 	minimumVideoLead time.Duration
 	cancel           context.CancelFunc
 }
@@ -617,13 +627,27 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 	}
 	streams := make([]StreamInfo, 0, len(d.streams))
 	for _, s := range d.streams {
+		format := airplay.CaptureFormat{}
+		var source *airplay.SourceInfo
+		if s.captureGroup != nil {
+			format = s.captureGroup.format
+			source = s.captureGroup.source
+		}
 		streams = append(streams, StreamInfo{
-			Device:         s.device,
-			DeviceIP:       s.deviceIP,
-			State:          s.state,
-			HasAudio:       s.session != nil && s.session.HasAudio(),
-			AudioMuted:     s.audioMuted,
-			CredentialKind: waitingCredentialKind(s),
+			Device:          s.device,
+			DeviceIP:        s.deviceIP,
+			State:           s.state,
+			HasAudio:        s.session != nil && s.session.HasAudio(),
+			AudioMuted:      s.audioMuted,
+			CredentialKind:  waitingCredentialKind(s),
+			Width:           format.Width,
+			Height:          format.Height,
+			FPS:             format.FPS,
+			Codec:           format.Codec,
+			BitrateKbps:     format.BitrateKbps,
+			Encoder:         format.Encoder,
+			HardwareEncoded: format.HardwareEncoded,
+			Source:          source,
 		})
 	}
 	// Sort for deterministic output
@@ -1580,6 +1604,11 @@ func (d *Daemon) getOrStartPreparedCaptureGroup(ctx context.Context, entry *acti
 	}
 	group.broadcast = broadcast
 	group.capture = capture
+	group.format = capture.Format()
+	if selected, ok := preparation.Source(); ok {
+		stored := selected
+		group.source = &stored
+	}
 	group.minimumVideoLead = minimumVideoLead
 	d.streamWorkers.Add(1)
 	d.mu.Unlock()
@@ -1693,6 +1722,7 @@ func (d *Daemon) getOrStartCaptureGroup(entry *activeStream, restoreToken, devic
 	}
 	group.broadcast = newBC
 	group.capture = capture
+	group.format = capture.Format()
 	// Add while holding d.mu so Shutdown cannot begin waiting between publishing
 	// the capture and registering its completion worker.
 	d.streamWorkers.Add(1)
