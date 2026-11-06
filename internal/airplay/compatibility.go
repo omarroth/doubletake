@@ -169,17 +169,6 @@ func compareVersion(aMajor, aMinor, aPatch, bMajor, bMinor, bPatch int) int {
 	return 0
 }
 
-func (p receiverCompatibility) sourceVersion() string {
-	if p.audioSecurity == audioSecurityChaCha {
-		return modernAirPlaySourceVersion
-	}
-	return legacyAirPlaySourceVersion
-}
-
-func (p receiverCompatibility) permitsLocalPTPClock() bool {
-	return p.timing == timingProtocolPTP
-}
-
 func (p receiverCompatibility) fairPlayOnSessionRoot() bool {
 	return p.fairPlayRoots == fairPlaySessionRoot
 }

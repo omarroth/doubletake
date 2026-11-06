@@ -115,7 +115,6 @@ type Config struct {
 	Debug       bool
 	TestMode    bool
 	NoEncrypt   bool
-	DirectKey   bool
 	NoAudio     bool
 	AudioSource airplay.AudioSource
 	ShowCursor  bool
@@ -128,7 +127,6 @@ func (d *Daemon) mirrorStreamConfig() airplay.StreamConfig {
 		Bitrate:             d.cfg.Bitrate,
 		VideoCodec:          d.cfg.VideoCodec,
 		NoEncrypt:           d.cfg.NoEncrypt,
-		DirectKey:           d.cfg.DirectKey,
 		NoAudio:             d.cfg.NoAudio,
 		PlayoutLatency:      d.playoutLatency,
 		PreferredAudioCodec: d.audioCapture.PreferredCodec(),

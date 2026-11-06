@@ -241,32 +241,59 @@ func (c *AirPlayClient) pairTransient(ctx context.Context) error {
 // performTransientSetupAndVerify does transient (PIN-less) pair-setup + pair-verify.
 func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) error {
 	dbg("[PAIR] starting transient pair-setup")
-	if c.info != nil && c.info.usesModernPairing() && c.info.SupportsTransientPairing() {
-		dbg("[PAIR] receiver advertises modern transient pairing; using TLV8 directly")
-		if err := c.pairSetupTransient(ctx); err != nil {
+	coreUtilsCapable := c.info != nil && c.info.supportsCoreUtilsPairing() && c.info.SupportsTransientPairing()
+	if coreUtilsCapable && !c.info.PrefersLegacyPairing() {
+		dbg("[PAIR] receiver advertises CoreUtils transient pairing; using TLV8 directly")
+		if err := c.performCoreUtilsTransientSetupAndVerify(ctx); err != nil {
 			if !isUnsupportedHAPPairSetup(err) {
-				return fmt.Errorf("pair-setup: %w", err)
+				return err
 			}
-			dbg("[PAIR] advertised HAP pair-setup is unsupported (%v); probing raw AirPlay pairing", err)
-			if rawErr := c.performRawSetupAndVerify(ctx); rawErr != nil {
-				return fmt.Errorf("pair-setup: advertised HAP protocol was rejected (%v); raw fallback: %w", err, rawErr)
+			dbg("[PAIR] advertised CoreUtils pair-setup is unsupported (%v); probing legacy AirPlay formats", err)
+			if legacyErr := c.performLegacySetupAndVerify(ctx); legacyErr != nil {
+				return fmt.Errorf("pair-setup: advertised CoreUtils protocol was rejected (%v); legacy fallback: %w", err, legacyErr)
 			}
 			return nil
 		}
-		if err := c.PairVerify(ctx); err != nil {
-			return fmt.Errorf("pair-verify: %w", err)
-		}
-		c.pairingProtocol = pairingProtocolHAP
-		dbg("[PAIR] pair-verify complete, channel is now encrypted")
 		return nil
 	}
+
+	legacyErr := c.performLegacySetupAndVerify(ctx)
+	if legacyErr == nil || !coreUtilsCapable || !isUnsupportedHAPPairSetup(legacyErr) {
+		return legacyErr
+	}
+
+	dbg("[PAIR] legacy pair-setup formats are unsupported (%v); retrying advertised CoreUtils pairing", legacyErr)
+	c.pairType = pairingTypeTransient
+	if coreUtilsErr := c.performCoreUtilsTransientSetupAndVerify(ctx); coreUtilsErr != nil {
+		return fmt.Errorf("pair-setup: legacy formats were rejected (%v); CoreUtils fallback: %w", legacyErr, coreUtilsErr)
+	}
+	return nil
+}
+
+func (c *AirPlayClient) performCoreUtilsTransientSetupAndVerify(ctx context.Context) error {
+	if err := c.pairSetupTransient(ctx); err != nil {
+		return fmt.Errorf("pair-setup: %w", err)
+	}
+	if err := c.PairVerify(ctx); err != nil {
+		return fmt.Errorf("pair-verify: %w", err)
+	}
+	c.pairingProtocol = pairingProtocolHAP
+	dbg("[PAIR] pair-verify complete, channel is now encrypted")
+	return nil
+}
+
+// performLegacySetupAndVerify probes the two original HKP type-3 wire formats:
+// raw binary pairing first, then TLV8/HAP. This is intentionally driven by
+// rejection of the advertised CoreUtils format rather than receiver identity.
+func (c *AirPlayClient) performLegacySetupAndVerify(ctx context.Context) error {
+	c.pairType = pairingTypeLegacy
 
 	// Try the original raw binary AirPlay pair-setup first.
 	// Send 32-byte Ed25519 public key, expect 32-byte server public key back.
 	dbg("[PAIR] trying raw binary AirPlay pair-setup")
 	serverPub, err := c.rawPairSetup(ctx)
 	if err != nil {
-		// Fall back to TLV8/HomeKit-style pair-setup (Apple TV)
+		// Fall back to TLV8/HomeKit-style pair-setup.
 		dbg("[PAIR] raw pair-setup failed (%v), trying TLV8 pair-setup", err)
 		if err := c.pairSetupTransient(ctx); err != nil {
 			return fmt.Errorf("pair-setup: %w", err)
@@ -282,17 +309,6 @@ func (c *AirPlayClient) performTransientSetupAndVerify(ctx context.Context) erro
 
 	// Raw pair-setup succeeded — store server's Ed25519 public key and use raw pair-verify
 	dbg("[PAIR] raw pair-setup OK, server Ed25519 pub: %02x", serverPub[:8])
-	return c.completeRawSetupAndVerify(ctx, serverPub)
-}
-
-// performRawSetupAndVerify probes the original binary AirPlay pairing
-// protocol. It deliberately takes no PIN/password: a playback password belongs
-// to HTTP Digest on receivers which advertise modern pairing.
-func (c *AirPlayClient) performRawSetupAndVerify(ctx context.Context) error {
-	serverPub, err := c.rawPairSetup(ctx)
-	if err != nil {
-		return fmt.Errorf("raw pair-setup: %w", err)
-	}
 	return c.completeRawSetupAndVerify(ctx, serverPub)
 }
 
@@ -328,12 +344,16 @@ func (c *AirPlayClient) completeRawSetupAndVerify(ctx context.Context, serverPub
 // all errors after setup must surface to the caller instead of changing
 // protocols.
 func isUnsupportedHAPPairSetup(err error) bool {
+	var m1Err *pairSetupM1Error
+	if !errors.As(err, &m1Err) {
+		return false
+	}
 	var statusErr *HTTPStatusError
 	if !errors.As(err, &statusErr) {
 		return false
 	}
 	switch statusErr.StatusCode {
-	case 400, 404, 405, 415, 455, 500, 501, 505:
+	case 400, 404, 405, 415, 455, 501:
 		return true
 	default:
 		return false
@@ -383,7 +403,7 @@ func (c *AirPlayClient) pairSetupTransient(ctx context.Context) error {
 	return c.completeSRPExchange(ctx, "", serverSalt, serverPub)
 }
 
-// StartPINDisplay triggers the PIN display on the Apple TV.
+// StartPINDisplay triggers the PIN display on the receiver.
 // Call this before prompting the user so the PIN is visible when they're asked.
 func (c *AirPlayClient) StartPINDisplay() error {
 	c.pairType = c.pinPairingType()
@@ -418,7 +438,22 @@ func (c *AirPlayClient) pairWithPIN(ctx context.Context, pin string) error {
 }
 
 func (c *AirPlayClient) performPairSetupAndVerify(ctx context.Context, pin string) error {
-	if err := c.pairSetup(ctx, pin); err != nil {
+	err := c.pairSetup(ctx, pin)
+	if err != nil && isUnsupportedHAPPairSetup(err) {
+		initialType := c.pairType
+		switch {
+		case initialType != pairingTypeLegacy:
+			dbg("[PAIR] CoreUtils PIN pair-setup is unsupported (%v); retrying with HKP type 3", err)
+			c.pairType = pairingTypeLegacy
+		case c.info != nil && c.info.supportsCoreUtilsPairing():
+			dbg("[PAIR] HKP type 3 PIN pair-setup is unsupported (%v); retrying with CoreUtils type", err)
+			c.pairType = pairingTypeScreenCapture
+		default:
+			return fmt.Errorf("pair-setup: %w", err)
+		}
+		err = c.pairSetup(ctx, pin)
+	}
+	if err != nil {
 		return fmt.Errorf("pair-setup: %w", err)
 	}
 	if err := c.PairVerify(ctx); err != nil {
@@ -452,6 +487,13 @@ func (c *AirPlayClient) pairSetup(ctx context.Context, pin string) error {
 	return c.completeSRPExchange(ctx, pin, salt, serverPubB)
 }
 
+type pairSetupM1Error struct {
+	err error
+}
+
+func (e *pairSetupM1Error) Error() string { return "M1: " + e.err.Error() }
+func (e *pairSetupM1Error) Unwrap() error { return e.err }
+
 // exchangePairSetupM1 sends an unchanged pair-setup M1 until the receiver
 // returns M2 or its bounded HomeKit backoff cannot be honored. Backoff happens
 // before SRP uses the PIN/password, so reporting it as a bad credential is both
@@ -463,7 +505,7 @@ func exchangePairSetupM1(ctx context.Context, send func() ([]byte, error)) (map[
 	for retry := 0; ; retry++ {
 		m2Bytes, err := send()
 		if err != nil {
-			return nil, fmt.Errorf("M1: %w", err)
+			return nil, &pairSetupM1Error{err: err}
 		}
 		m2 := tlv8Decode(m2Bytes)
 		errorValue := m2[tlvError]

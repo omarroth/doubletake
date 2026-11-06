@@ -379,7 +379,7 @@ func TestSupportsTransientPairingUsesModernFeatureBits(t *testing.T) {
 	}
 }
 
-func TestModernPairingClassificationRejectsThirdPartyFeatureMasks(t *testing.T) {
+func TestCoreUtilsPairingCapabilityIsIndependentOfThirdPartyBits(t *testing.T) {
 	const rokuFeatures = uint64(0x38bcf46007f8ad0)
 
 	tests := []struct {
@@ -392,20 +392,24 @@ func TestModernPairingClassificationRejectsThirdPartyFeatureMasks(t *testing.T) 
 		{name: "CoreUtils pairing", features: 1 << 38, want: true},
 		{name: "HomeKit access control", features: 1 << 46, want: true},
 		{name: "legacy pairing", features: 1 << 27},
-		{name: "Roku", features: rokuFeatures},
-		{name: "third-party bit 26 with modern bits", features: 1<<26 | FeatureSystemPairing | FeatureTransientPairing},
-		{name: "third-party bit 51 with modern bits", features: 1<<51 | FeatureSystemPairing | FeatureTransientPairing},
+		{name: "Roku-advertised capabilities", features: rokuFeatures, want: true},
+		{name: "third-party bit 26 with modern bits", features: 1<<26 | FeatureSystemPairing | FeatureTransientPairing, want: true},
+		{name: "third-party bit 51 with modern bits", features: 1<<51 | FeatureSystemPairing | FeatureTransientPairing, want: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := (&ReceiverInfo{Features: tt.features}).usesModernPairing(); got != tt.want {
-				t.Fatalf("usesModernPairing() = %v, want %v", got, tt.want)
+			if got := (&ReceiverInfo{Features: tt.features}).supportsCoreUtilsPairing(); got != tt.want {
+				t.Fatalf("supportsCoreUtilsPairing() = %v, want %v", got, tt.want)
+			}
+			wantLegacyProbe := tt.features&featureThirdPartyReceiverMask != 0 || !tt.want
+			if got := (&ReceiverInfo{Features: tt.features}).PrefersLegacyPairing(); got != wantLegacyProbe {
+				t.Fatalf("PrefersLegacyPairing() = %v, want %v", got, wantLegacyProbe)
 			}
 		})
 	}
 
-	if (*ReceiverInfo)(nil).usesModernPairing() {
-		t.Fatal("nil ReceiverInfo uses modern pairing")
+	if (*ReceiverInfo)(nil).supportsCoreUtilsPairing() {
+		t.Fatal("nil ReceiverInfo supports CoreUtils pairing")
 	}
 }

@@ -376,10 +376,9 @@ const (
 	FeatureTransientPairing    uint64 = 1 << 48
 	FeatureUDPMirroring        uint64 = 1 << 49
 
-	// Bits 38/43/46/48 select CoreUtils pairing, while bits 26/51 identify
-	// third-party receivers. Excluding the latter is an empirical initial-probe
-	// choice for receivers which copy the modern bits but implement HKP. The
-	// bounded pairing fallback still lets the wire exchange determine the result.
+	// Apple's endpoint description derives these as independent properties.
+	// Third-party identity chooses only the first bounded pairing probe; it does
+	// not cancel an advertised CoreUtils capability or determine the result.
 	featureThirdPartyReceiverMask = uint64(1<<26 | 1<<51)
 	featureCoreUtilsPairingMask   = uint64(1<<38 | 1<<43 | 1<<46 | 1<<48)
 )
@@ -432,22 +431,27 @@ func (i *ReceiverInfo) SupportsLegacyPairing() bool {
 	return i != nil && i.HasFeature(27)
 }
 
-// usesModernPairing reports whether the receiver can use the first-party
-// CoreUtils/HAP profile directly. Third-party receivers retain HKP type 3 and
-// legacy session setup even when they copy the modern pairing feature bits.
-func (i *ReceiverInfo) usesModernPairing() bool {
+// supportsCoreUtilsPairing reports Apple's independent
+// SupportsCoreUtilsPairingAndEncryption endpoint property. A receiver's
+// first-/third-party classification is deliberately not part of this decision.
+// A peer which advertises this capability but rejects HAP is handled by the
+// bounded wire-format fallback in pairing.go.
+func (i *ReceiverInfo) supportsCoreUtilsPairing() bool {
 	if i == nil {
 		return false
 	}
-	coreUtils := i.HasFeature(38) || i.HasFeature(43) || i.HasFeature(46) || i.HasFeature(48)
-	thirdParty := i.HasFeature(26) || i.HasFeature(51)
-	return coreUtils && !thirdParty
+	return i.Features&featureCoreUtilsPairingMask != 0
 }
 
-// PrefersLegacyPairing reports whether protocol probing classified the
-// receiver for the original HKP type 3 pairing flow.
+func (i *ReceiverInfo) isThirdPartyReceiver() bool {
+	return i != nil && i.Features&featureThirdPartyReceiverMask != 0
+}
+
+// PrefersLegacyPairing reports whether the initial wire-format probe should use
+// the original HKP type 3 flow. The successfully negotiated protocol is stored
+// separately and takes precedence on later connections.
 func (i *ReceiverInfo) PrefersLegacyPairing() bool {
-	return i != nil && !i.usesModernPairing()
+	return i != nil && (!i.supportsCoreUtilsPairing() || i.isThirdPartyReceiver())
 }
 
 func (d *AirPlayDevice) SupportsFairPlaySAP() bool {

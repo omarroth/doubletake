@@ -98,7 +98,6 @@ func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 		PortMin:   60000,
 		PortMax:   60010,
 		NoEncrypt: true,
-		DirectKey: true,
 		NoAudio:   true,
 	}}
 
@@ -109,7 +108,6 @@ func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 		PortMin:             60000,
 		PortMax:             60010,
 		NoEncrypt:           true,
-		DirectKey:           true,
 		NoAudio:             true,
 	}
 	if got := d.mirrorStreamConfig(); got != want {

@@ -323,7 +323,7 @@ func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 			name:                     "doubletake modern Apple test receiver",
 			manufacturer:             "Apple Inc.",
 			model:                    "AppleTV14,1",
-			sourceVersion:            modernAirPlaySourceVersion,
+			sourceVersion:            airPlaySourceVersion,
 			features:                 uint64(0x3c177fde4a7fdfd5),
 			pairing:                  receiverPairingModern,
 			setupOrder:               receiverSetupSessionFirst,
@@ -752,7 +752,7 @@ func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse
 		s.stats.pairSetup.Add(1)
 		if err := c.validatePairSetupRequest(request); err != nil {
 			s.logf("pair-setup protocol rejected: %v", err)
-			return receiverError(500, err), nil
+			return receiverError(415, err), nil
 		}
 		body, err := c.pairing.pairSetup(request.body)
 		if err != nil {
@@ -1466,6 +1466,8 @@ func receiverStatusText(status int) string {
 		return "Unauthorized"
 	case 404:
 		return "Not Found"
+	case 415:
+		return "Unsupported Media Type"
 	case 453:
 		return "Not Enough Bandwidth"
 	case 455:

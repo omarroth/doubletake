@@ -30,8 +30,7 @@ const (
 	timingProtocolPTP          = "PTP"
 	sessionInfoFallbackTimeout = 3 * time.Second
 
-	legacyAirPlaySourceVersion = "280.33"
-	modernAirPlaySourceVersion = "980.71.1"
+	airPlaySourceVersion = "980.71.1"
 
 	failedMirrorSetupTeardownTimeout = 2 * time.Second
 	asyncPTPClockWaitTimeout         = 2 * time.Second
@@ -60,13 +59,7 @@ func (c *mediaClock) configureFromSetup(response map[string]interface{}, headers
 
 	anchorTimestamp, receivedMillis, processingMillis, err := receiverClockTimestamp(headers)
 	if err != nil {
-		// Keep the receiver's identity even when the private clock-anchor headers
-		// are absent. The fallback can then anchor local boot time to the actual
-		// advertised PTP timeline.
-		c.mu.Lock()
-		c.timelineID = timelineID
-		c.mu.Unlock()
-		return err
+		return fmt.Errorf("%w: receiver clock anchor: %v", errPTPClockUnavailable, err)
 	}
 
 	c.mu.Lock()
@@ -77,25 +70,6 @@ func (c *mediaClock) configureFromSetup(response map[string]interface{}, headers
 	c.mu.Unlock()
 	dbg("[PTP] receiver clock: timeline=0x%016x anchor=%dms processing=%dms",
 		timelineID, receivedMillis, processingMillis)
-	return nil
-}
-
-// configureFromLocalClock anchors a PTP timeline to the sender's boot clock.
-// Some third-party PTP receivers return ClockID but omit Apple's private clock
-// headers. A ClockID remains mandatory: inventing one would describe a timeline
-// the receiver has never advertised and would make both audio and video invalid.
-func (c *mediaClock) configureFromLocalClock() error {
-	anchorLocal := time.Now()
-	anchorTimestamp := compactTimestamp(bootRelativeNow())
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.timelineID == 0 {
-		return fmt.Errorf("cannot configure local PTP clock without receiver ClockID")
-	}
-	c.anchorLocal = anchorLocal
-	c.anchorTimestamp = anchorTimestamp
-	c.signalReadyLocked()
 	return nil
 }
 
@@ -379,7 +353,7 @@ func setupShapeRejected(err error) bool {
 		return false
 	}
 	switch statusErr.StatusCode {
-	case 400, 406, 415, 455, 500, 501:
+	case 400, 406, 415, 455, 501:
 		return true
 	default:
 		return false
@@ -474,7 +448,7 @@ func (c *AirPlayClient) failedSetupTeardownOnce(uri string, extraHeaders map[str
 	var request bytes.Buffer
 	fmt.Fprintf(&request, "TEARDOWN %s RTSP/1.0\r\n", uri)
 	fmt.Fprintf(&request, "CSeq: %d\r\n", seq)
-	fmt.Fprintf(&request, "User-Agent: AirPlay/935.7.1\r\n")
+	fmt.Fprintf(&request, "User-Agent: %s\r\n", airPlayUserAgent)
 	for key, value := range extraHeaders {
 		fmt.Fprintf(&request, "%s: %s\r\n", key, value)
 	}
@@ -556,7 +530,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	if timingOverride != "" {
 		policy.timing = timingOverride
 	}
-	sourceVersion := policy.sourceVersion()
+	sourceVersion := airPlaySourceVersion
 	timingProtocol := policy.timing
 	var clock *mediaClock
 	if timingProtocol == timingProtocolPTP {
@@ -757,7 +731,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 			select {
 			case <-setupHintDone:
 			case <-time.After(3 * time.Second):
-				log.Printf("warning: Apple TV at %s has not responded to SETUP after 3s.", c.host)
+				log.Printf("warning: AirPlay receiver at %s has not responded to SETUP after 3s.", c.host)
 				if timingProtocol == timingProtocolNTP {
 					log.Printf("  this usually means a host firewall is blocking the receiver's NTP probe.")
 					log.Printf("  re-run with -port-range MIN-MAX (e.g. -port-range 60000-60010) and allow")
@@ -852,12 +826,6 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 					return nil
 				}
 				return fmt.Errorf("configure PTP media clock: %w", err)
-			}
-			if policy.permitsLocalPTPClock() {
-				if fallbackErr := clock.configureFromLocalClock(); fallbackErr == nil {
-					dbg("[PTP] %v; using local boot time on receiver timeline 0x%016x", err, clock.identity())
-					return nil
-				}
 			}
 			return fmt.Errorf("configure PTP media clock: %w", err)
 		}
@@ -1142,7 +1110,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 
 	// Attach the video stream to the prepared session.
 	// Video SETUP uses the same sessionUUID but a different streamConnectionID.
-	// The Apple TV attaches this video stream to the existing session.
+	// The receiver attaches this video stream to the existing session.
 	videoStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
 	videoURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, videoStreamConnectionID)
 
@@ -1305,16 +1273,10 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		dbg("[SETUP] IKM (%d bytes):   %02x", len(ikm), ikm)
 		dbg("[SETUP] chacha key:       %02x", chachaKey)
 	} else if encKey != nil {
-		// AES-CTR path: SHA-512-derived key from shk + streamConnectionID.
-		var cipherKey, cipherIV []byte
-		if cfg.DirectKey {
-			cipherKey = encKey
-			cipherIV = encIV
-			dbg("[SETUP] using DIRECT key mode (no SHA-512 derivation)")
-		} else {
-			cipherKey, cipherIV = deriveVideoKeys(encKey, videoStreamConnectionID)
-			dbg("[SETUP] using SHA-512 derived keys (AES-CTR)")
-		}
+		// AES-CTR path: Apple derives the per-stream key and IV from shk and the
+		// streamConnectionID rather than using the FairPlay material directly.
+		cipherKey, cipherIV := deriveVideoKeys(encKey, videoStreamConnectionID)
+		dbg("[SETUP] using SHA-512 derived keys (AES-CTR)")
 		dbg("[SETUP] streamConnectionID: %d", videoStreamConnectionID)
 		dbg("[SETUP] shk (raw key):    %02x", encKey)
 		dbg("[SETUP] shiv (raw IV):    %02x", encIV)
@@ -1375,7 +1337,7 @@ func addModernScreenAudioStreamFields(stream map[string]interface{}, key []byte,
 	}
 	// Screen audio is routed separately from the receiver's primary media
 	// session. usingScreen identifies it as screen audio; isMedia=true instead
-	// sends grouped Apple TVs through the main-media readiness path and can leave
+	// sends grouped receivers through the main-media readiness path and can leave
 	// their audio output waiting indefinitely.
 	stream["isMedia"] = false
 	stream["supportsDynamicStreamID"] = true
@@ -2157,9 +2119,9 @@ func (s *MirrorSession) dataHeartbeatLoop(ctx context.Context) {
 	}
 }
 
-// feedbackLoop sends periodic POST /feedback requests like AirMyPC (every 2s).
-// Sends an immediate first feedback to prevent UxPlay's 3-second timeout from
-// killing the connection before the first ticker fires.
+// feedbackLoop sends AirPlay's periodic POST /feedback request every two
+// seconds. The first request is immediate, matching Apple sender captures and
+// keeping the session alive while interactive capture permission is pending.
 func (s *MirrorSession) feedbackLoop(ctx context.Context) {
 	// Start immediately after SETUP. Wayland's permission UI can delay the first
 	// captured frame for several seconds, but the receiver's feedback timeout is
@@ -2198,8 +2160,8 @@ func (s *MirrorSession) feedbackLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Use bare /feedback path — UxPlay matches against exact path "/feedback",
-			// not the full RTSP URI with session UUID prefix.
+			// /feedback is a connection-scoped AirPlay endpoint, not a media-session
+			// URI underneath the session UUID.
 			sendFeedback()
 		}
 	}
@@ -2352,7 +2314,7 @@ func (s *MirrorSession) AudioStream() *AudioStream {
 	return s.audioStream
 }
 
-// ntpTimingResponder replies to NTP timing requests from the Apple TV.
+// ntpTimingResponder replies to NTP timing requests from the receiver.
 func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 	buf := make([]byte, 128)
 	for {
@@ -2380,9 +2342,9 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 			continue
 		}
 
-		// Log the Apple TV's send timestamp for timing analysis
+		// Log the receiver's send timestamp for timing analysis.
 		senderTS := binary.BigEndian.Uint64(buf[24:32])
-		dbg("[NTP] Apple TV transmit timestamp: 0x%016x (sec=%d)", senderTS, senderTS>>32)
+		dbg("[NTP] receiver transmit timestamp: 0x%016x (sec=%d)", senderTS, senderTS>>32)
 
 		// Build response: echo back with our timestamps. Timing responses add the
 		// NTP epoch while video frame timestamps use raw boot-relative time. A

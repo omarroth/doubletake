@@ -145,7 +145,8 @@ func TestPasswordRequiresPairing(t *testing.T) {
 		pinFlag      = uint64(1 << 9)
 	)
 	modernFeatures := airplay.FeatureSystemPairing | airplay.FeatureTransientPairing | uint64(1<<38) | uint64(1<<46)
-	legacyFeatures := modernFeatures | uint64(1<<51)
+	thirdPartyModernFeatures := modernFeatures | uint64(1<<51)
+	legacyFeatures := airplay.FeatureLegacyPairing | uint64(1<<51)
 
 	for _, test := range []struct {
 		name string
@@ -155,6 +156,7 @@ func TestPasswordRequiresPairing(t *testing.T) {
 		{name: "missing info"},
 		{name: "legacy configured password", info: &airplay.ReceiverInfo{Features: legacyFeatures, StatusFlags: passwordFlag}, want: true},
 		{name: "modern configured password can pair transiently", info: &airplay.ReceiverInfo{Features: modernFeatures, StatusFlags: passwordFlag}},
+		{name: "third-party configured password starts with authenticated legacy probe", info: &airplay.ReceiverInfo{Features: thirdPartyModernFeatures, StatusFlags: passwordFlag}, want: true},
 		{name: "modern password suppresses PIN but remains Digest only", info: &airplay.ReceiverInfo{Features: modernFeatures, StatusFlags: passwordFlag | pinFlag}},
 		{name: "legacy password wins over PIN", info: &airplay.ReceiverInfo{Features: legacyFeatures, StatusFlags: passwordFlag | pinFlag}, want: true},
 		{name: "legacy receiver without password", info: &airplay.ReceiverInfo{Features: legacyFeatures}},
@@ -170,13 +172,17 @@ func TestPasswordRequiresPairing(t *testing.T) {
 func TestForcePairDoesNotUseModernDigestPasswordAsSRPPIN(t *testing.T) {
 	const passwordFlag = uint64(1 << 7)
 	modernFeatures := airplay.FeatureSystemPairing | airplay.FeatureTransientPairing | uint64(1<<38) | uint64(1<<46)
-	legacyFeatures := modernFeatures | uint64(1<<51)
+	thirdPartyModernFeatures := modernFeatures | uint64(1<<51)
+	legacyFeatures := airplay.FeatureLegacyPairing | uint64(1<<51)
 
 	if !forcePairUsesTransient(&airplay.ReceiverInfo{Features: modernFeatures, StatusFlags: passwordFlag}) {
 		t.Fatal("modern fixed-password receiver would reuse its Digest password as an SRP PIN")
 	}
 	if forcePairUsesTransient(&airplay.ReceiverInfo{Features: legacyFeatures, StatusFlags: passwordFlag}) {
 		t.Fatal("legacy fixed-password receiver lost its authenticated SRP pairing path")
+	}
+	if forcePairUsesTransient(&airplay.ReceiverInfo{Features: thirdPartyModernFeatures, StatusFlags: passwordFlag}) {
+		t.Fatal("third-party fixed-password receiver lost its authenticated SRP probe")
 	}
 	if forcePairUsesTransient(&airplay.ReceiverInfo{Features: modernFeatures}) {
 		t.Fatal("unprotected modern receiver unexpectedly bypassed explicit full pairing")

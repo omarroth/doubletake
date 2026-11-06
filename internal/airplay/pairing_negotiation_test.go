@@ -17,6 +17,31 @@ const testModernPairingFeatures = FeatureSystemPairing |
 	uint64(1<<38) |
 	uint64(1<<46)
 
+func TestUnsupportedHAPPairSetupRequiresAFormatRejection(t *testing.T) {
+	for _, test := range []struct {
+		status int
+		want   bool
+	}{
+		{status: 400, want: true},
+		{status: 404, want: true},
+		{status: 405, want: true},
+		{status: 415, want: true},
+		{status: 455, want: true},
+		{status: 501, want: true},
+		{status: 401},
+		{status: 429},
+		{status: 500},
+		{status: 505},
+	} {
+		t.Run(fmt.Sprint(test.status), func(t *testing.T) {
+			err := fmt.Errorf("pair-setup: %w", &pairSetupM1Error{err: &HTTPStatusError{StatusCode: test.status}})
+			if got := isUnsupportedHAPPairSetup(err); got != test.want {
+				t.Fatalf("isUnsupportedHAPPairSetup(%d) = %t, want %t", test.status, got, test.want)
+			}
+		})
+	}
+}
+
 func TestTransientPairingFallsBackFromUnsupportedHAPToRawByProtocol(t *testing.T) {
 	for _, identity := range []struct {
 		name         string
@@ -310,7 +335,7 @@ func serveHAPRejectionThenRawPairing(
 	if err := requireTransientHAPM1(request); err != nil {
 		return err
 	}
-	if err := writeRTSPTestResponse(conn, 500, nil, nil); err != nil {
+	if err := writeRTSPTestResponse(conn, 415, nil, nil); err != nil {
 		return err
 	}
 

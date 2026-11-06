@@ -31,8 +31,8 @@ func TestMirrorSetupRequestUsesProtocolSpecificTimingFields(t *testing.T) {
 		wantTimingPort bool
 		wantTimingPeer bool
 	}{
-		{name: "legacy NTP", protocol: timingProtocolNTP, sourceVersion: legacyAirPlaySourceVersion, wantTimingPort: true},
-		{name: "modern PTP", protocol: timingProtocolPTP, sourceVersion: modernAirPlaySourceVersion, wantTimingPeer: true},
+		{name: "NTP", protocol: timingProtocolNTP, sourceVersion: airPlaySourceVersion, wantTimingPort: true},
+		{name: "PTP", protocol: timingProtocolPTP, sourceVersion: airPlaySourceVersion, wantTimingPeer: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := (mirrorSetupRequest{
@@ -91,6 +91,7 @@ func TestSetupShapeRejected(t *testing.T) {
 	}{
 		{name: "bad request", err: fmt.Errorf("audio SETUP: %w", &HTTPStatusError{StatusCode: 400}), want: true},
 		{name: "invalid state", err: &HTTPStatusError{StatusCode: 455}, want: true},
+		{name: "server failure", err: &HTTPStatusError{StatusCode: 500}},
 		{name: "digest challenge", err: &HTTPStatusError{StatusCode: 401}},
 		{name: "transport error", err: io.EOF},
 	} {
@@ -127,7 +128,7 @@ func TestModernControlSetupPlistHasNoStreams(t *testing.T) {
 	request := roundTripPlistMap(t, (mirrorSetupRequest{
 		deviceID:          "00:11:22:33:44:55",
 		sessionUUID:       "session",
-		sourceVersion:     modernAirPlaySourceVersion,
+		sourceVersion:     airPlaySourceVersion,
 		timingProtocol:    timingProtocolPTP,
 		timingPeerID:      "peer-id",
 		timingPeerAddress: "192.0.2.1",
@@ -1244,8 +1245,8 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 							return
 						}
 					} else {
-						if got, _ := setup["sourceVersion"].(string); got != legacyAirPlaySourceVersion {
-							serverErr <- fmt.Errorf("audio sourceVersion = %q, want %q", got, legacyAirPlaySourceVersion)
+						if got, _ := setup["sourceVersion"].(string); got != airPlaySourceVersion {
+							serverErr <- fmt.Errorf("audio sourceVersion = %q, want %q", got, airPlaySourceVersion)
 							return
 						}
 						if got, _ := setup["timingProtocol"].(string); got != timingProtocolNTP {

@@ -58,9 +58,9 @@ func parsePortRange(s string) (int, int, error) {
 }
 
 func main() {
-	target := flag.String("target", "", "Apple TV IP address or hostname (skip discovery)")
+	target := flag.String("target", "", "AirPlay receiver IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
-	code := flag.String("code", "", "Pairing PIN shown on the receiver, or the password set on it when \"Require Password\" is enabled; prefer $DOUBLETAKE_CODE so it stays out of shell history and ps output")
+	code := flag.String("code", "", "Pairing code shown on the receiver; prefer $DOUBLETAKE_CODE")
 	credFile := flag.String("creds", airplay.DefaultCredentialsPath(), "Path to saved pairing credentials")
 	credBackend := flag.String("cred-backend", "file", "Credential storage backend: file or keyring (system keyring via Secret Service)")
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
@@ -71,8 +71,7 @@ func main() {
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto uses H.264 for receiver compatibility)")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
-	noEncrypt := flag.Bool("no-encrypt", false, "Disable RTSP header encryption (debugging only; video frames are always encrypted)")
-	directKey := flag.Bool("direct-key", false, "Use shk/shiv directly without SHA-512 derivation")
+	noEncrypt := flag.Bool("no-encrypt", false, "Disable video frame encryption (debugging only)")
 	audioSource := flag.String("audio-source", "output", "Audio route: output (selectable doubletake sink) or monitor (copy default output)")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	portRange := flag.String("port-range", "", "Local UDP port range for receiver timing/audio (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 3 ports.")
@@ -121,7 +120,6 @@ func main() {
 			Debug:       *debug,
 			TestMode:    *testMode,
 			NoEncrypt:   *noEncrypt,
-			DirectKey:   *directKey,
 			NoAudio:     *noAudio,
 			AudioSource: airplay.AudioSource(*audioSource),
 			ShowCursor:  !*noCursor,
@@ -402,7 +400,6 @@ func main() {
 		Bitrate:    *bitrate,
 		VideoCodec: airplay.VideoCodec(*videoCodec),
 		NoEncrypt:  *noEncrypt,
-		DirectKey:  *directKey,
 		NoAudio:    *noAudio,
 		PortMin:    portMin,
 		PortMax:    portMax,

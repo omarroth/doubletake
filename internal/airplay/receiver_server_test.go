@@ -20,17 +20,19 @@ import (
 
 func TestReceiverServerEndToEndProfiles(t *testing.T) {
 	for _, test := range []struct {
-		name          string
-		profile       ReceiverProfile
-		wantEncrypted bool
-		wantSetups    uint64
-		wantFairPlay  uint64
-		wantTiming    uint64
-		wantEvents    uint64
+		name             string
+		profile          ReceiverProfile
+		wantEncrypted    bool
+		wantSetups       uint64
+		wantFairPlay     uint64
+		wantTiming       uint64
+		wantEvents       uint64
+		wantTeardowns    uint64
+		allowExtraEvents bool
 	}{
 		{name: "modern Apple HAP accepts control-first PTP", profile: ReceiverProfileModern, wantEncrypted: true, wantSetups: 3, wantFairPlay: 2, wantEvents: 1},
 		{name: "Roku raw negotiates media-first receiver-initiated NTP", profile: ReceiverProfileRoku, wantSetups: 3, wantTiming: 3, wantEvents: 1},
-		{name: "LG HAP negotiates media-first PTP", profile: ReceiverProfileLG, wantEncrypted: true, wantSetups: 3, wantEvents: 1},
+		{name: "LG HAP falls back from unanchored PTP to media-first NTP", profile: ReceiverProfileLG, wantEncrypted: true, wantSetups: 5, wantTiming: 3, wantEvents: 1, wantTeardowns: 2, allowExtraEvents: true},
 		{name: "AppleTV3 raw negotiates media-first receiver-initiated NTP", profile: ReceiverProfileAppleTV3, wantSetups: 3, wantFairPlay: 2, wantTiming: 3, wantEvents: 1},
 		{name: "UxPlay legacy accepts control-first without eventPort", profile: ReceiverProfileUxPlay, wantSetups: 3, wantFairPlay: 2, wantTiming: 3},
 		{name: "AirServer raw control-first with descriptor retry", profile: ReceiverProfileAirServer, wantSetups: 4, wantFairPlay: 2, wantTiming: 3, wantEvents: 1},
@@ -40,11 +42,12 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 			model := "UnrelatedModel-" + string(test.profile)
 			manufacturer := "Independent Vendor " + string(test.profile)
 			server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{
-				Profile:      test.profile,
-				Auth:         ReceiverAuthNone,
-				Name:         name,
-				Model:        model,
-				Manufacturer: manufacturer,
+				Profile:           test.profile,
+				Auth:              ReceiverAuthNone,
+				Name:              name,
+				Model:             model,
+				Manufacturer:      manufacturer,
+				AcceptNTPFallback: test.profile == ReceiverProfileLG,
 			})
 			if client.info.Name != name || client.info.Model != model || client.info.Manufacturer != manufacturer {
 				t.Fatalf("receiver identity = %q/%q/%q, want randomized %q/%q/%q",
@@ -73,9 +76,15 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 			// Media accepts and sender-initiated AirServer timing probes run in
 			// separate goroutines. Let those observable side effects settle before
 			// closing the session and folding its counters into the server totals.
+			eventsReady := func(count uint64) bool {
+				if test.allowExtraEvents {
+					return count >= test.wantEvents && count <= test.wantTeardowns
+				}
+				return count == test.wantEvents
+			}
 			deadline := time.Now().Add(time.Second)
 			stats := server.Stats()
-			for (stats.EventConnections != test.wantEvents || stats.VideoConnections != 1 ||
+			for (!eventsReady(stats.EventConnections) || stats.VideoConnections != 1 ||
 				stats.TimingProbes < test.wantTiming || stats.TimingReplies < test.wantTiming) && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 				stats = server.Stats()
@@ -87,13 +96,17 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 			if stats.SetupRequests != test.wantSetups {
 				t.Fatalf("SETUP requests = %d, want %d", stats.SetupRequests, test.wantSetups)
 			}
-			if stats.RecordRequests != 1 || stats.FeedbackRequests < 1 || stats.TeardownRequests != 1 {
+			wantTeardowns := test.wantTeardowns
+			if wantTeardowns == 0 {
+				wantTeardowns = 1
+			}
+			if stats.RecordRequests != 1 || stats.FeedbackRequests < 1 || stats.TeardownRequests != wantTeardowns {
 				t.Fatalf("control stats = %+v", stats)
 			}
 			if stats.FairPlayRequests != test.wantFairPlay {
 				t.Fatalf("FairPlay requests = %d, want %d", stats.FairPlayRequests, test.wantFairPlay)
 			}
-			if stats.EventConnections != test.wantEvents || stats.VideoConnections != 1 {
+			if !eventsReady(stats.EventConnections) || stats.VideoConnections != 1 {
 				t.Fatalf("media connections = %+v", stats)
 			}
 			if stats.TimingProbes != test.wantTiming || stats.TimingReplies != test.wantTiming {
@@ -209,7 +222,7 @@ func TestReceiverProfilePresets(t *testing.T) {
 		displayMaxHeight         int
 		displayRequiresSession   bool
 	}{
-		{ReceiverProfileModern, "AppleTV14,1", modernAirPlaySourceVersion, 0x3c177fde4a7fdfd5, receiverPairingModern,
+		{ReceiverProfileModern, "AppleTV14,1", airPlaySourceVersion, 0x3c177fde4a7fdfd5, receiverPairingModern,
 			receiverSetupSessionFirst, timingProtocolPTP, receiverNTPNone, false, true, true, true, true,
 			AudioCodecAACELD, 0x1440800, true, false, receiverLegacyVideoNone, false, 1920, 1080, 3840, 2160, true},
 		{ReceiverProfileRoku, "3820R2", "377.40.00", 0x038bcf46007f8ad0, receiverPairingLegacy,
@@ -388,8 +401,8 @@ func TestReceiverServerCombinedControlSetupReturnsSessionInfo(t *testing.T) {
 			if gotW, gotH := plistInt(display["widthPixelsMax"]), plistInt(display["heightPixelsMax"]); gotW != 3840 || gotH != 2160 {
 				t.Fatalf("session display maximum size = %dx%d, want 3840x2160", gotW, gotH)
 			}
-			if got := info["sourceVersion"]; got != modernAirPlaySourceVersion {
-				t.Fatalf("session info sourceVersion = %#v, want %q", got, modernAirPlaySourceVersion)
+			if got := info["sourceVersion"]; got != airPlaySourceVersion {
+				t.Fatalf("session info sourceVersion = %#v, want %q", got, airPlaySourceVersion)
 			}
 		})
 	}
@@ -810,7 +823,7 @@ func TestReceiverServerAdvertisesCapabilityAxes(t *testing.T) {
 		supportedFormats          uint64
 		effectiveSupportedFormats uint64
 	}{
-		{profile: ReceiverProfileModern, sourceVersion: modernAirPlaySourceVersion, wantPTPFeature: true, wantConnections: true, wantLegacyPair: true, supportedFormats: 0x1440800, effectiveSupportedFormats: 0x1440800},
+		{profile: ReceiverProfileModern, sourceVersion: airPlaySourceVersion, wantPTPFeature: true, wantConnections: true, wantLegacyPair: true, supportedFormats: 0x1440800, effectiveSupportedFormats: 0x1440800},
 		{profile: ReceiverProfileRoku, sourceVersion: "377.40.00", wantPTPFeature: true, wantPTPInfo: true, wantDisplay: true, effectiveSupportedFormats: 0x1440800},
 		{profile: ReceiverProfileLG, sourceVersion: "377.25.06", wantPTPFeature: true, wantPTPInfo: true, wantDisplay: true, supportedFormats: 0x40000, effectiveSupportedFormats: 0x40000},
 		{profile: ReceiverProfileAppleTV3, sourceVersion: "220.68", wantLegacyPair: true, effectiveSupportedFormats: 0x1440800},

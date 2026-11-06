@@ -1,4 +1,4 @@
-.TH doubletake 1 "May 2026" "doubletake" "User Commands"
+.TH doubletake 1 "November 2026" "doubletake" "User Commands"
 .SH NAME
 doubletake \- AirPlay screen mirroring sender for Linux
 .SH SYNOPSIS
@@ -6,8 +6,8 @@ doubletake \- AirPlay screen mirroring sender for Linux
 [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B doubletake
-is an AirPlay screen mirroring sender that streams your Linux desktop to an Apple TV
-using the AirPlay mirroring protocol. It supports both Wayland (PipeWire/xdg-desktop-portal)
+is an AirPlay screen mirroring sender that streams your Linux desktop to Apple TV
+and compatible AirPlay receivers. It supports both Wayland (PipeWire/xdg-desktop-portal)
 and X11 screen capture with H.264 or capability-gated HEVC Main10 encoding.
 .SH FEATURES
 .IP \(bu 2
@@ -29,8 +29,8 @@ Daemon mode with multi-target streaming control via
 .B doubletake-ctl
 .SH OPTIONS
 .TP
-.B \-target \fIIP\fR
-Connect to a specific Apple TV by IP address (skips mDNS discovery)
+.B \-target \fIADDRESS\fR
+Connect to a specific AirPlay receiver by IP address or hostname (skips mDNS discovery)
 .TP
 .B \-device-id \fIID\fR
 Expected receiver device ID. Use the saved pairing for this receiver and refuse
@@ -42,20 +42,8 @@ reported device ID is treated as a first connection.
 AirPlay port (default: 7000)
 .TP
 .B \-code \fICODE\fR
-Pairing PIN shown on the receiver, or its configured password when
-"Require Password" is enabled. Prefer the
-.B DOUBLETAKE_CODE
-environment variable, which keeps the code out of shell history and
-.BR ps (1)
-output.
-.PP
-The entered value is retained across reconnects and is used for both SRP
-pairing and a later HTTP Digest challenge when the receiver requires both.
-.PP
-Interactive mode prompts only once after identifying the receiver's security
-mode. In the Plasma applet, an on-screen PIN uses a visible four-digit field and
-a configured receiver password uses an unrestricted masked field. doubletake
-does not request an on-screen PIN in password mode.
+Pairing code shown on the receiver; prefer
+.BR DOUBLETAKE_CODE .
 .TP
 .B \-port-range \fIMIN-MAX\fR
 Confine local timing and audio UDP sockets to a range of at least three ports,
@@ -118,18 +106,51 @@ forced \fBhevc\fR. Automatic mode uses H.264 at the receiver's nominal canvas.
 Forced HEVC uses the receiver's maximum canvas and may also use x265.
 Main10 output does not fabricate HDR metadata for an SDR capture source.
 .TP
+.B \-test
+Use synthetic video instead of screen capture. Unless
+.B \-no-audio
+is also set, generate an audio test tone.
+.TP
+.B \-no-encrypt
+Disable video frame encryption for protocol debugging. Normal AirPlay sessions
+encrypt video; this option is not intended for ordinary use.
+.TP
+.B \-x11-window-id \fIID\fR
+Capture one X11 window by decimal or hexadecimal window ID. This option is used
+only with X11 capture.
+.TP
+.B \-x11-window-name \fINAME\fR
+Capture one X11 window by name. Window IDs are unambiguous, so prefer
+.B \-x11-window-id
+when available.
+.TP
+.B \-no-cursor
+Omit the pointer from screen capture.
+.TP
 .B \-debug
 Enable verbose protocol logging
 .TP
 .B \-daemonize
 Run in daemon mode for multi-target control via
 .B doubletake-ctl
+.TP
+.B \-socket \fIPATH\fR
+Daemon control socket path. The default is
+.IR $XDG_RUNTIME_DIR/doubletake.sock ,
+or
+.I /tmp/doubletake.sock
+when
+.B XDG_RUNTIME_DIR
+is unset.
+.TP
+.B \-help, \-h
+Show command-line help and exit.
 .SH EXAMPLES
 .TP
-Discover and connect to any Apple TV on the network:
+Discover and connect to an AirPlay receiver on the network:
 .B doubletake
 .TP
-Connect to a specific Apple TV:
+Connect to a specific AirPlay receiver:
 .B doubletake \-target 192.168.1.77
 .TP
 Pair with a PIN (saves credentials for reuse):

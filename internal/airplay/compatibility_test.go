@@ -33,8 +33,8 @@ func TestReceiverCompatibilityUsesIndependentCapabilities(t *testing.T) {
 	info.SupportedFormats = StreamFormats{ScreenStream: FormatMask(screenAudioFormatALAC)}
 
 	got := mustCompatibility(t, &info, true)
-	if got.timing != timingProtocolPTP || !got.permitsLocalPTPClock() {
-		t.Fatalf("PTP policy = timing %q fallback=%t, want PTP with clock-header fallback", got.timing, got.permitsLocalPTPClock())
+	if got.timing != timingProtocolPTP {
+		t.Fatalf("PTP policy timing = %q, want PTP", got.timing)
 	}
 	if got.audioSecurity != audioSecurityChaCha || got.audioConnections != audioLayoutStreamConnections {
 		t.Fatalf("audio policy = security %d/layout %d, want ChaCha/streamConnections", got.audioSecurity, got.audioConnections)
@@ -44,9 +44,6 @@ func TestReceiverCompatibilityUsesIndependentCapabilities(t *testing.T) {
 	}
 	if got.fairPlayRoots != fairPlayDescriptorOnly {
 		t.Fatalf("FairPlay roots = %d, want descriptor-only", got.fairPlayRoots)
-	}
-	if got.sourceVersion() != modernAirPlaySourceVersion {
-		t.Fatalf("sender sourceVersion = %q, want %q", got.sourceVersion(), modernAirPlaySourceVersion)
 	}
 }
 
@@ -122,9 +119,6 @@ func TestPTPRequiresCapabilityVersionAndEncryption(t *testing.T) {
 			got := mustCompatibility(t, &test.info, test.encrypted)
 			if got.timing != test.want {
 				t.Fatalf("timing = %q, want %q", got.timing, test.want)
-			}
-			if got.permitsLocalPTPClock() != (test.want == timingProtocolPTP) {
-				t.Fatalf("permitsLocalPTPClock = %t for timing %q", got.permitsLocalPTPClock(), got.timing)
 			}
 		})
 	}

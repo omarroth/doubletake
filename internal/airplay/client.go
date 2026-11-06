@@ -23,6 +23,10 @@ import (
 	"howett.net/plist"
 )
 
+// AirPlay's RTSP User-Agent version is independent of the sourceVersion field
+// in the binary SETUP plist. Keep the captured Apple sender value in one place.
+const airPlayUserAgent = "AirPlay/935.7.1"
+
 // ReceiverInfo contains the capabilities returned by GET /info.
 type ReceiverInfo struct {
 	Name                          string              `plist:"name"`
@@ -975,7 +979,7 @@ func (c *AirPlayClient) httpRequestOnce(method, path, contentType string, body [
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, path)
 	fmt.Fprintf(&buf, "CSeq: %d\r\n", seq)
-	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
+	fmt.Fprintf(&buf, "User-Agent: %s\r\n", airPlayUserAgent)
 	for _, hdrs := range extraHeaders {
 		for k, v := range hdrs {
 			fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
@@ -1016,7 +1020,7 @@ func (c *AirPlayClient) rawRequest(method, path, contentType string, body []byte
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, path)
 	fmt.Fprintf(&buf, "Content-Type: %s\r\n", contentType)
-	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
+	fmt.Fprintf(&buf, "User-Agent: %s\r\n", airPlayUserAgent)
 	fmt.Fprintf(&buf, "X-Apple-ProtocolVersion: 1\r\n")
 	for _, hdrs := range extraHeaders {
 		for k, v := range hdrs {
@@ -1070,7 +1074,7 @@ func (c *AirPlayClient) rtspRequestOnce(method, uri, contentType string, body []
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "%s %s RTSP/1.0\r\n", method, uri)
 	fmt.Fprintf(&buf, "CSeq: %d\r\n", seq)
-	fmt.Fprintf(&buf, "User-Agent: AirPlay/935.7.1\r\n")
+	fmt.Fprintf(&buf, "User-Agent: %s\r\n", airPlayUserAgent)
 	// Do not send X-Apple-Session-ID here. Legacy CSeq/RAOP handlers can reject
 	// the combination, and the session is already identified by the TCP connection.
 	for k, v := range extraHeaders {
@@ -1432,8 +1436,7 @@ type StreamConfig struct {
 	// retains the ordinary per-connection policy. It cannot grow mid-session.
 	PlayoutLatency       time.Duration
 	MeasuredVideoLatency time.Duration // measured minimum lead for the local HEVC capture path
-	NoEncrypt            bool          // Disable encryption for debugging
-	DirectKey            bool          // Use shk/shiv directly without SHA-512 derivation
+	NoEncrypt            bool          // Disable video frame encryption for debugging
 	NoAudio              bool          // Disable audio streaming
 
 	// PortMin/PortMax bound the local ports used for the audio UDP triple

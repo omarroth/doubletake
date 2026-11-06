@@ -1,6 +1,6 @@
 # doubletake
 
-AirPlay screen mirroring sender for Linux. Streams your desktop to an Apple TV using the AirPlay mirroring protocol.
+AirPlay screen mirroring sender for Linux. Streams your desktop to Apple TV and compatible AirPlay receivers.
 
 ## Features
 
@@ -220,7 +220,7 @@ video connections are outbound TCP.
 
 ## Password-protected receivers
 
-For an Apple TV with **Require Password** enabled, provide its configured
+For a receiver with **Require Password** enabled, provide its configured
 password with `DOUBLETAKE_CODE`:
 
 ```sh
@@ -255,13 +255,13 @@ an unknown device ID is treated as a first connection. Discovery and transient
 pairing alone do not authenticate a receiver.
 
 ```sh
-# Discover Apple TVs on the network and stream
+# Discover AirPlay receivers on the network and stream
 doubletake
 
 # Disable audio for video-only mirroring
 doubletake -no-audio
 
-# Connect to a specific Apple TV
+# Connect to a specific AirPlay receiver
 doubletake -target 192.168.1.77
 
 # First-time pairing with PIN (saves credentials for reuse)
@@ -310,10 +310,10 @@ doubletake-ctl disconnect
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-target` | | Apple TV IP (skip mDNS discovery) |
+| `-target` | | AirPlay receiver IP address or hostname (skip mDNS discovery) |
 | `-device-id` | | Expected receiver device ID for saved-pairing lookup and identity checking |
 | `-port` | 7000 | AirPlay port |
-| `-code` | | Pairing PIN shown on the receiver, or its configured password when "Require Password" is enabled (see [Password-protected receivers](#password-protected-receivers)); prefer `$DOUBLETAKE_CODE` |
+| `-code` | | Pairing code shown on the receiver; prefer `$DOUBLETAKE_CODE` |
 | `-port-range` | | Local UDP range for timing/audio and receiver control traffic (at least 3 ports) |
 | `-cred-backend` | `file` | Credential backend (`file` or `keyring`) |
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
@@ -323,14 +323,17 @@ doubletake-ctl disconnect
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
-| `-no-encrypt` | false | Disable RTSP header encryption (debugging only) |
-| `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |
+| `-no-encrypt` | false | Disable video frame encryption (debugging only) |
 | `-no-audio` | false | Disable audio streaming |
 | `-audio-source` | output | Selectable doubletake output, or `monitor` to copy the default local output |
 | `-test` | false | Use synthetic video source |
+| `-x11-window-id` | | Capture one X11 window by decimal or hexadecimal window ID |
+| `-x11-window-name` | | Capture one X11 window by name; prefer `-x11-window-id` |
+| `-no-cursor` | false | Omit the pointer from screen capture |
 | `-daemonize` | false | Run as background daemon with Unix socket control interface |
-| `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock` | Daemon control socket path |
+| `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock`, or `/tmp/doubletake.sock` | Daemon control socket path |
 | `-debug` | false | Verbose debug logging |
+| `-help`, `-h` | | Show command-line help |
 
 Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
 `nvh264enc`, `vah264enc`, `v4l2h264enc`, `openh264enc`, then `x264enc`. Explicit selections

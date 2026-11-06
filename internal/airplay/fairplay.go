@@ -11,6 +11,11 @@ import (
 
 var ErrFairPlayUnsupported = errors.New("receiver does not support FairPlay SAP")
 
+// The in-tree FPSAP implementation implements the encryption type used by
+// Apple's current screen-mirroring path. Do not guess another selector after a
+// receiver rejection: different selectors require different SAP/key handling.
+const fairPlayEncryptionType = "32"
+
 func mustDecodeHexFP(s string) []byte {
 	b, err := hex.DecodeString(s)
 	if err != nil {
@@ -39,7 +44,7 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 
 	dbg("[FP] posting m1 (%d bytes) to /fp-setup", len(m1))
 	m2, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m1,
-		map[string]string{"X-Apple-ET": "32"})
+		map[string]string{"X-Apple-ET": fairPlayEncryptionType})
 	if err != nil {
 		var statusErr *HTTPStatusError
 		if errors.As(err, &statusErr) && statusErr.StatusCode == 404 {
@@ -61,7 +66,7 @@ func (c *AirPlayClient) FairPlaySetup(ctx context.Context) error {
 
 	dbg("[FP] posting m3 (%d bytes) to /fp-setup", len(m3))
 	m4, err := c.httpRequest("POST", "/fp-setup", "application/octet-stream", m3,
-		map[string]string{"X-Apple-ET": "32"})
+		map[string]string{"X-Apple-ET": fairPlayEncryptionType})
 	if err != nil {
 		var statusErr *HTTPStatusError
 		if errors.As(err, &statusErr) && statusErr.StatusCode == 404 {

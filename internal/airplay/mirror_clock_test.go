@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -395,47 +396,20 @@ func TestMediaClockRequiresReceiverClockIdentity(t *testing.T) {
 	if err == nil {
 		t.Fatal("configureFromSetup succeeded without timingPeerInfo.ClockID")
 	}
-	if err := clock.configureFromLocalClock(); err == nil {
-		t.Fatal("local PTP fallback succeeded without a receiver ClockID")
-	}
 }
 
-func TestThirdPartyPTPLocalClockFallbackKeepsPTPAudioAndVideoTimeline(t *testing.T) {
+func TestPTPClockWithoutReceiverAnchorIsUnavailable(t *testing.T) {
 	const timeline = uint64(0x4454424c54414b45)
 	clock := &mediaClock{}
 	response := map[string]interface{}{
 		"timingPeerInfo": map[string]interface{}{"ClockID": timeline},
 	}
-	if err := clock.configureFromSetup(response, nil, time.Now()); err == nil {
-		t.Fatal("configureFromSetup succeeded without Apple clock headers")
+	err := clock.configureFromSetup(response, nil, time.Now())
+	if !errors.Is(err, errPTPClockUnavailable) {
+		t.Fatalf("configureFromSetup error = %v, want errPTPClockUnavailable", err)
 	}
-	if clock.timelineID != timeline {
-		t.Fatalf("retained timeline = 0x%016x, want 0x%016x", clock.timelineID, timeline)
-	}
-	if err := clock.configureFromLocalClock(); err != nil {
-		t.Fatalf("configure local PTP fallback: %v", err)
-	}
-
-	session := &MirrorSession{
-		mediaClock:     clock,
-		timingProtocol: timingProtocolPTP,
-		timestampBias:  5 * time.Millisecond,
-	}
-	audioTimestamp, audioTimeline := session.audioClockNow()
-	if audioTimeline != timeline {
-		t.Fatalf("audio timeline = 0x%016x, want 0x%016x", audioTimeline, timeline)
-	}
-	packet := captureAudioSyncPacket(t, &AudioStream{}, session.timingProtocol, audioTimestamp, audioTimeline, false)
-	if len(packet) != 28 || packet[1] != audioSyncPayloadTypePTP {
-		t.Fatalf("audio sync packet = len %d type 0x%02x, want PTP len 28 type 0x%02x",
-			len(packet), packet[1], audioSyncPayloadTypePTP)
-	}
-	if got := binary.BigEndian.Uint64(packet[20:28]); got != timeline {
-		t.Fatalf("audio packet timeline = 0x%016x, want 0x%016x", got, timeline)
-	}
-
-	if _, videoTimeline := session.frameTimeNow(); videoTimeline != timeline {
-		t.Fatalf("video timeline = 0x%016x, want 0x%016x", videoTimeline, timeline)
+	if clock.readyClosed || !clock.anchorLocal.IsZero() || clock.anchorTimestamp != 0 {
+		t.Fatalf("unverified PTP clock became ready: %+v", clock)
 	}
 }
 
