@@ -673,16 +673,24 @@ func readDeviceSelection(devices []airplay.AirPlayDevice) (*airplay.AirPlayDevic
 	fmt.Print("\nselect receiver [1]: ")
 	var input string
 	fmt.Scanln(&input)
+	index, err := deviceSelectionIndex(input, len(devices))
+	if err != nil {
+		return nil, err
+	}
+	return &devices[index], nil
+}
+
+func deviceSelectionIndex(input string, deviceCount int) (int, error) {
 	input = strings.TrimSpace(input)
-	if input == "" {
-		return &devices[0], nil
+	if input == "" && deviceCount > 0 {
+		return 0, nil
 	}
 
-	idx, err := strconv.Atoi(input)
-	if err != nil || idx < 1 || idx > len(devices) {
-		return nil, fmt.Errorf("invalid selection")
+	selection, err := strconv.Atoi(input)
+	if err != nil || selection < 1 || selection > deviceCount {
+		return 0, fmt.Errorf("invalid receiver selection")
 	}
-	return &devices[idx-1], nil
+	return selection - 1, nil
 }
 
 type deviceDiscovery func(context.Context) ([]airplay.AirPlayDevice, error)

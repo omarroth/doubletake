@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -68,8 +69,9 @@ func selectDeviceDynamically(ctx context.Context) (*airplay.AirPlayDevice, error
 	browseErrors := make(chan error, 1)
 	go browseAirPlayContinuously(searchCtx, updates, browseErrors, airplay.BrowseAirPlayDevices)
 
-	ready := make(chan error, 1)
-	readDeviceSearchReady(ready)
+	selections := make(chan deviceSearchSelection, 1)
+	input := bufio.NewReader(os.Stdin)
+	readDeviceSearchSelection(input, selections)
 
 	ticker := time.NewTicker(120 * time.Millisecond)
 	defer ticker.Stop()
@@ -103,25 +105,34 @@ func selectDeviceDynamically(ctx context.Context) (*airplay.AirPlayDevice, error
 			status.clear()
 			fmt.Fprintf(os.Stdout, "discovery warning: %s; retrying\n", warning)
 			status.draw(frame, len(devices.devices))
-		case err := <-ready:
-			if errors.Is(err, io.EOF) {
+		case selection := <-selections:
+			if errors.Is(selection.err, io.EOF) {
 				return nil, context.Canceled
 			}
-			if err != nil {
-				return nil, fmt.Errorf("wait for device selection: %w", err)
+			if selection.err != nil {
+				return nil, fmt.Errorf("read device selection: %w", selection.err)
 			}
 			if len(devices.devices) == 0 {
 				status.clear()
 				fmt.Fprintln(os.Stdout, "no receivers are available yet; continuing to search")
 				status.draw(frame, 0)
-				readDeviceSearchReady(ready)
+				readDeviceSearchSelection(input, selections)
+				continue
+			}
+			index, err := deviceSelectionIndex(selection.input, len(devices.devices))
+			if err != nil {
+				status.clear()
+				fmt.Fprintf(os.Stdout, "%v; continuing to search\n", err)
+				status.draw(frame, len(devices.devices))
+				readDeviceSearchSelection(input, selections)
 				continue
 			}
 
 			cancelSearch()
 			status.clear()
 			fmt.Fprintln(os.Stdout)
-			return readDeviceSelection(devices.devices)
+			selected := devices.devices[index]
+			return &selected, nil
 		case <-ticker.C:
 			frame++
 			status.draw(frame, len(devices.devices))
@@ -160,19 +171,20 @@ func browseAirPlayContinuously(ctx context.Context, updates chan<- airplay.AirPl
 	}
 }
 
-func readDeviceSearchReady(result chan<- error) {
+type deviceSearchSelection struct {
+	input string
+	err   error
+}
+
+func readDeviceSearchSelection(input *bufio.Reader, result chan<- deviceSearchSelection) {
 	go func() {
-		var input [1]byte
-		for {
-			n, err := os.Stdin.Read(input[:])
-			if n > 0 && (input[0] == '\n' || input[0] == '\r') {
-				result <- nil
-				return
-			}
-			if err != nil {
-				result <- err
-				return
-			}
+		line, err := input.ReadString('\n')
+		if errors.Is(err, io.EOF) && line != "" {
+			err = nil
+		}
+		result <- deviceSearchSelection{
+			input: strings.TrimRight(line, "\r\n"),
+			err:   err,
 		}
 	}()
 }

@@ -1,12 +1,52 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"strings"
 	"testing"
 
 	"doubletake/internal/airplay"
 )
+
+func TestDeviceSearchSelectionReadsOneSelection(t *testing.T) {
+	result := make(chan deviceSearchSelection, 1)
+	readDeviceSearchSelection(bufio.NewReader(strings.NewReader("2\n1\n")), result)
+	selection := <-result
+	if selection.err != nil || selection.input != "2" {
+		t.Fatalf("selection = %+v, want input 2", selection)
+	}
+}
+
+func TestDeviceSelectionIndex(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		input       string
+		deviceCount int
+		want        int
+		wantError   bool
+	}{
+		{name: "default", deviceCount: 2},
+		{name: "explicit", input: "2", deviceCount: 2, want: 1},
+		{name: "trimmed", input: " 1 ", deviceCount: 2},
+		{name: "no devices", wantError: true},
+		{name: "out of range", input: "3", deviceCount: 2, wantError: true},
+		{name: "not a number", input: "office", deviceCount: 2, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := deviceSelectionIndex(test.input, test.deviceCount)
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("deviceSelectionIndex() = %d, want an error", got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("deviceSelectionIndex() = (%d, %v), want (%d, nil)", got, err, test.want)
+			}
+		})
+	}
+}
 
 func TestStableDeviceListPreservesFirstSeenOrderAndUpdatesInPlace(t *testing.T) {
 	var list stableDeviceList
