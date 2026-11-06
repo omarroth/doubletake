@@ -71,7 +71,6 @@ func main() {
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto uses H.264 for receiver compatibility)")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
-	noEncrypt := flag.Bool("no-encrypt", false, "Disable video frame encryption (debugging only)")
 	audioSource := flag.String("audio-source", "output", "Audio route: output (selectable doubletake sink) or monitor (copy default output)")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	portRange := flag.String("port-range", "", "Local UDP port range for receiver timing/audio (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 3 ports.")
@@ -119,7 +118,6 @@ func main() {
 			VideoCodec:  airplay.VideoCodec(*videoCodec),
 			Debug:       *debug,
 			TestMode:    *testMode,
-			NoEncrypt:   *noEncrypt,
 			NoAudio:     *noAudio,
 			AudioSource: airplay.AudioSource(*audioSource),
 			ShowCursor:  !*noCursor,
@@ -399,7 +397,6 @@ func main() {
 		FPS:        *fps,
 		Bitrate:    *bitrate,
 		VideoCodec: airplay.VideoCodec(*videoCodec),
-		NoEncrypt:  *noEncrypt,
 		NoAudio:    *noAudio,
 		PortMin:    portMin,
 		PortMax:    portMax,

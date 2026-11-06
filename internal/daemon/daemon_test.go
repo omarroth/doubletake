@@ -93,12 +93,11 @@ func TestNewDefaultsVideoCodecToAuto(t *testing.T) {
 
 func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 	d := &Daemon{cfg: Config{
-		FPS:       60,
-		Bitrate:   8000,
-		PortMin:   60000,
-		PortMax:   60010,
-		NoEncrypt: true,
-		NoAudio:   true,
+		FPS:     60,
+		Bitrate: 8000,
+		PortMin: 60000,
+		PortMax: 60010,
+		NoAudio: true,
 	}}
 
 	want := airplay.StreamConfig{
@@ -107,7 +106,6 @@ func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 		Bitrate:             8000,
 		PortMin:             60000,
 		PortMax:             60010,
-		NoEncrypt:           true,
 		NoAudio:             true,
 	}
 	if got := d.mirrorStreamConfig(); got != want {

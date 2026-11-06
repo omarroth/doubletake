@@ -323,7 +323,6 @@ doubletake-ctl disconnect
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
-| `-no-encrypt` | false | Disable video frame encryption (debugging only) |
 | `-no-audio` | false | Disable audio streaming |
 | `-audio-source` | output | Selectable doubletake output, or `monitor` to copy the default local output |
 | `-test` | false | Use synthetic video source |

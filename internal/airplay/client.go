@@ -1436,7 +1436,6 @@ type StreamConfig struct {
 	// retains the ordinary per-connection policy. It cannot grow mid-session.
 	PlayoutLatency       time.Duration
 	MeasuredVideoLatency time.Duration // measured minimum lead for the local HEVC capture path
-	NoEncrypt            bool          // Disable video frame encryption for debugging
 	NoAudio              bool          // Disable audio streaming
 
 	// PortMin/PortMax bound the local ports used for the audio UDP triple

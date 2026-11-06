@@ -566,14 +566,10 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		encKey = c.streamKey
 		encIV = c.streamIV
 	}
-
-	if cfg.NoEncrypt {
-		dbg("[SETUP] video frame encryption DISABLED (--no-encrypt mode)")
-		encKey = nil
-		encIV = nil
-	} else if encKey != nil {
-		dbg("[SETUP] using encryption (key: %d bytes, IV: %d bytes)", len(encKey), len(encIV))
+	if len(encKey) == 0 {
+		return nil, errors.New("video encryption key unavailable")
 	}
+	dbg("[SETUP] using encryption (key: %d bytes, IV: %d bytes)", len(encKey), len(encIV))
 
 	// Allocate separate consecutive sockets for timing, RTCP, and RTP. Only the
 	// RTCP port is advertised; the receiver accepts RTP from the data socket's
@@ -1249,7 +1245,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 
 	// Set up the video cipher. Encrypted pair-verify uses ChaCha20-Poly1305 with
 	// an HKDF-derived key; plaintext pair-verify uses AES-CTR.
-	if encKey != nil && c.encrypted && ((c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0) || c.fpAesKey != nil) {
+	if c.encrypted && ((c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0) || c.fpAesKey != nil) {
 		// ChaCha20-Poly1305 path: HKDF-SHA512 key derivation with the pair-verify
 		// X25519 ECDH shared secret as IKM.
 		ikm := c.fpAesKey
@@ -1272,7 +1268,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		dbg("[SETUP] streamConnectionID: %d", videoStreamConnectionID)
 		dbg("[SETUP] IKM (%d bytes):   %02x", len(ikm), ikm)
 		dbg("[SETUP] chacha key:       %02x", chachaKey)
-	} else if encKey != nil {
+	} else {
 		// AES-CTR path: Apple derives the per-stream key and IV from shk and the
 		// streamConnectionID rather than using the FairPlay material directly.
 		cipherKey, cipherIV := deriveVideoKeys(encKey, videoStreamConnectionID)
@@ -1287,8 +1283,6 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 			return nil, fmt.Errorf("stream cipher: %w", err)
 		}
 		session.streamCipher = mc.EncryptFrame
-	} else {
-		dbg("[SETUP] no video cipher — frames will be sent unencrypted")
 	}
 
 	// Set up audio stream if the receiver provided audio ports
