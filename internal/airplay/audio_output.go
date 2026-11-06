@@ -83,7 +83,7 @@ func (m *audioOutputManager) acquire(ctx context.Context) (string, func(), error
 			return "", nil, fmt.Errorf("create doubletake audio output (requires pactl and PulseAudio or pipewire-pulse): %w", err)
 		}
 		m.name, m.module, m.generation = name, module, generation
-		log.Printf("[AUDIO] output doubletake is available; select it in your sound settings to route applications here")
+		log.Printf("[AUDIO] select output doubletake to route applications here")
 	}
 	m.users++
 	name := m.name
