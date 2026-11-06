@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/grandcat/zeroconf"
 )
+
+var errNoAirPlayMDNSInterfaces = errors.New("no multicast-capable LAN interface is available")
 
 // AirPlayDevice represents a discovered AirPlay receiver.
 type AirPlayDevice struct {
@@ -77,12 +80,27 @@ func (f *FeatureSet) UnmarshalPlist(unmarshal func(interface{}) error) error {
 
 // DiscoverAirPlayDevices browses the local network for AirPlay receivers.
 func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
+	var devices []AirPlayDevice
+	err := BrowseAirPlayDevices(ctx, func(device AirPlayDevice) {
+		devices = append(devices, device)
+	})
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errNoAirPlayMDNSInterfaces) {
+		return devices, nil
+	}
+	return devices, err
+}
+
+// BrowseAirPlayDevices reports receivers discovered by a single long-lived
+// mDNS browse. Cancellation returns promptly without waiting for zeroconf's
+// result channel to close; its resolver observes the same context and performs
+// socket cleanup asynchronously.
+func BrowseAirPlayDevices(ctx context.Context, onDevice func(AirPlayDevice)) error {
 	ifaces, traffic, err := airPlayMDNSInterfaces()
 	if err != nil {
-		return nil, fmt.Errorf("mDNS interfaces: %w", err)
+		return fmt.Errorf("mDNS interfaces: %w", err)
 	}
 	if len(ifaces) == 0 {
-		return nil, nil
+		return errNoAirPlayMDNSInterfaces
 	}
 
 	resolver, err := zeroconf.NewResolver(
@@ -90,30 +108,34 @@ func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
 		zeroconf.SelectIPTraffic(traffic),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("zeroconf resolver: %w", err)
+		return fmt.Errorf("zeroconf resolver: %w", err)
 	}
 
 	entries := make(chan *zeroconf.ServiceEntry, 16)
-	var devices []AirPlayDevice
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for entry := range entries {
-			dev := parseServiceEntry(entry)
-			if dev != nil {
-				devices = append(devices, *dev)
-			}
-		}
-	}()
-
 	if err := resolver.Browse(ctx, "_airplay._tcp", "local.", entries); err != nil {
-		return nil, fmt.Errorf("browse: %w", err)
+		return fmt.Errorf("browse: %w", err)
 	}
 
-	<-ctx.Done()
-	<-done
-	return devices, nil
+	return consumeAirPlayEntries(ctx, entries, onDevice)
+}
+
+func consumeAirPlayEntries(ctx context.Context, entries <-chan *zeroconf.ServiceEntry, onDevice func(AirPlayDevice)) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case entry, ok := <-entries:
+			if !ok {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return fmt.Errorf("mDNS browse stopped unexpectedly")
+			}
+			if device := parseServiceEntry(entry); device != nil && onDevice != nil {
+				onDevice(*device)
+			}
+		}
+	}
 }
 
 func airPlayMDNSInterfaces() ([]net.Interface, zeroconf.IPType, error) {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -14,21 +13,6 @@ import (
 
 	"doubletake/internal/airplay"
 )
-
-func TestDiscoveryIndicatorIsStableWhenRedirectedAndAnimatedOnTerminal(t *testing.T) {
-	var redirected bytes.Buffer
-	startDiscoveryIndicator(&redirected, false)()
-	if got := redirected.String(); got != "searching for AirPlay receivers...\n" {
-		t.Fatalf("redirected indicator = %q", got)
-	}
-
-	var terminal bytes.Buffer
-	stop := startDiscoveryIndicator(&terminal, true)
-	stop()
-	if got := terminal.String(); !strings.Contains(got, "searching for AirPlay receivers...") || !strings.HasSuffix(got, "done\n") {
-		t.Fatalf("animated indicator = %q", got)
-	}
-}
 
 func TestDiscoverDevicesUntilFoundRetriesEmptyScans(t *testing.T) {
 	calls := 0

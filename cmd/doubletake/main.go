@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -164,6 +163,9 @@ func main() {
 	} else {
 		device, err := selectDevice(ctx)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			log.Fatalf("discovery failed: %v", err)
 		}
 		addr = device.IP
@@ -641,24 +643,33 @@ func readCredential(reader *bufio.Reader, prompt string) string {
 }
 
 func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
-	stopIndicator := startDiscoveryIndicator(os.Stdout, stdoutIsTerminal())
-	defer stopIndicator()
+	if canUseDynamicDeviceSearch() {
+		return selectDeviceDynamically(ctx)
+	}
+
+	fmt.Println("searching for AirPlay receivers...")
 
 	devices, err := discoverDevicesUntilFound(ctx, 5*time.Second, time.Second, airplay.DiscoverAirPlayDevices)
 	if err != nil {
 		return nil, err
 	}
-	stopIndicator()
 
 	sort.Slice(devices, func(i, j int) bool {
 		return compareIPs(devices[i].IP, devices[j].IP) < 0
 	})
 
-	fmt.Println("\navailable devices:")
-	for i, d := range devices {
-		fmt.Printf("  [%d] %s (%s) - %s\n", i+1, d.Name, d.Model, d.IP)
-	}
+	return promptForDeviceSelection(devices)
+}
 
+func promptForDeviceSelection(devices []airplay.AirPlayDevice) (*airplay.AirPlayDevice, error) {
+	fmt.Println("available devices:")
+	for i, d := range devices {
+		printDiscoveredDevice(os.Stdout, i, d, false)
+	}
+	return readDeviceSelection(devices)
+}
+
+func readDeviceSelection(devices []airplay.AirPlayDevice) (*airplay.AirPlayDevice, error) {
 	fmt.Print("\nselect device [1]: ")
 	var input string
 	fmt.Scanln(&input)
@@ -710,45 +721,6 @@ func discoverDevicesUntilFound(ctx context.Context, scanWindow, minimumRetryInte
 			case <-timer.C:
 			}
 		}
-	}
-}
-
-func stdoutIsTerminal() bool {
-	info, err := os.Stdout.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-func startDiscoveryIndicator(out io.Writer, animate bool) func() {
-	if !animate {
-		fmt.Fprintln(out, "searching for AirPlay receivers...")
-		return func() {}
-	}
-
-	done := make(chan struct{})
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		frames := []byte{'|', '/', '-', '\\'}
-		ticker := time.NewTicker(120 * time.Millisecond)
-		defer ticker.Stop()
-		index := 0
-		for {
-			fmt.Fprintf(out, "\rsearching for AirPlay receivers... %c", frames[index])
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				index = (index + 1) % len(frames)
-			}
-		}
-	}()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			close(done)
-			<-finished
-			fmt.Fprint(out, "\rsearching for AirPlay receivers... done\n")
-		})
 	}
 }
 

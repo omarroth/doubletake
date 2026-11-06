@@ -1,11 +1,65 @@
 package airplay
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/grandcat/zeroconf"
 )
+
+func TestConsumeAirPlayEntriesCancellationDoesNotWaitForChannelClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	entries := make(chan *zeroconf.ServiceEntry)
+	done := make(chan error, 1)
+	go func() {
+		done <- consumeAirPlayEntries(ctx, entries, nil)
+	}()
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("consumeAirPlayEntries() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("consumeAirPlayEntries() waited for the result channel to close after cancellation")
+	}
+}
+
+func TestConsumeAirPlayEntriesReportsParsedDevices(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entries := make(chan *zeroconf.ServiceEntry, 1)
+	entry := zeroconf.NewServiceEntry("Living\\ Room", "_airplay._tcp", "local.")
+	entry.Port = 7000
+	entry.AddrIPv4 = []net.IP{net.ParseIP("192.0.2.10")}
+	entry.Text = []string{"deviceid=AA:BB:CC:DD:EE:FF", "model=AppleTV14,1"}
+	entries <- entry
+
+	devices := make(chan AirPlayDevice, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- consumeAirPlayEntries(ctx, entries, func(device AirPlayDevice) {
+			devices <- device
+		})
+	}()
+
+	select {
+	case device := <-devices:
+		if device.Name != "Living Room" || device.IP != "192.0.2.10" || device.Model != "AppleTV14,1" {
+			t.Fatalf("reported device = %+v", device)
+		}
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("consumeAirPlayEntries() did not report the parsed device")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("consumeAirPlayEntries() error = %v, want context cancellation", err)
+	}
+}
 
 func TestIsAirPlayMDNSInterface(t *testing.T) {
 	tests := []struct {
