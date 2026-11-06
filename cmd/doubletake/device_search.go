@@ -188,11 +188,11 @@ func newDeviceSearchStatus(out io.Writer) *deviceSearchStatus {
 
 func (s *deviceSearchStatus) draw(frame, deviceCount int) {
 	frames := [...]byte{'|', '/', '-', '\\'}
-	line := fmt.Sprintf("searching for AirPlay receivers... %c", frames[frame%len(frames)])
+	var line string
 	if deviceCount == 0 {
-		line += "  Press Enter after a receiver appears. Ctrl+C cancels."
+		line = fmt.Sprintf("searching for AirPlay receivers... %c", frames[frame%len(frames)])
 	} else {
-		line += "  Press Enter to choose. Ctrl+C cancels."
+		line = fmt.Sprintf("searching, select receiver [1]... %c", frames[frame%len(frames)])
 	}
 	padding := s.lastWidth - len(line)
 	if padding < 0 {

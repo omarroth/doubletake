@@ -670,7 +670,7 @@ func promptForDeviceSelection(devices []airplay.AirPlayDevice) (*airplay.AirPlay
 }
 
 func readDeviceSelection(devices []airplay.AirPlayDevice) (*airplay.AirPlayDevice, error) {
-	fmt.Print("\nselect device [1]: ")
+	fmt.Print("\nselect receiver [1]: ")
 	var input string
 	fmt.Scanln(&input)
 	input = strings.TrimSpace(input)

@@ -61,9 +61,7 @@ func TestDeviceSearchStatusUsesPortableCarriageReturnOutput(t *testing.T) {
 	for _, want := range []string{
 		"\r",
 		"searching for AirPlay receivers... /",
-		"searching for AirPlay receivers... -",
-		"Press Enter after a receiver appears",
-		"Press Enter to choose",
+		"searching, select receiver [1]... -",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status output does not contain %q:\n%q", want, got)
