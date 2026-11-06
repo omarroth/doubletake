@@ -147,26 +147,10 @@ make test
 
 ### Audio output
 
-When audio streaming starts, doubletake creates a **doubletake** output in your
-sound settings (PulseAudio or PipeWire with `pipewire-pulse`). Select that output
-for the applications you want to send, or make it your default output for system
-audio. Sound routed there goes to the receivers without playing through your local
-speakers. Its volume and mute controls affect the captured audio, including media
-keys when doubletake is the selected system output. The sound server remembers
-those controls when doubletake recreates the output for a later session.
-
-The daemon shares this output across its receivers. It removes it when the last
-audio capture stops, including cancellation or a capture-process failure. doubletake
-does not change your default output or move applications automatically. Your sound
-server manages their routing when an output disappears. An unclean process kill
-(such as `SIGKILL`) can leave a null sink behind; remove that output's
-`module-null-sink` with `pactl unload-module ID` from `pactl list short modules`.
-
-Use `-audio-source monitor` to copy the default local output instead, retaining
-local playback. The default `-audio-source output` requires `pactl` and GStreamer's
-`pulsesrc`; it reports an audio capture error if the virtual output cannot be
-created. `-test` generates a tone without using the sound server, and `-no-audio`
-creates no output.
+By default, doubletake creates a selectable **doubletake** output while streaming;
+route the applications you want to send there. Use `-audio-source monitor` to copy
+the default local output instead, or `-no-audio` to disable audio. The selectable
+output requires `pactl`, PulseAudio or `pipewire-pulse`, and GStreamer's `pulsesrc`.
 
 ### Multiroom playback
 

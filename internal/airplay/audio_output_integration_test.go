@@ -192,3 +192,69 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 		t.Fatal("canceled capture leaked its output")
 	}
 }
+
+func TestDedicatedAudioOutputContinuityIntegration(t *testing.T) {
+	server := os.Getenv("DOUBLETAKE_TEST_PULSE_SERVER")
+	if server == "" {
+		t.Skip("requires DOUBLETAKE_TEST_PULSE_SERVER pointing to a private test server")
+	}
+	t.Setenv("PULSE_SERVER", server)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	capture, err := StartAudioCapture(ctx, false, AudioCodecALAC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Stop()
+
+	tone := exec.CommandContext(ctx, "gst-launch-1.0", "--quiet",
+		"audiotestsrc", "is-live=true", "wave=sine", "volume=0.1", "samplesperbuffer=352",
+		"!", "audioconvert", "!", "audioresample",
+		"!", "pulsesink", "device="+sharedAudioOutput.name, "buffer-time=100000", "latency-time=10000")
+	if err := tone.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { tone.Process.Kill(); tone.Wait() }()
+
+	reader, ok := capture.pcmFrames.(*rtpL16PCMFrameReader)
+	if !ok {
+		t.Fatalf("capture reader = %T, want timestamped RTP/L16", capture.pcmFrames)
+	}
+	pcm := make([]byte, 352*audioBytesPerSampleFrame)
+	var previous audioPCMFramePosition
+	previousRead := time.Time{}
+	minReadGap, maxReadGap := time.Duration(1<<63-1), time.Duration(0)
+	minPTSDelta, maxPTSDelta := time.Duration(1<<63-1), time.Duration(0)
+	burstReads := 0
+	for frame := range 750 {
+		position, err := capture.readPCMFramePosition(pcm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		if frame > 0 {
+			if delta := position.SourceRTP - previous.SourceRTP; delta != 352 {
+				t.Fatalf("frame %d source RTP advanced by %d samples", frame, delta)
+			}
+			gap := now.Sub(previousRead)
+			if gap < minReadGap {
+				minReadGap = gap
+			}
+			maxReadGap = max(maxReadGap, gap)
+			ptsDelta := position.PTS.Sub(previous.PTS)
+			if ptsDelta < minPTSDelta {
+				minPTSDelta = ptsDelta
+			}
+			maxPTSDelta = max(maxPTSDelta, ptsDelta)
+			if gap < time.Millisecond {
+				burstReads++
+			}
+		}
+		previous, previousRead = position, now
+	}
+	if reader.discontinuities != 0 {
+		t.Fatalf("capture reported %d discontinuities", reader.discontinuities)
+	}
+	t.Logf("750 frames: read gaps %v..%v, PTS deltas %v..%v, sub-millisecond batch reads %d",
+		minReadGap, maxReadGap, minPTSDelta, maxPTSDelta, burstReads)
+}

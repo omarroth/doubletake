@@ -1317,7 +1317,6 @@ const (
 	audioSendBurstWindow        = 5 * time.Millisecond
 	maximumAudioPacketsPerBurst = 12
 	maximumAudioPacingFrames    = 1
-	audioPacingRebaseThreshold  = 2 * time.Millisecond
 )
 
 // audioSendBurstLimiter bounds only catch-up bursts. At normal ALAC/AAC-ELD
@@ -1362,8 +1361,8 @@ func (limiter *audioSendBurstLimiter) wait(ctx context.Context) error {
 }
 
 // audioPacingFramesForLatency keeps at most one codec frame in sender-side
-// staging for the unframed compatibility path. Timestamped capture is driven by
-// source callbacks and does not use this fallback timer.
+// staging. That is enough to smooth the small callback batches produced by
+// common sound servers without consuming the receiver's playout window.
 func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 	if frameSamples == 0 {
 		return 0
@@ -1379,17 +1378,16 @@ func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 	return frames
 }
 
-// audioFramePacer releases unframed compatibility capture at RTP sample cadence.
-// Timestamped capture already has source callback boundaries and is sent as it
-// arrives so the receiver retains the full negotiated playout window.
+// audioFramePacer releases capture at its RTP sample cadence. Sound servers can
+// deliver several correctly timestamped frames in one callback; sending that
+// callback as a UDP burst makes receiver buffering needlessly uneven.
 type audioFramePacer struct {
 	anchorRTP    uint32
 	anchorTime   time.Time
 	bufferFrames uint32
-	lastRelease  time.Time
 }
 
-func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32) time.Duration {
+func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32, deadline time.Time) time.Duration {
 	if now.IsZero() || frameSamples == 0 {
 		return 0
 	}
@@ -1398,16 +1396,8 @@ func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples 
 		pacer.anchorTime = now.Add(audioSamplesDuration(uint64(frameSamples) * uint64(pacer.bufferFrames)))
 	}
 	target := pacer.anchorTime.Add(audioSamplesDuration(uint64(rtpTime - pacer.anchorRTP)))
-	// A delayed timer must not be followed by a compressed catch-up interval.
-	// Move the remaining schedule forward after a material late release while
-	// ignoring ordinary sub-millisecond timer noise so it cannot accumulate.
-	if !pacer.lastRelease.IsZero() {
-		minimumTarget := pacer.lastRelease.Add(audioSamplesDuration(uint64(frameSamples)))
-		if minimumTarget.After(target.Add(audioPacingRebaseThreshold)) {
-			shift := minimumTarget.Sub(target)
-			pacer.anchorTime = pacer.anchorTime.Add(shift)
-			target = minimumTarget
-		}
+	if !deadline.IsZero() && target.After(deadline) {
+		target = deadline
 	}
 	if delay := target.Sub(now); delay > 0 {
 		return delay
@@ -1415,10 +1405,9 @@ func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples 
 	return 0
 }
 
-func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32) error {
-	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples)
+func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32, deadline time.Time) error {
+	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples, deadline)
 	if delay <= 0 {
-		pacer.lastRelease = time.Now()
 		return nil
 	}
 	timer := time.NewTimer(delay)
@@ -1427,7 +1416,6 @@ func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples ui
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
-		pacer.lastRelease = time.Now()
 		return nil
 	}
 }
@@ -1545,12 +1533,11 @@ videoReady:
 		dbg("[AUDIO] discarded %d timestamped startup frames to restore positive playout lead", catchupFrames)
 	}
 	timestampedAudio := !firstFramePosition.PTS.IsZero()
-	pacingFrames := uint32(0)
+	pacingFrames := audioPacingFramesForLatency(audioStream.latencySamples, spf)
+	pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
 	if timestampedAudio {
-		dbg("[AUDIO] frame delivery follows timestamped source callbacks")
+		dbg("[AUDIO] timestamped frame pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
 	} else {
-		pacingFrames = audioPacingFramesForLatency(audioStream.latencySamples, spf)
-		pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
 		dbg("[AUDIO] fallback pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
 	}
 	if firstFramePosition.PTS.IsZero() {
@@ -1759,10 +1746,12 @@ videoReady:
 		copy(payload, frameBuf[:n])
 
 		frameCount++
-		if !timestampedAudio {
-			if err := framePacer.wait(ctx, frameRTP, spf); err != nil {
-				return err
-			}
+		pacingDeadline := time.Time{}
+		if timestampedAudio {
+			pacingDeadline = framePTS.Add(audioLatencyDuration(audioStream.latencySamples) - minimumAudioSendLead)
+		}
+		if err := framePacer.wait(ctx, frameRTP, spf, pacingDeadline); err != nil {
+			return err
 		}
 		redundantFrames := 0
 		if !useRedundancy {

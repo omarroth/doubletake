@@ -392,7 +392,7 @@ func (r *steadyTimestampedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (au
 		now = r.now
 	}
 	position := audioPCMFramePosition{
-		PTS:          now().Add(-r.age),
+		PTS:          now().Add(-r.age).Add(audioSamplesDuration(uint64(r.sourceRTP))),
 		SourceRTP:    r.sourceRTP,
 		HasSourceRTP: true,
 	}
@@ -413,10 +413,14 @@ func TestStreamAudioKeepsTimestampedFramesWithPositivePlayoutLead(t *testing.T) 
 		spf:       352,
 		age:       75 * time.Millisecond,
 	}
+	started := time.Now()
 	_, packets := streamAudioPacketsForCodecTest(
 		t, "plaintext", reader, frames, AudioCodecALAC, false,
 		samplesFor44k1(85*time.Millisecond),
 	)
+	if elapsed := time.Since(started); elapsed < 3*audioSamplesDuration(352) {
+		t.Fatalf("timestamped callback batch was sent without cadence pacing in %v", elapsed)
+	}
 	assertAudioPacketSequences(t, packets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6})
 }
 
@@ -1225,7 +1229,7 @@ func TestAudioFramePacerSmoothsCaptureBlocksAtRTPCadence(t *testing.T) {
 		if now.Before(lastSend) {
 			now = lastSend
 		}
-		delay := pacer.reserveDelay(now, firstRTP+uint32(frame)*spf, spf)
+		delay := pacer.reserveDelay(now, firstRTP+uint32(frame)*spf, spf, time.Time{})
 		sentAt := now.Add(delay)
 		want := base.Add(audioSamplesDuration(uint64(spf) * maximumAudioPacingFrames)).
 			Add(audioSamplesDuration(uint64(frame) * uint64(spf)))
@@ -1243,15 +1247,15 @@ func TestAudioFramePacerHandlesRTPWrap(t *testing.T) {
 	frameDuration := audioSamplesDuration(uint64(spf))
 	pacer := audioFramePacer{bufferFrames: maximumAudioPacingFrames}
 	wantDelay := audioSamplesDuration(uint64(spf) * maximumAudioPacingFrames)
-	if delay := pacer.reserveDelay(base, firstRTP, spf); delay != wantDelay {
+	if delay := pacer.reserveDelay(base, firstRTP, spf, time.Time{}); delay != wantDelay {
 		t.Fatalf("first frame delay = %v, want %v", delay, wantDelay)
 	}
-	if delay := pacer.reserveDelay(base.Add(frameDuration), firstRTP+spf, spf); delay != wantDelay {
+	if delay := pacer.reserveDelay(base.Add(frameDuration), firstRTP+spf, spf, time.Time{}); delay != wantDelay {
 		t.Fatalf("wrapped frame delay = %v, want %v", delay, wantDelay)
 	}
 }
 
-func TestAudioFramePacerDoesNotCompressIntervalAfterLateRelease(t *testing.T) {
+func TestAudioFramePacerReturnsToSourceCadenceAfterLateRelease(t *testing.T) {
 	base := time.Unix(1787616000, 0)
 	const (
 		firstRTP = uint32(1000)
@@ -1259,13 +1263,23 @@ func TestAudioFramePacerDoesNotCompressIntervalAfterLateRelease(t *testing.T) {
 	)
 	frameDuration := audioSamplesDuration(uint64(spf))
 	pacer := audioFramePacer{bufferFrames: maximumAudioPacingFrames}
-	firstDelay := pacer.reserveDelay(base, firstRTP, spf)
+	firstDelay := pacer.reserveDelay(base, firstRTP, spf, time.Time{})
 	firstTarget := base.Add(firstDelay)
 
 	lateRelease := firstTarget.Add(5 * time.Millisecond)
-	pacer.lastRelease = lateRelease
-	if delay := pacer.reserveDelay(lateRelease, firstRTP+spf, spf); delay != frameDuration {
-		t.Fatalf("post-stall delay = %v, want a complete frame interval %v", delay, frameDuration)
+	want := frameDuration - 5*time.Millisecond
+	if delay := pacer.reserveDelay(lateRelease, firstRTP+spf, spf, time.Time{}); delay != want {
+		t.Fatalf("post-stall delay = %v, want %v to recover the source cadence", delay, want)
+	}
+}
+
+func TestAudioFramePacerPreservesDeliveryLead(t *testing.T) {
+	base := time.Unix(1787616000, 0)
+	const spf = uint32(352)
+	pacer := audioFramePacer{bufferFrames: maximumAudioPacingFrames}
+	deadline := base.Add(3 * time.Millisecond)
+	if delay := pacer.reserveDelay(base, 1000, spf, deadline); delay != 3*time.Millisecond {
+		t.Fatalf("deadline-limited pacing delay = %v, want 3ms", delay)
 	}
 }
 
