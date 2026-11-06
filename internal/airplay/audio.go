@@ -1316,7 +1316,7 @@ const (
 	maximumInitialCatchupFrames = 128
 	audioSendBurstWindow        = 5 * time.Millisecond
 	maximumAudioPacketsPerBurst = 12
-	maximumAudioPacingFrames    = 1
+	maximumAudioPacingFrames    = 4
 )
 
 // audioSendBurstLimiter bounds only catch-up bursts. At normal ALAC/AAC-ELD
@@ -1360,9 +1360,10 @@ func (limiter *audioSendBurstLimiter) wait(ctx context.Context) error {
 	}
 }
 
-// audioPacingFramesForLatency keeps at most one codec frame in sender-side
-// staging. That is enough to smooth the small callback batches produced by
-// common sound servers without consuming the receiver's playout window.
+// audioPacingFramesForLatency uses only the playout budget above the low-latency
+// profile for sender-side staging. Four ALAC frames cover about 32 milliseconds,
+// enough to smooth the callback batches produced by common sound servers while
+// preserving at least 50 milliseconds of receiver/network lead.
 func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
 	if frameSamples == 0 {
 		return 0
@@ -1645,9 +1646,9 @@ videoReady:
 		return audioStream.sendAudioPacketWithPayloadTypeAndNonce(payload, rtpTime, seq, payloadType, reuseNonce)
 	}
 
-	// Each redundancy group contains the next unsent packet and the negotiated
-	// number of prior packets in chronological order. Match redundantAudio=2
-	// with [N-2, N-1, N]; an eight-frame interleave sends unrelated older packets
+	// Each redundancy group contains the next unsent packet followed by the
+	// negotiated number of prior packets. Match redundantAudio=2 with
+	// [N, N-1, N-2]; an eight-frame interleave sends unrelated older packets
 	// outside that negotiated window.
 	const retransmitDepth = audioRedundancyCount + 1
 	type audioFrame struct {

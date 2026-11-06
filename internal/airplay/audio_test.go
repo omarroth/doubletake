@@ -1286,10 +1286,10 @@ func TestAudioPacingFramesRespectLatencyBudget(t *testing.T) {
 		spf     uint32
 		want    uint32
 	}{
-		{name: "high ALAC", latency: defaultAudioLatencyHigh, spf: 352, want: 1},
-		{name: "normal ALAC", latency: defaultAudioLatencyNormal, spf: 352, want: 1},
+		{name: "high ALAC", latency: defaultAudioLatencyHigh, spf: 352, want: 4},
+		{name: "normal ALAC", latency: defaultAudioLatencyNormal, spf: 352, want: 4},
 		{name: "low ALAC", latency: defaultAudioLatencyLow, spf: 352, want: 0},
-		{name: "normal AAC-ELD", latency: defaultAudioLatencyNormal, spf: 480, want: 1},
+		{name: "normal AAC-ELD", latency: defaultAudioLatencyNormal, spf: 480, want: 3},
 		{name: "minimum override", latency: 5 * time.Millisecond, spf: 352, want: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
