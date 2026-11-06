@@ -685,7 +685,7 @@ func discoverDevicesUntilFound(ctx context.Context, scanWindow, minimumRetryInte
 		discoverCtx, cancel := context.WithTimeout(ctx, scanWindow)
 		devices, err := discover(discoverCtx)
 		cancel()
-		if err != nil {
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}

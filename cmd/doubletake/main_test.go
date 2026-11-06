@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,23 @@ func TestDiscoverDevicesUntilFoundRetriesEmptyScans(t *testing.T) {
 	}
 	if calls != 3 || len(got) != 1 || got[0].Name != want[0].Name || got[0].IP != want[0].IP {
 		t.Fatalf("discovery calls=%d devices=%+v, want 3 and %+v", calls, got, want)
+	}
+}
+
+func TestDiscoverDevicesUntilFoundRetriesCompletedWindowError(t *testing.T) {
+	calls := 0
+	got, err := discoverDevicesUntilFound(t.Context(), time.Second, 0, func(context.Context) ([]airplay.AirPlayDevice, error) {
+		calls++
+		if calls == 1 {
+			return nil, fmt.Errorf("browse window: %w", context.DeadlineExceeded)
+		}
+		return []airplay.AirPlayDevice{{Name: "Office"}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(got) != 1 || got[0].Name != "Office" {
+		t.Fatalf("discovery calls=%d devices=%+v, want a retry and Office", calls, got)
 	}
 }
 
