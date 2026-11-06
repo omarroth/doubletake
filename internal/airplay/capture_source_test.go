@@ -31,7 +31,12 @@ func TestCaptureSourceLeasesOutliveFirstReceiver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := &CapturePreparation{kind: capturePreparationWayland, cfg: CaptureConfig{VideoCodec: VideoCodecAuto}, portal: portal, pwFd: rootFD, pwNodeID: 42, streamSize: [2]int{1280, 720}}
+	wantSource := SourceInfo{Type: 1, Width: 1280, Height: 720, X: -1280, HasPosition: true}
+	root := &CapturePreparation{
+		kind: capturePreparationWayland, cfg: CaptureConfig{VideoCodec: VideoCodecAuto},
+		portal: portal, pwFd: rootFD, pwNodeID: 42, streamSize: [2]int{1280, 720},
+		source: wantSource, hasSource: true,
+	}
 	a, err := root.Fork(context.Background(), VideoCodecAuto)
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +56,11 @@ func TestCaptureSourceLeasesOutliveFirstReceiver(t *testing.T) {
 	}
 	if a.pwFd == b.pwFd || a.pwNodeID != 42 || b.streamSize != [2]int{1280, 720} {
 		t.Fatal("forks did not share selected node with separate remote FDs")
+	}
+	for _, fork := range []*CapturePreparation{a, b} {
+		if got, ok := fork.Source(); !ok || got != wantSource {
+			t.Fatalf("fork source = (%+v, %t), want (%+v, true)", got, ok, wantSource)
+		}
 	}
 	a.Close()
 	if portal.closes != 0 {

@@ -642,17 +642,13 @@ func readCredential(reader *bufio.Reader, prompt string) string {
 
 func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 	stopIndicator := startDiscoveryIndicator(os.Stdout, stdoutIsTerminal())
-	discoverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	defer stopIndicator()
 
-	devices, err := airplay.DiscoverAirPlayDevices(discoverCtx)
-	stopIndicator()
+	devices, err := discoverDevicesUntilFound(ctx, 5*time.Second, time.Second, airplay.DiscoverAirPlayDevices)
 	if err != nil {
 		return nil, err
 	}
-	if len(devices) == 0 {
-		return nil, fmt.Errorf("no Apple TVs found")
-	}
+	stopIndicator()
 
 	sort.Slice(devices, func(i, j int) bool {
 		return compareIPs(devices[i].IP, devices[j].IP) < 0
@@ -678,6 +674,45 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 	return &devices[idx-1], nil
 }
 
+type deviceDiscovery func(context.Context) ([]airplay.AirPlayDevice, error)
+
+func discoverDevicesUntilFound(ctx context.Context, scanWindow, minimumRetryInterval time.Duration, discover deviceDiscovery) ([]airplay.AirPlayDevice, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		started := time.Now()
+		discoverCtx, cancel := context.WithTimeout(ctx, scanWindow)
+		devices, err := discover(discoverCtx)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		}
+		if len(devices) != 0 {
+			return devices, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		// Discovery normally occupies the whole scan window. If it returns
+		// immediately (for example, while no multicast-capable interface is
+		// available), avoid a tight retry loop while continuing to show feedback.
+		if remaining := minimumRetryInterval - time.Since(started); remaining > 0 {
+			timer := time.NewTimer(remaining)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+}
+
 func stdoutIsTerminal() bool {
 	info, err := os.Stdout.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
@@ -685,7 +720,7 @@ func stdoutIsTerminal() bool {
 
 func startDiscoveryIndicator(out io.Writer, animate bool) func() {
 	if !animate {
-		fmt.Fprintln(out, "searching for Apple TVs...")
+		fmt.Fprintln(out, "searching for AirPlay receivers...")
 		return func() {}
 	}
 
@@ -698,7 +733,7 @@ func startDiscoveryIndicator(out io.Writer, animate bool) func() {
 		defer ticker.Stop()
 		index := 0
 		for {
-			fmt.Fprintf(out, "\rsearching for Apple TVs... %c", frames[index])
+			fmt.Fprintf(out, "\rsearching for AirPlay receivers... %c", frames[index])
 			select {
 			case <-done:
 				return
@@ -712,7 +747,7 @@ func startDiscoveryIndicator(out io.Writer, animate bool) func() {
 		once.Do(func() {
 			close(done)
 			<-finished
-			fmt.Fprint(out, "\rsearching for Apple TVs... done\n")
+			fmt.Fprint(out, "\rsearching for AirPlay receivers... done\n")
 		})
 	}
 }

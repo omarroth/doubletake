@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"doubletake/internal/airplay"
 )
@@ -15,15 +17,56 @@ import (
 func TestDiscoveryIndicatorIsStableWhenRedirectedAndAnimatedOnTerminal(t *testing.T) {
 	var redirected bytes.Buffer
 	startDiscoveryIndicator(&redirected, false)()
-	if got := redirected.String(); got != "searching for Apple TVs...\n" {
+	if got := redirected.String(); got != "searching for AirPlay receivers...\n" {
 		t.Fatalf("redirected indicator = %q", got)
 	}
 
 	var terminal bytes.Buffer
 	stop := startDiscoveryIndicator(&terminal, true)
 	stop()
-	if got := terminal.String(); !strings.Contains(got, "searching for Apple TVs...") || !strings.HasSuffix(got, "done\n") {
+	if got := terminal.String(); !strings.Contains(got, "searching for AirPlay receivers...") || !strings.HasSuffix(got, "done\n") {
 		t.Fatalf("animated indicator = %q", got)
+	}
+}
+
+func TestDiscoverDevicesUntilFoundRetriesEmptyScans(t *testing.T) {
+	calls := 0
+	want := []airplay.AirPlayDevice{{Name: "Living Room", IP: "192.0.2.10"}}
+	got, err := discoverDevicesUntilFound(t.Context(), time.Second, 0, func(context.Context) ([]airplay.AirPlayDevice, error) {
+		calls++
+		if calls < 3 {
+			return nil, nil
+		}
+		return want, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 || len(got) != 1 || got[0].Name != want[0].Name || got[0].IP != want[0].IP {
+		t.Fatalf("discovery calls=%d devices=%+v, want 3 and %+v", calls, got, want)
+	}
+}
+
+func TestDiscoverDevicesUntilFoundHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	_, err := discoverDevicesUntilFound(ctx, time.Second, time.Second, func(context.Context) ([]airplay.AirPlayDevice, error) {
+		calls++
+		return nil, nil
+	})
+	if !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Fatalf("discovery error=%v calls=%d, want context cancellation before browse", err, calls)
+	}
+}
+
+func TestDiscoverDevicesUntilFoundReturnsFatalError(t *testing.T) {
+	want := errors.New("browse failed")
+	_, err := discoverDevicesUntilFound(t.Context(), time.Second, 0, func(context.Context) ([]airplay.AirPlayDevice, error) {
+		return nil, want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("discovery error=%v, want %v", err, want)
 	}
 }
 

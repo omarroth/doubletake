@@ -69,6 +69,7 @@ func (p *CapturePreparation) Fork(ctx context.Context, codec VideoCodec) (*Captu
 		ctx: ctx, cfg: cfg, kind: p.kind, timestampedOutput: p.timestampedOutput,
 		automaticHEVCAvail: p.automaticHEVCAvail, measuredVideoLatency: p.measuredVideoLatency,
 		pwNodeID: p.pwNodeID, streamSize: p.streamSize,
+		source: p.source, hasSource: p.hasSource,
 	}
 	if cfg.VideoCodec == VideoCodecH264 {
 		clone.measuredVideoLatency = 0
