@@ -819,8 +819,8 @@ func TestSendSyncPacketUsesNTPFormatWithoutTimeline(t *testing.T) {
 	if got := binary.BigEndian.Uint64(packet[8:16]); got != networkTime {
 		t.Fatalf("NTP timestamp = 0x%016x, want 0x%016x", got, networkTime)
 	}
-	if got := binary.BigEndian.Uint32(packet[16:20]); got != 4000 {
-		t.Fatalf("NTP apply RTP = %d, want 4000", got)
+	if got := binary.BigEndian.Uint32(packet[16:20]); got != rtpTime {
+		t.Fatalf("NTP next RTP = %d, want %d", got, rtpTime)
 	}
 }
 

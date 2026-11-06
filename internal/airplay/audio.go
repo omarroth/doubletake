@@ -1271,11 +1271,14 @@ func (as *AudioStream) sendSyncPacketAt(timingProtocol string, networkTime, time
 		binary.BigEndian.PutUint32(packet[16:20], playheadRTP)
 		binary.BigEndian.PutUint64(packet[20:28], timelineID)
 	} else {
-		// Legacy NTP TimeAnnounce uses the same RTP value in both fields.
+		// Legacy NTP sync keeps the network-time anchor and the next media RTP
+		// position distinct. Older receivers use their separation as the
+		// advertised playout latency; collapsing both fields can leave audio
+		// silent even though SETUP and packet delivery succeed.
 		packet[1] = audioSyncPayloadTypeNTP
 		binary.BigEndian.PutUint32(packet[4:8], playheadRTP)
 		binary.BigEndian.PutUint64(packet[8:16], networkTime)
-		binary.BigEndian.PutUint32(packet[16:20], playheadRTP)
+		binary.BigEndian.PutUint32(packet[16:20], rtpNow)
 	}
 
 	dbg("[AUDIO-SYNC] first=%t rtp=%d latency=%d network=0x%016x timeline=0x%016x",

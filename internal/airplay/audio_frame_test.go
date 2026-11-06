@@ -372,8 +372,8 @@ func TestSendSyncPacketAtUsesExplicitSourceRTPForPlayhead(t *testing.T) {
 	if got := binary.BigEndian.Uint32(packet[4:8]); got != 6000 {
 		t.Fatalf("playback RTP = %d, want 6000", got)
 	}
-	if got := binary.BigEndian.Uint32(packet[16:20]); got != 6000 {
-		t.Fatalf("apply RTP = %d, want latency-adjusted playhead 6000", got)
+	if got := binary.BigEndian.Uint32(packet[16:20]); got != 7000 {
+		t.Fatalf("next RTP = %d, want unadjusted source position 7000", got)
 	}
 }
 
