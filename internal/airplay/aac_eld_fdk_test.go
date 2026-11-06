@@ -34,7 +34,7 @@ func TestFDKAACELDEncodesRawFrame(t *testing.T) {
 
 func TestFDKAACELDUsesNegotiatedRedundancyFormats(t *testing.T) {
 	legacyStream, legacyPackets := streamAudioPacketsForCodecTest(t, "AES", nil, 4, AudioCodecAACELD, false)
-	assertAudioPacketSequences(t, legacyPackets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4})
+	assertAudioPacketSequences(t, legacyPackets, []uint16{1, 2, 1, 3, 2, 1, 4, 3, 2})
 	originals := make(map[uint16][]byte)
 	for _, packet := range legacyPackets {
 		seq := binary.BigEndian.Uint16(packet[2:4])

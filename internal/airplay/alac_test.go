@@ -295,6 +295,95 @@ func TestALACCompressedStreamDecodesLosslesslyAcrossSilence(t *testing.T) {
 	}
 }
 
+func TestALACLongMixedSignalStreamDecodesLosslessly(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is unavailable for independent ALAC decode")
+	}
+
+	const frameCount = 512
+	pcm := make([]byte, frameCount*alacScreenFrameSamples*audioBytesPerSampleFrame)
+	state := uint32(0x6d2b79f5)
+	var walkLeft, walkRight int32
+	for sampleIndex := 0; sampleIndex < frameCount*alacScreenFrameSamples; sampleIndex++ {
+		frameIndex := sampleIndex / alacScreenFrameSamples
+		frameSample := sampleIndex % alacScreenFrameSamples
+		var left, right int16
+		switch frameIndex % 12 {
+		case 0, 1:
+			// Whole silent frames exercise start/stop boundaries.
+		case 2, 3, 4:
+			left = int16(math.Sin(2*math.Pi*440*float64(sampleIndex)/44100) * 28000)
+			right = int16(math.Sin(2*math.Pi*659.25*float64(sampleIndex)/44100) * 22000)
+		case 5:
+			// Full-scale transitions and isolated impulses stress predictor resets.
+			if frameSample%64 < 32 {
+				left, right = 32767, -32768
+			}
+			if frameSample == 176 {
+				left, right = -32768, 32767
+			}
+		case 6, 7, 8:
+			// Correlated random walks resemble broad-band program material while
+			// repeatedly changing the adaptive predictor's preferred order.
+			state = state*1664525 + 1013904223
+			walkLeft += int32(int8(state>>24)) * 17
+			if walkLeft < -30000 {
+				walkLeft = -30000
+			} else if walkLeft > 30000 {
+				walkLeft = 30000
+			}
+			state = state*1664525 + 1013904223
+			walkRight += int32(int8(state>>24)) * 13
+			if walkRight < -30000 {
+				walkRight = -30000
+			} else if walkRight > 30000 {
+				walkRight = 30000
+			}
+			left = int16(walkLeft)
+			right = int16((walkLeft + walkRight) / 2)
+		default:
+			// Incompressible input selects the verbatim path.
+			state = state*1664525 + 1013904223
+			left = int16(state >> 16)
+			state = state*1664525 + 1013904223
+			right = int16(state >> 16)
+		}
+		offset := sampleIndex * audioBytesPerSampleFrame
+		binary.LittleEndian.PutUint16(pcm[offset:], uint16(left))
+		binary.LittleEndian.PutUint16(pcm[offset+2:], uint16(right))
+	}
+
+	encoder := &alacEncoder{}
+	frames := make([][]byte, frameCount)
+	frameBytes := alacScreenFrameSamples * audioBytesPerSampleFrame
+	for frameIndex := range frames {
+		encoded := make([]byte, 4096)
+		start := frameIndex * frameBytes
+		n := encoder.Encode(encoded, pcm[start:start+frameBytes])
+		frames[frameIndex] = append([]byte(nil), encoded[:n]...)
+	}
+
+	temporary := t.TempDir()
+	cafPath := filepath.Join(temporary, "mixed.caf")
+	pcmPath := filepath.Join(temporary, "decoded.pcm")
+	if err := os.WriteFile(cafPath, multiFrameALACCAF(frames), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(ffmpeg, "-v", "error", "-y", "-i", cafPath,
+		"-f", "s16le", "-acodec", "pcm_s16le", pcmPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg rejected long ALAC stream: %v\n%s", err, output)
+	}
+	decoded, err := os.ReadFile(pcmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, pcm) {
+		t.Fatalf("long mixed-signal PCM differs: got %d bytes, want %d", len(decoded), len(pcm))
+	}
+}
+
 func TestAudioCaptureUsesCompressedALAC(t *testing.T) {
 	pcm := testALACPCM()
 	capture := &AudioCapture{

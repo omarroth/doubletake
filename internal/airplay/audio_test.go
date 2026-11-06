@@ -82,12 +82,8 @@ func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
 			stream, packets := streamAudioPacketsForTest(t, security, nil, 12)
 			var wantSequences []uint16
 			for seq := uint16(1); seq <= 12; seq++ {
-				first := uint16(1)
-				if seq > 2 {
-					first = seq - 2
-				}
-				for redundant := first; redundant <= seq; redundant++ {
-					wantSequences = append(wantSequences, redundant)
+				for age := uint16(0); age <= 2 && age < seq; age++ {
+					wantSequences = append(wantSequences, seq-age)
 				}
 			}
 			assertAudioPacketSequences(t, packets, wantSequences)
@@ -125,7 +121,7 @@ func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
 func TestEncryptedAudioRedundancyRecoversTwoLostBursts(t *testing.T) {
 	const frames = 12
 	stream, packets := streamAudioPacketsForTest(t, "ChaCha", nil, frames)
-	// Lose both startup bursts: [1] and [1,2]. The next burst must recover
+	// Lose both startup bursts: [1] and [2,1]. The next burst must recover
 	// both frames, without a retransmission round trip or a new nonce.
 	if len(packets) < 6 {
 		t.Fatalf("only %d packets sent", len(packets))
@@ -339,7 +335,7 @@ func TestStreamAudioRedundancyPreservesCaptureGapsAndResets(t *testing.T) {
 		{PTS: base.Add(audioSamplesDuration(6170)), SourceRTP: 0, HasSourceRTP: true},
 	}
 	_, packets := streamAudioPacketsForTest(t, "AES", &positionedPCMFramesForTest{positions: positions}, len(positions))
-	assertAudioPacketSequences(t, packets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6})
+	assertAudioPacketSequences(t, packets, []uint16{1, 2, 1, 3, 2, 1, 4, 3, 2, 5, 4, 3, 6, 5, 4})
 	firstRTP := binary.BigEndian.Uint32(packets[0][4:8])
 	wantOffsets := []uint32{0, 352, 704, 5466, 5818, 6170}
 	for _, packet := range packets {
@@ -421,7 +417,7 @@ func TestStreamAudioKeepsTimestampedFramesWithPositivePlayoutLead(t *testing.T) 
 	if elapsed := time.Since(started); elapsed < 3*audioSamplesDuration(352) {
 		t.Fatalf("timestamped callback batch was sent without cadence pacing in %v", elapsed)
 	}
-	assertAudioPacketSequences(t, packets, []uint16{1, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6})
+	assertAudioPacketSequences(t, packets, []uint16{1, 2, 1, 3, 2, 1, 4, 3, 2, 5, 4, 3, 6, 5, 4})
 }
 
 func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFrameReader, count int, rfc2198 ...bool) (*AudioStream, [][]byte) {

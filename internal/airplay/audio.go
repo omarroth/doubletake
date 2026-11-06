@@ -1781,11 +1781,16 @@ videoReady:
 			retransmitBuf[retransmitIdx] = audioFrame{payload: payload, rtpTime: frameRTP, seq: frameSeq}
 			retransmitIdx = (retransmitIdx + 1) % retransmitDepth
 			available := min(frameCount, retransmitDepth)
-			start := (retransmitIdx - available + retransmitDepth) % retransmitDepth
-			for i := 0; i < available; i++ {
-				frame := &retransmitBuf[(start+i)%retransmitDepth]
+			// Apple's APMessageRingCopyNextBurst starts with the next unsent
+			// message, then walks backward through its configured payload
+			// redundancy. Send the deadline-sensitive current frame before its
+			// recovery copies so congestion cannot make new audio wait behind old
+			// packets.
+			for age := 0; age < available; age++ {
+				index := (retransmitIdx - 1 - age + retransmitDepth) % retransmitDepth
+				frame := &retransmitBuf[index]
 				var reuseNonce *uint64
-				if i < available-1 {
+				if age > 0 {
 					reuseNonce = &frame.nonce
 				}
 				nonce, err := sendPacket(frame.payload, frame.rtpTime, frame.seq, audioDataPayloadType, reuseNonce)
