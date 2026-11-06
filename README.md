@@ -152,7 +152,8 @@ sound settings (PulseAudio or PipeWire with `pipewire-pulse`). Select that outpu
 for the applications you want to send, or make it your default output for system
 audio. Sound routed there goes to the receivers without playing through your local
 speakers. Its volume and mute controls affect the captured audio, including media
-keys when doubletake is the selected system output.
+keys when doubletake is the selected system output. The sound server remembers
+those controls when doubletake recreates the output for a later session.
 
 The daemon shares this output across its receivers. It removes it when the last
 audio capture stops, including cancellation or a capture-process failure. doubletake

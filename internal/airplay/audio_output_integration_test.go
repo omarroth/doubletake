@@ -145,6 +145,9 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 		t.Fatalf("unmuting did not restore sound: %.1f vs %.1f", unmuted, full)
 	}
 	t.Logf("PCM RMS: full=%.1f 50%%=%.1f muted=%.1f restored=%.1f", full, half, muted, unmuted)
+	// A stable sink identity lets module-device-restore retain the user's level
+	// after doubletake removes and recreates the output.
+	run("set-sink-volume", name, "37%")
 	cancelFirst()
 	first.Stop()
 	if !strings.Contains(run("list", "short", "sinks"), name) {
@@ -164,7 +167,7 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 			failed.Stop()
 			t.Fatal("unavailable AAC-ELD encoder unexpectedly started")
 		}
-		if strings.Contains(run("list", "short", "sinks"), "doubletake_") {
+		if strings.Contains(run("list", "short", "sinks"), stableAudioOutputName) {
 			t.Fatal("encoder startup failure leaked its output")
 		}
 	}
@@ -175,13 +178,17 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restart.Stop()
+	if restored := run("get-sink-volume", sharedAudioOutput.name); !strings.Contains(restored, "37%") {
+		t.Fatalf("recreated output did not restore its volume: %s", restored)
+	}
+	run("set-sink-volume", sharedAudioOutput.name, "100%")
 	stopRestart()
 	select {
 	case <-restart.waitCh:
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	if strings.Contains(run("list", "short", "sinks"), "doubletake_") {
+	if strings.Contains(run("list", "short", "sinks"), stableAudioOutputName) {
 		t.Fatal("canceled capture leaked its output")
 	}
 }
