@@ -71,7 +71,7 @@ Path to credentials file (default: ~/.config/doubletake/credentials.json)
 Frames per second (default: 30)
 .TP
 .B \-bitrate \fIKBPS\fR
-Target bitrate in kbps (0 = auto, default: 0)
+Target bitrate in kbps. Zero selects an automatic resolution/FPS budget once at capture startup; it does not adapt during the session (default: 0)
 .TP
 .B \-target-latency-ms \fIMS\fR
 Override both audio and video playout latency in milliseconds. Zero selects the

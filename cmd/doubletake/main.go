@@ -66,7 +66,7 @@ func main() {
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
 	expectedDeviceID := flag.String("device-id", "", "Device ID of the receiver meant, e.g. from discovery. Its saved pairing applies even if the device at -target names itself differently, and such a device is refused")
 	fps := flag.Int("fps", 30, "Frames per second")
-	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = auto, default tunes for resolution/FPS)")
+	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic resolution/FPS budget selected at capture startup)")
 	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon uses shared 250 ms)")
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto uses H.264 for receiver compatibility)")

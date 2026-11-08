@@ -278,7 +278,7 @@ doubletake -target 192.168.1.77 -creds airplay-credentials.json
 doubletake -target 192.168.1.77 -fps 30 -bitrate 0
 
 # Force a lower bitrate on weaker Wi-Fi
-doubletake -target 192.168.1.77 -bitrate 4500
+doubletake -target 192.168.1.77 -bitrate 2500
 
 # Override the automatic audio/video playout latencies with one joint value
 doubletake -target 192.168.1.77 -target-latency-ms 100
@@ -323,7 +323,7 @@ doubletake-ctl disconnect
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
 | `-pair` | false | Force new pairing |
 | `-fps` | 30 | Frames per second |
-| `-bitrate` | 0 | Video bitrate in kbps (`0` = auto) |
+| `-bitrate` | 0 | Video bitrate in kbps (`0` = automatic resolution/FPS budget) |
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
@@ -337,6 +337,9 @@ doubletake-ctl disconnect
 | `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock`, or `/tmp/doubletake.sock` | Daemon control socket path |
 | `-debug` | false | Verbose debug logging |
 | `-help`, `-h` | | Show command-line help |
+
+Automatic bitrate is selected once when capture starts; it does not currently
+change in response to network conditions during a session.
 
 Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
 `nvh264enc`, `vah264enc`, `v4l2h264enc`, `openh264enc`, then `x264enc`. Explicit selections
