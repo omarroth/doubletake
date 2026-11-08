@@ -797,6 +797,35 @@ func TestRandomRTPTime(t *testing.T) {
 	}
 }
 
+func TestAudioDynamicLatencyReportSignalsTimeAnnounce(t *testing.T) {
+	tiers, _ := dynamicAudioLatencyTiers(samplesFor44k1(defaultAudioLatencyNormal))
+	stream := &AudioStream{
+		latencySamples:  samplesFor44k1(defaultAudioLatencyNormal),
+		adaptiveLatency: true,
+		latencyTiers:    tiers,
+		latencyChanged:  make(chan struct{}, 1),
+	}
+
+	for index := 0; index < 12; index++ {
+		stream.applyPerformanceReport(audioPerformanceReport{durationSecs: 5, renderDeadlineMinMS: 5})
+	}
+	if got := stream.currentLatencySamples(); got != tiers[1] {
+		t.Fatalf("latency after clean window = %v, want %v", audioLatencyDuration(got), audioLatencyDuration(tiers[1]))
+	}
+	select {
+	case <-stream.latencyChanged:
+	default:
+		t.Fatal("latency change did not request an immediate TimeAnnounce")
+	}
+
+	if !stream.applyPerformanceReport(audioPerformanceReport{durationSecs: 5, renderDeadlineMinMS: 5, weightedGlitches: 0.25}) {
+		t.Fatal("receiver glitch report did not move to a safer tier")
+	}
+	if got := stream.currentLatencySamples(); got != tiers[0] {
+		t.Fatalf("latency after glitches = %v, want %v", audioLatencyDuration(got), audioLatencyDuration(tiers[0]))
+	}
+}
+
 func TestSendSyncPacketUsesNTPFormatWithoutTimeline(t *testing.T) {
 	const (
 		networkTime = uint64(0x83aa7e8012345678)

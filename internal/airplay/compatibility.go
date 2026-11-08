@@ -21,28 +21,37 @@ const (
 )
 
 type receiverCompatibility struct {
-	timing           string
-	audioSecurity    audioSecurityMode
-	audioConnections audioConnectionLayout
-	audioCodec       AudioCodec
-	audioRFC2198     bool
-	fairPlayRoots    fairPlayRootPlacement
+	timing                string
+	audioSecurity         audioSecurityMode
+	audioConnections      audioConnectionLayout
+	audioCodec            AudioCodec
+	audioRFC2198          bool
+	audioMediaDataControl bool
+	fairPlayRoots         fairPlayRootPlacement
 }
 
 const (
 	// These bit numbers are AirPlay feature indices, not receiver fingerprints.
-	// Feature 41 advertises PTP and feature 59 advertises the streamConnections
-	// audio descriptor.
+	// Feature 41 advertises PTP, feature 59 advertises streamConnections, and
+	// feature 60 advertises the audio MediaDataControl performance-report stream.
 	featureAudioFormatPCM44100Stereo    uint   = 18
 	featureAudioFormatALAC44100Stereo   uint   = 19
 	featureAudioFormatAACLC44100Stereo  uint   = 20
 	featureAudioFormatAACELD44100Stereo uint   = 21
+	featureVolumeControl                uint   = 32
 	featurePTP                          uint   = 41
 	featureAudioStreamConnectionSetup   uint   = 59
+	featureAudioMediaDataControl        uint   = 60
 	featureRFC2198Redundancy            uint   = 61
 	minimumPTPSourceVersionMajor               = 354
 	minimumPTPSourceVersionMinor               = 54
 	minimumPTPSourceVersionPatch               = 6
+	minimumMediaDataControlVersionMajor        = 450
+	minimumMediaDataControlVersionMinor        = 1
+	minimumMediaDataControlVersionPatch        = 0
+	minimumInitialVolumeVersionMajor           = 120
+	minimumInitialVolumeVersionMinor           = 2
+	minimumInitialVolumeVersionPatch           = 0
 	screenAudioFormatPCM44100Stereo     uint64 = 0x00000800
 	screenAudioFormatALAC               uint64 = 0x00040000
 	screenAudioFormatAACLC44100Stereo   uint64 = 0x00400000
@@ -85,6 +94,13 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 	if info.HasFeature(featureAudioStreamConnectionSetup) {
 		policy.audioConnections = audioLayoutStreamConnections
 	}
+	// Apple's SupportsAudioMediaDataControl property requires both the
+	// streamConnections and MediaDataControl feature bits plus sourceVersion
+	// 450.1.0. Keep this independent of receiver identity.
+	policy.audioMediaDataControl =
+		info.HasFeature(featureAudioStreamConnectionSetup) &&
+			info.HasFeature(featureAudioMediaDataControl) &&
+			supportsMediaDataControlSourceVersion(info.SourceVersion)
 	policy.audioRFC2198 = info.HasFeature(featureRFC2198Redundancy)
 
 	// The sender gates PTP on both feature 41 and SourceVersion 354.54.6. PTP is
@@ -131,6 +147,41 @@ func supportsPTPSourceVersion(sourceVersion string) bool {
 		minimumPTPSourceVersionMajor,
 		minimumPTPSourceVersionMinor,
 		minimumPTPSourceVersionPatch,
+	) >= 0
+}
+
+func supportsMediaDataControlSourceVersion(sourceVersion string) bool {
+	major, minor, patch, ok := parseSourceVersion(sourceVersion)
+	if !ok {
+		return false
+	}
+	return compareVersion(
+		major, minor, patch,
+		minimumMediaDataControlVersionMajor,
+		minimumMediaDataControlVersionMinor,
+		minimumMediaDataControlVersionPatch,
+	) >= 0
+}
+
+// supportsInitialVolume follows AirPlaySender's SupportsInitialVolume
+// property: feature 32 advertises it directly, while receivers at
+// SourceVersion 120.2.0 or newer are known to implement GET_PARAMETER volume.
+func supportsInitialVolume(info *ReceiverInfo) bool {
+	if info == nil {
+		return false
+	}
+	if info.HasFeature(featureVolumeControl) {
+		return true
+	}
+	major, minor, patch, ok := parseSourceVersion(info.SourceVersion)
+	if !ok {
+		return false
+	}
+	return compareVersion(
+		major, minor, patch,
+		minimumInitialVolumeVersionMajor,
+		minimumInitialVolumeVersionMinor,
+		minimumInitialVolumeVersionPatch,
 	) >= 0
 }
 

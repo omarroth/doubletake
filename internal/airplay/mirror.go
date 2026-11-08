@@ -267,8 +267,11 @@ type MirrorSession struct {
 	mediaClock         *mediaClock
 
 	// Audio
-	audioStream *AudioStream
-	noAudio     bool
+	audioStream           *AudioStream
+	mediaDataConn         net.Conn
+	noAudio               bool
+	receiverVolumeDB      float64
+	receiverVolumeDBKnown bool
 }
 
 func selectAudioSecurityMode(encrypted bool) audioSecurityMode {
@@ -676,6 +679,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 
 	audioDataPort := 0
 	audioControlPort := 0
+	mediaDataControlPort := 0
 	var receiverEventPort int
 	var attemptedEventPort int
 	audioControlLPort := audioCtrlConn.LocalAddr().(*net.UDPAddr).Port
@@ -976,8 +980,21 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	// Create the audio stream after the control-first probe, or make it the first
 	// accepted request after a legacy-order rejection.
 	audioCT, audioSPF, audioFmt, latMin, latMax, _ := selectedAudioCodec.Info()
+	audioLatencyTiers, profileSupportsDynamicLatency := dynamicAudioLatencyTiers(audioLatencySamples)
+	adaptiveAudioLatency := !cfg.NoAudio && cfg.PlayoutLatency <= 0 && !targetLatencyIsExplicit() && profileSupportsDynamicLatency
+	mediaDataControlEnabled := adaptiveAudioLatency && policy.audioMediaDataControl &&
+		policy.audioConnections == audioLayoutStreamConnections && c.encrypted &&
+		c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0
+	var mediaDataControlSeed uint64
+	if mediaDataControlEnabled {
+		var seedBytes [8]byte
+		if _, err := io.ReadFull(rand.Reader, seedBytes[:]); err != nil {
+			return nil, fmt.Errorf("generate MediaDataControl seed: %w", err)
+		}
+		mediaDataControlSeed = binary.BigEndian.Uint64(seedBytes[:])
+	}
 	// Screen audio has no sender-side minimum latency. The maximum is the
-	// playout lead carried by TimeAnnounce; using that lead as the minimum too
+	// profile's initial (and largest) mapping; using that lead as the minimum too
 	// makes the receiver add it again when calculating its render offset.
 	latMin = 0
 	latMax = int64(audioLatencySamples)
@@ -1004,6 +1021,9 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	buildAudioSetup := func(layout audioConnectionLayout) (map[string]interface{}, map[string]interface{}) {
 		stream := clonePlistMap(audioStreamBase)
 		addScreenAudioStreamFields(stream, audioChaChaKey, audioControlLPort, layout)
+		if mediaDataControlEnabled && layout == audioLayoutStreamConnections {
+			addMediaDataControlStreamConnection(stream, mediaDataControlSeed)
+		}
 		var request map[string]interface{}
 		if sessionFirstSetup {
 			request = streamOnlyPlist(stream)
@@ -1056,6 +1076,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		}
 		return nil, err
 	}
+	mediaDataControlEnabled = mediaDataControlEnabled && audioLayout == audioLayoutStreamConnections
 	audioSetupCommitted = true
 	startReceiverTimingProbes(audioResp)
 	observeEventPort(audioResp)
@@ -1094,6 +1115,9 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 			streamType := plistInt(stream["type"])
 			if streamType == 96 {
 				audioDataPort, audioControlPort = plistStreamPorts(stream)
+				if mediaDataControlEnabled {
+					mediaDataControlPort = plistMediaDataControlPort(stream)
+				}
 				if latency := plistInt(stream["arrivalToRenderLatencyMs"]); latency > 0 {
 					// This is the receiver's platform/I/O delay, not the RTP
 					// playout lead negotiated in latencyMax and TimeAnnounce.
@@ -1288,7 +1312,10 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	// Set up audio stream if the receiver provided audio ports
 	if audioDataPort > 0 {
 		audioCT := byte(selectedAudioCodec) // ALAC=2 (matches SETUP descriptor)
-		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, policy.audioRFC2198, audioCtrlConn, audioDataConn)
+		if !adaptiveAudioLatency || !mediaDataControlEnabled || mediaDataControlPort <= 0 {
+			audioLatencyTiers = nil
+		}
+		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, policy.audioRFC2198, audioLatencyTiers, audioCtrlConn, audioDataConn)
 		if err != nil {
 			audioCtrlConn.Close()
 			audioDataConn.Close()
@@ -1301,6 +1328,22 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		audioCtrlConn.Close()
 		audioDataConn.Close()
 		dbg("[SETUP] receiver did not provide audio ports, skipping audio")
+	}
+
+	if mediaDataControlEnabled && mediaDataControlPort > 0 && session.audioStream != nil {
+		channel, channelErr := c.dialMediaDataControl(mediaDataControlPort, mediaDataControlSeed)
+		if channelErr != nil {
+			dbg("[AUDIO-DLM] MediaDataControl unavailable; retaining profile maximum: %v", channelErr)
+		} else {
+			session.mediaDataConn = channel.conn
+			session.startWorker(func() {
+				if err := serveMediaDataControl(sessionCtx, channel, session.audioStream); err != nil {
+					dbg("[AUDIO-DLM] MediaDataControl stream failed: %v", err)
+				}
+			})
+		}
+	} else if adaptiveAudioLatency {
+		dbg("[AUDIO-DLM] receiver did not establish MediaDataControl; retaining profile maximum")
 	}
 
 	// Monitor the data connection so a receiver-side disconnect terminates the
@@ -1343,6 +1386,19 @@ func addModernScreenAudioStreamFields(stream map[string]interface{}, key []byte,
 			"streamConnectionKeyPort": int64(controlPort),
 		},
 	}
+}
+
+func addMediaDataControlStreamConnection(stream map[string]interface{}, seed uint64) bool {
+	connections, ok := stream["streamConnections"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	connections["streamConnectionTypeMediaDataControl"] = map[string]interface{}{
+		// CFNumber carries the seed as 64 raw bits. The DataStream salt formats
+		// that value as an unsigned decimal, including when its high bit is set.
+		"streamConnectionKeyEncryptionSeed": int64(seed),
+	}
+	return true
 }
 
 func addScreenAudioStreamFields(stream map[string]interface{}, key []byte, controlPort int, layout audioConnectionLayout) {
@@ -2188,6 +2244,9 @@ func (s *MirrorSession) Close() error {
 		if s.audioStream != nil {
 			s.audioStream.Close()
 		}
+		if s.mediaDataConn != nil {
+			_ = s.mediaDataConn.Close()
+		}
 		if s.eventConn != nil {
 			_ = s.eventConn.Close()
 		}
@@ -2268,6 +2327,18 @@ func plistStreamPorts(stream map[string]interface{}) (dataPort, controlPort int)
 		}
 	}
 	return dataPort, controlPort
+}
+
+func plistMediaDataControlPort(stream map[string]interface{}) int {
+	streamConnections, ok := stream["streamConnections"].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	control, ok := streamConnections["streamConnectionTypeMediaDataControl"].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	return plistInt(control["streamConnectionKeyPort"])
 }
 
 // HasAudio returns true if the session has an active audio stream.

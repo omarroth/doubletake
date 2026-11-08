@@ -157,3 +157,32 @@ func TestConnectionLatencyHintName(t *testing.T) {
 		}
 	}
 }
+
+func TestDynamicAudioLatencyProfilesMatchReferenceVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial time.Duration
+		want    []time.Duration
+	}{
+		{name: "low", initial: 50 * time.Millisecond, want: []time.Duration{50, 46, 40, 36, 30}},
+		{name: "normal", initial: 85 * time.Millisecond, want: []time.Duration{85, 81, 75, 71, 65}},
+		{name: "high", initial: 170 * time.Millisecond, want: []time.Duration{170, 166, 160, 156, 150}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tiers, ok := dynamicAudioLatencyTiers(samplesFor44k1(test.initial))
+			if !ok || len(tiers) != len(test.want) {
+				t.Fatalf("profile = %v, %t, want %d tiers", tiers, ok, len(test.want))
+			}
+			for index, milliseconds := range test.want {
+				want := samplesFor44k1(milliseconds * time.Millisecond)
+				if tiers[index] != want {
+					t.Fatalf("tier %d = %v, want %v", index, audioLatencyDuration(tiers[index]), milliseconds*time.Millisecond)
+				}
+			}
+		})
+	}
+	if tiers, ok := dynamicAudioLatencyTiers(samplesFor44k1(200 * time.Millisecond)); ok || tiers != nil {
+		t.Fatalf("200ms profile = %v, %t, want unsupported", tiers, ok)
+	}
+}

@@ -1433,7 +1433,8 @@ type StreamConfig struct {
 	// PreferredAudioCodec changes preference only when that format is offered.
 	PreferredAudioCodec AudioCodec
 	// PlayoutLatency fixes both media leads for a shared sender timeline. Zero
-	// retains the ordinary per-connection policy. It cannot grow mid-session.
+	// retains the ordinary per-connection policy. Receivers which provide live
+	// performance reports may then select lower latency within that profile.
 	PlayoutLatency       time.Duration
 	MeasuredVideoLatency time.Duration // measured minimum lead for the local HEVC capture path
 	NoAudio              bool          // Disable audio streaming

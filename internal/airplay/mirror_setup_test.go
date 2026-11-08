@@ -982,6 +982,24 @@ func TestModernAudioStreamFields(t *testing.T) {
 	}
 }
 
+func TestMediaDataControlStreamConnectionPreservesSeedBits(t *testing.T) {
+	const seed = uint64(18446744073709551600)
+	stream := map[string]interface{}{}
+	addModernScreenAudioStreamFields(stream, make([]byte, 32), 6001)
+	if !addMediaDataControlStreamConnection(stream, seed) {
+		t.Fatal("failed to add MediaDataControl to modern descriptor")
+	}
+	decoded := roundTripPlistMap(t, stream)
+	connections, _ := decoded["streamConnections"].(map[string]interface{})
+	control, _ := connections["streamConnectionTypeMediaDataControl"].(map[string]interface{})
+	if got := plistUint64(control["streamConnectionKeyEncryptionSeed"]); got != seed {
+		t.Fatalf("MediaDataControl seed = %d, want %d", got, seed)
+	}
+	if addMediaDataControlStreamConnection(map[string]interface{}{}, seed) {
+		t.Fatal("legacy descriptor accepted MediaDataControl")
+	}
+}
+
 func TestAudioVolumeBody(t *testing.T) {
 	for _, test := range []struct {
 		muted bool

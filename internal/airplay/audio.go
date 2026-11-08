@@ -723,26 +723,38 @@ type audioPacketHistoryEntry struct {
 
 // AudioStream manages the RTP audio channel to the AirPlay receiver.
 type AudioStream struct {
-	conn            net.PacketConn // local UDP socket for sending audio
-	ctrlConn        net.PacketConn // control port for sync/resend
-	remoteAddr      *net.UDPAddr   // receiver's audio data address
-	ctrlAddr        *net.UDPAddr   // receiver's audio control address
-	rtpTime         uint32
-	ssrc            uint32
-	cipher          cipher.Block // AES-128 for audio encryption (nil = no encryption)
-	aesIV           []byte       // 16-byte IV for AES-CBC
-	chachaCipher    cipher.AEAD  // ChaCha20-Poly1305 for modern Apple receivers
-	securityMode    audioSecurityMode
-	chachaNonce     uint64
-	chachaNonceMode audioChaChaNonceMode
-	chachaAADMode   audioChaChaAADMode
-	rfc2198         bool
-	ct              byte   // AirPlay compression type (2=ALAC, 8=AAC-ELD)
-	spf             uint16 // samples per frame
-	latencySamples  uint32 // audio latency in samples (for sync packets)
-	mu              sync.Mutex
-	historyMu       sync.RWMutex
-	packetHistory   [audioRetransmitHistoryPackets]audioPacketHistoryEntry
+	conn               net.PacketConn // local UDP socket for sending audio
+	ctrlConn           net.PacketConn // control port for sync/resend
+	remoteAddr         *net.UDPAddr   // receiver's audio data address
+	ctrlAddr           *net.UDPAddr   // receiver's audio control address
+	rtpTime            uint32
+	ssrc               uint32
+	cipher             cipher.Block // AES-128 for audio encryption (nil = no encryption)
+	aesIV              []byte       // 16-byte IV for AES-CBC
+	chachaCipher       cipher.AEAD  // ChaCha20-Poly1305 for modern Apple receivers
+	securityMode       audioSecurityMode
+	chachaNonce        uint64
+	chachaNonceMode    audioChaChaNonceMode
+	chachaAADMode      audioChaChaAADMode
+	rfc2198            bool
+	ct                 byte   // AirPlay compression type (2=ALAC, 8=AAC-ELD)
+	spf                uint16 // samples per frame
+	latencySamples     uint32 // audio latency in samples (for sync packets)
+	adaptiveLatency    bool
+	latencyTiers       []uint32 // safest/highest latency first
+	latencyTier        int
+	latencyChanged     chan struct{}
+	performanceReports []audioPerformanceReport
+	mu                 sync.Mutex
+	historyMu          sync.RWMutex
+	packetHistory      [audioRetransmitHistoryPackets]audioPacketHistoryEntry
+}
+
+func (as *AudioStream) currentLatencySamples() uint32 {
+	as.mu.Lock()
+	latency := as.latencySamples
+	as.mu.Unlock()
+	return latency
 }
 
 // AudioCodec returns the codec negotiated for this mirror session.
@@ -757,7 +769,7 @@ func (s *MirrorSession) AudioCodec() AudioCodec {
 // Real AirPlay senders use two separate UDP sockets for audio:
 //   - ctrlConn: the declared controlPort socket → sends sync/control to receiver's controlPort
 //   - dataConn: a separate socket at controlPort+1 → sends audio data to receiver's dataPort
-func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, latencyOverride uint32, rfc2198 bool, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
+func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, latencyOverride uint32, rfc2198 bool, latencyTiers []uint32, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
 	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.sessionPeerHost(), fmt.Sprintf("%d", dataPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve audio remote: %w", err)
@@ -812,6 +824,11 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 		ct:              ct,
 		spf:             spf,
 		latencySamples:  latencySamples,
+		adaptiveLatency: len(latencyTiers) > 0,
+		latencyTiers:    append([]uint32(nil), latencyTiers...),
+	}
+	if as.adaptiveLatency {
+		as.latencyChanged = make(chan struct{}, 1)
 	}
 
 	securityName := "none"
@@ -830,6 +847,10 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 	}
 	if latencyOverride > 0 {
 		dbg("[AUDIO] audio latency: %d samples", latencySamples)
+	}
+	if as.adaptiveLatency {
+		dbg("[AUDIO] dynamic latency profile enabled: maximum=%v minimum=%v tiers=%d",
+			audioLatencyDuration(as.latencyTiers[0]), audioLatencyDuration(as.latencyTiers[len(as.latencyTiers)-1]), len(as.latencyTiers))
 	}
 	dbg("[AUDIO] local ports: data=%d (→remote %d) ctrl=%d (→remote %d)",
 		dataLocalPort, dataPort, ctrlLocalPort, controlPort)
@@ -1236,9 +1257,7 @@ func (as *AudioStream) sendSyncPacket(timingProtocol string, networkTime, timeli
 // sendSyncPacketAt maps the latency-adjusted playback position to the network
 // time of a captured source boundary.
 func (as *AudioStream) sendSyncPacketAt(timingProtocol string, networkTime, timelineID uint64, rtpNow uint32, isFirst bool) error {
-	as.mu.Lock()
-	latencySamples := as.latencySamples
-	as.mu.Unlock()
+	latencySamples := as.currentLatencySamples()
 
 	packetSize := 0
 	switch timingProtocol {
@@ -1520,12 +1539,13 @@ videoReady:
 			}
 			return fmt.Errorf("audio read first frame: %w", err)
 		}
-		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, mediaNow(), audioStream.latencySamples, minimumAudioSendLead) {
+		latencySamples := audioStream.currentLatencySamples()
+		if firstFrameSize > 0 && audioFrameIsStale(firstFramePosition.PTS, mediaNow(), latencySamples, minimumAudioSendLead) {
 			catchupFrames++
 			if catchupFrames >= maximumInitialCatchupFrames {
 				age := time.Since(firstFramePosition.PTS)
 				return fmt.Errorf("audio capture cannot meet %v playout lead after discarding %d stale frames (source age %v)",
-					audioLatencyDuration(audioStream.latencySamples), catchupFrames, age)
+					audioLatencyDuration(latencySamples), catchupFrames, age)
 			}
 			firstFrameSize = 0
 		}
@@ -1534,7 +1554,7 @@ videoReady:
 		dbg("[AUDIO] discarded %d timestamped startup frames to restore positive playout lead", catchupFrames)
 	}
 	timestampedAudio := !firstFramePosition.PTS.IsZero()
-	pacingFrames := audioPacingFramesForLatency(audioStream.latencySamples, spf)
+	pacingFrames := audioPacingFramesForLatency(audioStream.currentLatencySamples(), spf)
 	pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
 	if timestampedAudio {
 		dbg("[AUDIO] timestamped frame pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
@@ -1561,7 +1581,9 @@ videoReady:
 	dbg("[AUDIO] sent initial source clock mapping pts=%v sourceRTP=%d rtp=%d",
 		firstFramePosition.PTS, firstFramePosition.SourceRTP, firstFrameRTP)
 
-	// Refresh TimeAnnounce once per second.
+	// Refresh TimeAnnounce once per second and immediately after a dynamic
+	// latency change so the receiver does not spend the rest of the interval
+	// rendering against the old playhead mapping.
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
@@ -1572,30 +1594,36 @@ videoReady:
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !timestampedAudio {
-					clockNow, timelineID := s.audioClockNow()
-					if err := audioStream.sendSyncPacket(s.timingProtocol, clockNow, timelineID, false); err != nil {
-						dbg("[AUDIO] sync error: %v", err)
-					}
-					continue
-				}
-				announceMu.Lock()
-				// Sample both clocks at the current host instant. Quantizing this
-				// mapping to a codec-frame boundary makes successive one-second
-				// announces jump by either 125 or 126 frames and invites receiver
-				// phase corrections.
-				announcedAt := mediaNow()
-				rtpNow, ok := rtpClock.rtpAt(announcedAt)
-				if !ok {
-					announceMu.Unlock()
-					continue
-				}
-				clockNow, timelineID := s.audioClockAt(announcedAt)
-				err := audioStream.sendSyncPacketAt(s.timingProtocol, clockNow, timelineID, rtpNow, false)
-				announceMu.Unlock()
-				if err != nil {
+			case <-audioStream.latencyChanged:
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if !timestampedAudio {
+				clockNow, timelineID := s.audioClockNow()
+				if err := audioStream.sendSyncPacket(s.timingProtocol, clockNow, timelineID, false); err != nil {
 					dbg("[AUDIO] sync error: %v", err)
 				}
+				continue
+			}
+			announceMu.Lock()
+			// Sample both clocks at the current host instant. Quantizing this
+			// mapping to a codec-frame boundary makes successive one-second
+			// announces jump by either 125 or 126 frames and invites receiver
+			// phase corrections.
+			announcedAt := mediaNow()
+			rtpNow, ok := rtpClock.rtpAt(announcedAt)
+			if !ok {
+				announceMu.Unlock()
+				continue
+			}
+			clockNow, timelineID := s.audioClockAt(announcedAt)
+			err := audioStream.sendSyncPacketAt(s.timingProtocol, clockNow, timelineID, rtpNow, false)
+			announceMu.Unlock()
+			if err != nil {
+				dbg("[AUDIO] sync error: %v", err)
 			}
 		}
 	}()
@@ -1708,13 +1736,18 @@ videoReady:
 		}
 		// The source callback may deliver multiple frames after a scheduler stall.
 		// Keep every frame whose render deadline is still in the future and let the
-		// bounded burst sender catch up. Discarding a recoverable frame creates an
-		// RTP hole that the receiver can only render as missing audio.
-		if !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, mediaNow(), audioStream.latencySamples, 0) {
+		// bounded burst sender catch up. Reserve the same small delivery margin used
+		// by the pacer: a frame which reaches the UDP socket at its render deadline
+		// is already too late on a real network. Discarding a recoverable frame
+		// creates an RTP hole, so keep every frame whose negotiated render deadline
+		// remains reachable.
+		latencySamples := audioStream.currentLatencySamples()
+		stale := !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, mediaNow(), latencySamples, minimumAudioSendLead)
+		if stale {
 			staleFrames++
 			if staleFrames == 1 || staleFrames%100 == 0 {
 				dbg("[AUDIO] dropping stale source frame %v old (latency=%v, dropped=%d)",
-					time.Since(framePTS), audioLatencyDuration(audioStream.latencySamples), staleFrames)
+					time.Since(framePTS), audioLatencyDuration(latencySamples), staleFrames)
 			}
 			continue
 		}
@@ -1749,7 +1782,7 @@ videoReady:
 		frameCount++
 		pacingDeadline := time.Time{}
 		if timestampedAudio {
-			pacingDeadline = framePTS.Add(audioLatencyDuration(audioStream.latencySamples) - minimumAudioSendLead)
+			pacingDeadline = framePTS.Add(audioLatencyDuration(audioStream.currentLatencySamples()) - minimumAudioSendLead)
 		}
 		if err := framePacer.wait(ctx, frameRTP, spf, pacingDeadline); err != nil {
 			return err
@@ -1825,8 +1858,9 @@ videoReady:
 				mediaDuration = audioSamplesDuration(uint64(frameRTP - lastTimingReportRTP))
 			}
 			sourceAge := now.Sub(framePTS)
+			latencySamples := audioStream.currentLatencySamples()
 			dbg("[AUDIO-TIMING] frame=%d rtp=%d source-age=%v playout-lead=%v interval=%v media=%v skew=%v send-gap=%v..%v encoded=%d redundancy=%d..%d",
-				frameCount, frameRTP, sourceAge, audioLatencyDuration(audioStream.latencySamples)-sourceAge,
+				frameCount, frameRTP, sourceAge, audioLatencyDuration(latencySamples)-sourceAge,
 				elapsed, mediaDuration, elapsed-mediaDuration, minFrameSendGap, maxFrameSendGap, n,
 				minRedundantFrames, maxRedundantFrames)
 			lastTimingReportAt = now

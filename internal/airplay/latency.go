@@ -26,6 +26,16 @@ const (
 	defaultAudioLatencyHigh   = 170 * time.Millisecond
 )
 
+// Each row is one of Apple's independent screen-audio latency profiles. The
+// first value is the profile's safest (largest) latency; receiver performance
+// reports may move an automatic session through the smaller values in that row.
+// The 50, 85, and 170 ms values are profile variants, not one promotion ladder.
+var dynamicScreenAudioLatencyProfiles = [...][5]time.Duration{
+	{50 * time.Millisecond, 46 * time.Millisecond, 40 * time.Millisecond, 36 * time.Millisecond, 30 * time.Millisecond},
+	{85 * time.Millisecond, 81 * time.Millisecond, 75 * time.Millisecond, 71 * time.Millisecond, 65 * time.Millisecond},
+	{170 * time.Millisecond, 166 * time.Millisecond, 160 * time.Millisecond, 156 * time.Millisecond, 150 * time.Millisecond},
+}
+
 type screenLatencyTargets struct {
 	video time.Duration
 	audio time.Duration
@@ -200,6 +210,20 @@ func samplesFor44k1(d time.Duration) uint32 {
 		samples = math.MaxUint32
 	}
 	return uint32(samples)
+}
+
+func dynamicAudioLatencyTiers(initialSamples uint32) ([]uint32, bool) {
+	for _, profile := range dynamicScreenAudioLatencyProfiles {
+		if samplesFor44k1(profile[0]) != initialSamples {
+			continue
+		}
+		tiers := make([]uint32, len(profile))
+		for index, latency := range profile {
+			tiers[index] = samplesFor44k1(latency)
+		}
+		return tiers, true
+	}
+	return nil, false
 }
 
 // SharedPlayoutLatency provides a common budget for all daemon destinations.

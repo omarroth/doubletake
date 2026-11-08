@@ -14,7 +14,7 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to Apple TV and 
 - mDNS device discovery
 - Daemon mode with multi-target streaming control (`doubletake-ctl`)
 - In-process test receiver for hardware-free pairing and media-flow tests
-- Automatic connection-aware screen/audio latency policy with an optional `-target-latency-ms` override
+- Connection-aware screen/audio latency with receiver-reported adaptation and an optional fixed override
 - KDE Plasma widget for quick access (see [plasmoid/](plasmoid/))
 
 ## Requirements
@@ -171,7 +171,11 @@ including the first receiver, so later joins do not require shifting an existing
 stream's timeline. `-target-latency-ms` sets a different joint budget at daemon
 startup. A capture whose measured requirement exceeds that budget is rejected;
 increase the budget rather than giving that receiver a different deadline.
-The foreground sender retains its ordinary connection-aware latency policy.
+The foreground sender starts at the safest value in its connection-aware audio
+profile. Receivers that send live-adaptive render reports allow the sender to
+lower latency after a clean window and restore headroom after glitches. Normal
+performance reports are telemetry only. Other receivers, and an explicit
+`-target-latency-ms`, remain fixed.
 
 Capture PTS and audio sample positions determine presentation time, regardless of
 when an individual sender drains its queue. Queues are bounded: a stalled audio

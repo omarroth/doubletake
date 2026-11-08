@@ -87,6 +87,51 @@ func TestFeature59OnlyControlsInitialAudioDescriptorLayout(t *testing.T) {
 	}
 }
 
+func TestAudioMediaDataControlRequiresBothFeaturesAndSourceVersion(t *testing.T) {
+	capable := receiverWithFeatures(featureAudioStreamConnectionSetup, featureAudioMediaDataControl)
+	capable.SourceVersion = "450.1.0"
+
+	for _, test := range []struct {
+		name string
+		info ReceiverInfo
+		want bool
+	}{
+		{name: "all predicates", info: capable, want: true},
+		{name: "newer version", info: func() ReceiverInfo {
+			i := capable
+			i.SourceVersion = "980.71.1"
+			return i
+		}(), want: true},
+		{name: "version below floor", info: func() ReceiverInfo {
+			i := capable
+			i.SourceVersion = "450.0.99"
+			return i
+		}()},
+		{name: "missing stream connections", info: func() ReceiverInfo {
+			i := capable
+			i.Features &^= uint64(1) << featureAudioStreamConnectionSetup
+			return i
+		}()},
+		{name: "missing media data control", info: func() ReceiverInfo {
+			i := capable
+			i.Features &^= uint64(1) << featureAudioMediaDataControl
+			return i
+		}()},
+		{name: "invalid version", info: func() ReceiverInfo {
+			i := capable
+			i.SourceVersion = "unknown"
+			return i
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mustCompatibility(t, &test.info, true)
+			if got.audioMediaDataControl != test.want {
+				t.Fatalf("audioMediaDataControl = %t, want %t", got.audioMediaDataControl, test.want)
+			}
+		})
+	}
+}
+
 func TestPTPRequiresCapabilityVersionAndEncryption(t *testing.T) {
 	ptp := receiverWithFeatures(featurePTP)
 	ptp.SourceVersion = "354.54.6"
@@ -240,6 +285,19 @@ func TestRFC2198RedundancyRequiresAdvertisedFeature(t *testing.T) {
 	}
 	if !mustCompatibility(t, &with, false).audioRFC2198 {
 		t.Fatal("RFC 2198 disabled with feature 61")
+	}
+}
+
+func TestMediaDataControlRequiresAdvertisedFeature(t *testing.T) {
+	without := receiverWithFeatures(featureAudioStreamConnectionSetup)
+	with := receiverWithFeatures(featureAudioStreamConnectionSetup, featureAudioMediaDataControl)
+	without.SourceVersion = "450.1.0"
+	with.SourceVersion = "450.1.0"
+	if mustCompatibility(t, &without, true).audioMediaDataControl {
+		t.Fatal("MediaDataControl enabled without feature 60")
+	}
+	if !mustCompatibility(t, &with, true).audioMediaDataControl {
+		t.Fatal("MediaDataControl disabled with feature 60")
 	}
 }
 

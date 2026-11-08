@@ -193,6 +193,22 @@ func TestPlistStreamPortsStreamConnections(t *testing.T) {
 	}
 }
 
+func TestPlistMediaDataControlPort(t *testing.T) {
+	stream := map[string]interface{}{
+		"streamConnections": map[string]interface{}{
+			"streamConnectionTypeMediaDataControl": map[string]interface{}{
+				"streamConnectionKeyPort": uint64(7200),
+			},
+		},
+	}
+	if got := plistMediaDataControlPort(stream); got != 7200 {
+		t.Fatalf("MediaDataControl port = %d, want 7200", got)
+	}
+	if got := plistMediaDataControlPort(map[string]interface{}{}); got != 0 {
+		t.Fatalf("missing MediaDataControl port = %d, want 0", got)
+	}
+}
+
 func TestGenerateAudioChaChaKey(t *testing.T) {
 	want := bytes.Repeat([]byte{0x5a}, chacha20poly1305.KeySize)
 
