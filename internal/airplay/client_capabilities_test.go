@@ -281,6 +281,30 @@ func TestApplyReceiverInfoUpdatePreservesOmittedCapabilities(t *testing.T) {
 	}
 }
 
+func TestApplyReceiverInfoUpdateTracksVolumeFieldPresence(t *testing.T) {
+	client := NewAirPlayClient("192.0.2.10", 7000)
+	client.info = &ReceiverInfo{}
+
+	updated, err := client.applyReceiverInfoUpdate(map[string]interface{}{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.InitialVolumeKnown || updated.InitialMutedKnown {
+		t.Fatalf("omitted volume fields marked present: %+v", updated)
+	}
+
+	updated, err = client.applyReceiverInfoUpdate(map[string]interface{}{
+		"initialVolume": float64(0),
+		"isMuted":       false,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.InitialVolumeKnown || !updated.InitialMutedKnown {
+		t.Fatalf("explicit zero-value volume fields not marked present: %+v", updated)
+	}
+}
+
 func TestApplyReceiverInfoUpdateDerivesLegacyFeaturesFromFeaturesEx(t *testing.T) {
 	client := NewAirPlayClient("192.0.2.10", 7000)
 	client.info = &ReceiverInfo{Features: 1}

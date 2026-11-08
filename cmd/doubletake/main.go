@@ -190,7 +190,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("get info failed: %v", err)
 	}
-	log.Printf("connected to: %s (model: %s, initialVolume: %.1f)", info.Name, info.Model, info.InitialVolume)
+	if info.InitialVolumeKnown {
+		log.Printf("connected to: %s (model: %s, initialVolume: %.1f dB, volumeControlType: %d)", info.Name, info.Model, info.InitialVolume, info.VolumeControlType)
+	} else {
+		log.Printf("connected to: %s (model: %s, initialVolume: unavailable, volumeControlType: %d)", info.Name, info.Model, info.VolumeControlType)
+	}
 	if credential == "" && info.RequiresPassword() {
 		credential = readCredential(bufio.NewReader(os.Stdin), "Enter the receiver's configured password: ")
 		if credential == "" {

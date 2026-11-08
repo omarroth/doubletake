@@ -1002,15 +1002,143 @@ func TestMediaDataControlStreamConnectionPreservesSeedBits(t *testing.T) {
 
 func TestAudioVolumeBody(t *testing.T) {
 	for _, test := range []struct {
-		muted bool
-		want  string
+		volumeDB float64
+		want     string
 	}{
-		{want: "volume: 0.000000\r\n"},
-		{muted: true, want: "volume: -144.000000\r\n"},
+		{volumeDB: 0, want: "volume: 0.000000\r\n"},
+		{volumeDB: -20, want: "volume: -20.000000\r\n"},
+		{volumeDB: -144, want: "volume: -144.000000\r\n"},
 	} {
-		if got := string(audioVolumeBody(test.muted)); got != test.want {
-			t.Errorf("audioVolumeBody(%t) = %q, want %q", test.muted, got, test.want)
+		if got := string(audioVolumeBody(test.volumeDB)); got != test.want {
+			t.Errorf("audioVolumeBody(%v) = %q, want %q", test.volumeDB, got, test.want)
 		}
+	}
+}
+
+func TestReceiverVolumeFromInfoDistinguishesOmittedAndExplicitZero(t *testing.T) {
+	if got := receiverVolumeFromInfo(&ReceiverInfo{}); got.known {
+		t.Fatalf("omitted initialVolume = %+v, want unknown", got)
+	}
+	got := receiverVolumeFromInfo(&ReceiverInfo{InitialVolumeKnown: true})
+	if !got.known || got.volumeDB != 0 || got.adjusted || got.muted {
+		t.Fatalf("explicit initialVolume 0 = %+v, want known unchanged 0 dB", got)
+	}
+}
+
+func TestApplyInitialVolumeHeuristicsMatchesAppleFamilyPolicy(t *testing.T) {
+	thirdPartyTV := receiverWithFeatures(26, featureThirdPartyTVFamily)
+	for _, test := range []struct {
+		name           string
+		info           *ReceiverInfo
+		state          receiverVolumeState
+		wantFamily     string
+		wantAdjustment initialVolumeAdjustment
+		wantVolumeDB   float64
+		wantMuted      bool
+		wantAdjusted   bool
+	}{
+		{
+			name: "Apple TV preserves zero", info: &ReceiverInfo{Model: "AppleTV14,1"},
+			state: receiverVolumeState{volumeDB: 0, known: true}, wantFamily: "Apple TV",
+			wantAdjustment: initialVolumeAdjustmentLoud,
+		},
+		{
+			name: "Apple TV raises overly quiet", info: &ReceiverInfo{Model: "AppleTV14,1"},
+			state: receiverVolumeState{volumeDB: -31, known: true}, wantFamily: "Apple TV",
+			wantAdjustment: initialVolumeAdjustmentQuiet, wantVolumeDB: airPlayQuietVolumeDB, wantAdjusted: true,
+		},
+		{
+			name: "audio accessory preserves overly quiet", info: &ReceiverInfo{Model: "AudioAccessory6,1"},
+			state: receiverVolumeState{volumeDB: -31, known: true}, wantFamily: "Apple audio accessory",
+			wantAdjustment: initialVolumeAdjustmentQuiet, wantVolumeDB: -31,
+		},
+		{
+			name: "AirPort raises overly quiet", info: &ReceiverInfo{Model: "AirPort10,1"},
+			state: receiverVolumeState{volumeDB: -31, known: true}, wantFamily: "AirPort Express",
+			wantAdjustment: initialVolumeAdjustmentQuiet, wantVolumeDB: airPlayQuietVolumeDB, wantAdjusted: true,
+		},
+		{
+			name: "other Apple receiver preserves overly quiet", info: &ReceiverInfo{Model: "Mac15,7", Manufacturer: "Apple Inc."},
+			state: receiverVolumeState{volumeDB: -31, known: true}, wantFamily: "Apple receiver",
+			wantAdjustment: initialVolumeAdjustmentQuiet, wantVolumeDB: -31,
+		},
+		{
+			name: "third-party TV preserves zero", info: &thirdPartyTV,
+			state: receiverVolumeState{volumeDB: 0, known: true}, wantFamily: "third-party TV",
+			wantAdjustment: initialVolumeAdjustmentLoud,
+		},
+		{
+			name: "third-party TV substitutes missing", info: &thirdPartyTV,
+			state: receiverVolumeState{}, wantFamily: "third-party TV",
+			wantAdjustment: initialVolumeAdjustmentInvalid, wantVolumeDB: airPlayDefaultVolumeDB, wantAdjusted: true,
+		},
+		{
+			name: "unclassified receiver lowers zero", info: &ReceiverInfo{},
+			state: receiverVolumeState{volumeDB: 0, known: true}, wantFamily: "unclassified receiver",
+			wantAdjustment: initialVolumeAdjustmentLoud, wantVolumeDB: airPlayDefaultVolumeDB, wantAdjusted: true,
+		},
+		{
+			name: "integer truncation classifies negative fraction as loud", info: &ReceiverInfo{},
+			state: receiverVolumeState{volumeDB: -0.5, known: true}, wantFamily: "unclassified receiver",
+			wantAdjustment: initialVolumeAdjustmentLoud, wantVolumeDB: airPlayDefaultVolumeDB, wantAdjusted: true,
+		},
+		{
+			name: "ordinary attenuation", info: &ReceiverInfo{},
+			state: receiverVolumeState{volumeDB: -12.5, muted: true, known: true}, wantFamily: "unclassified receiver",
+			wantVolumeDB: -12.5, wantMuted: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := applyInitialVolumeHeuristics(test.info, test.state)
+			if !got.known || got.family != test.wantFamily || got.adjustment != test.wantAdjustment || got.volumeDB != test.wantVolumeDB || got.muted != test.wantMuted || got.adjusted != test.wantAdjusted {
+				t.Fatalf("applyInitialVolumeHeuristics() = %+v, want family=%q adjustment=%s volume=%v muted=%t adjusted=%t", got, test.wantFamily, test.wantAdjustment, test.wantVolumeDB, test.wantMuted, test.wantAdjusted)
+			}
+		})
+	}
+}
+
+func TestNormalizeOutgoingVolume(t *testing.T) {
+	for _, test := range []struct {
+		volumeDB float64
+		want     float64
+	}{
+		{volumeDB: 0, want: 0},
+		{volumeDB: -12.5, want: -12.5},
+		{volumeDB: airPlayMutedVolumeDB, want: airPlayMutedVolumeDB},
+		{volumeDB: 1, want: airPlayDefaultVolumeDB},
+		{volumeDB: -31, want: airPlayDefaultVolumeDB},
+	} {
+		if got := normalizeOutgoingVolume(test.volumeDB); got != test.want {
+			t.Errorf("normalizeOutgoingVolume(%v) = %v, want %v", test.volumeDB, got, test.want)
+		}
+	}
+}
+
+func TestParseReceiverVolume(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		body    string
+		want    float64
+		wantErr bool
+	}{
+		{name: "ordinary", body: "volume: -12.500000\r\n", want: -12.5},
+		{name: "case and other parameters", body: "progress: 1/2/3\r\nVOLUME : 0\r\n", want: 0},
+		{name: "missing", body: "progress: 1/2/3\r\n", wantErr: true},
+		{name: "malformed", body: "volume: loud\r\n", wantErr: true},
+		{name: "not finite", body: "volume: NaN\r\n", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseReceiverVolume([]byte(test.body))
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("parseReceiverVolume(%q) = %v, nil, want error", test.body, got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("parseReceiverVolume(%q) = %v, %v, want %v, nil", test.body, got, err, test.want)
+			}
+		})
 	}
 }
 
@@ -1033,9 +1161,9 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 	}
 }
 
-// A session that DOES carry audio must still set the receiver's volume, so the
-// -no-audio guard narrows that behaviour rather than removing it.
-func TestSetupMirrorWithAudioSetsReceiverVolume(t *testing.T) {
+// A normal advertised value is already the receiver's state. Starting an audio
+// session must preserve it instead of writing full scale twice.
+func TestSetupMirrorWithAudioPreservesReceiverVolume(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		skipRecord bool
@@ -1044,9 +1172,41 @@ func TestSetupMirrorWithAudioSetsReceiverVolume(t *testing.T) {
 		{name: "skip record", skipRecord: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{skipRecord: test.skipRecord, noAudio: false})
+			testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
+				skipRecord:    test.skipRecord,
+				initialVolume: testFloat64(0),
+				model:         "AppleTV14,1",
+			})
 		})
 	}
+}
+
+func TestSetupMirrorWithAudioNormalizesInvalidReceiverVolume(t *testing.T) {
+	testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
+		initialVolume: testFloat64(2),
+		wantSetVolume: testFloat64(airPlayDefaultVolumeDB),
+	})
+}
+
+func TestSetupMirrorWithAudioUsesAppleTVQuietCorrection(t *testing.T) {
+	testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
+		model:         "AppleTV14,1",
+		initialVolume: testFloat64(-31),
+		wantSetVolume: testFloat64(airPlayQuietVolumeDB),
+	})
+}
+
+func TestSetupMirrorWithAudioPreservesThirdPartyTVZero(t *testing.T) {
+	testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
+		features:      uint64(1<<26 | 1<<featureThirdPartyTVFamily),
+		initialVolume: testFloat64(0),
+	})
+}
+
+func TestSetupMirrorWithAudioFetchesOmittedReceiverVolume(t *testing.T) {
+	testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
+		fetchVolume: testFloat64(-12),
+	})
 }
 
 func TestSetupMirrorControlFirstRecordsAfterStreamSetup(t *testing.T) {
@@ -1058,7 +1218,7 @@ func TestSetupMirrorControlFirstRecordsAfterStreamSetup(t *testing.T) {
 }
 
 // A no-audio session must not be able to write the receiver's volume through
-// the daemon's mute control either: unmuting sends 0 dB, which is full scale.
+// the daemon's mute control either.
 func TestSetAudioMutedRefusesWhenSessionHasNoAudio(t *testing.T) {
 	for _, muted := range []bool{true, false} {
 		session := &MirrorSession{client: &AirPlayClient{}, sessionURI: "rtsp://example/session", noAudio: true}
@@ -1075,10 +1235,69 @@ func TestSetAudioMutedRefusesWhenSessionHasNoAudio(t *testing.T) {
 	}
 }
 
+func TestSetAudioMutedRestoresInitialReceiverVolume(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	client := NewAirPlayClient("192.0.2.10", 7000)
+	client.conn = clientConn
+	session := &MirrorSession{
+		client:                client,
+		sessionURI:            "rtsp://192.0.2.10/session",
+		receiverVolumeDB:      -12.5,
+		receiverVolumeDBKnown: true,
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(serverConn)
+		for _, wantBody := range []string{
+			"volume: -144.000000\r\n",
+			"volume: -12.500000\r\n",
+		} {
+			req, err := readRTSPTestRequest(reader)
+			if err != nil {
+				serverErr <- err
+				return
+			}
+			if req.method != "SET_PARAMETER" || string(req.body) != wantBody {
+				serverErr <- fmt.Errorf("request = %s %q, want SET_PARAMETER %q", req.method, string(req.body), wantBody)
+				return
+			}
+			if err := writeRTSPTestResponse(serverConn, 200, nil, nil); err != nil {
+				serverErr <- err
+				return
+			}
+		}
+		serverErr <- nil
+	}()
+
+	if err := session.SetAudioMuted(true); err != nil {
+		t.Fatalf("mute: %v", err)
+	}
+	if err := session.SetAudioMuted(false); err != nil {
+		t.Fatalf("unmute: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type audioSessionCase struct {
-	skipRecord   bool
-	noAudio      bool
-	controlFirst bool
+	skipRecord    bool
+	noAudio       bool
+	controlFirst  bool
+	model         string
+	manufacturer  string
+	features      uint64
+	initialVolume *float64
+	fetchVolume   *float64
+	wantSetVolume *float64
+}
+
+func testFloat64(value float64) *float64 {
+	return &value
 }
 
 func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase) {
@@ -1360,8 +1579,26 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 					serverErr <- err
 					return
 				}
+			case "GET_PARAMETER":
+				if test.fetchVolume == nil {
+					serverErr <- fmt.Errorf("unexpected GET_PARAMETER")
+					return
+				}
+				if string(req.body) != "volume\r\n" {
+					serverErr <- fmt.Errorf("unexpected GET_PARAMETER body %q", string(req.body))
+					return
+				}
+				body := []byte(fmt.Sprintf("volume: %.6f\r\n", *test.fetchVolume))
+				if err := writeRTSPTestResponse(conn, 200, nil, body); err != nil {
+					serverErr <- err
+					return
+				}
 			case "SET_PARAMETER":
-				if string(req.body) != "volume: 0.000000\r\n" {
+				if test.wantSetVolume == nil {
+					serverErr <- fmt.Errorf("unexpected SET_PARAMETER")
+					return
+				}
+				if want := string(audioVolumeBody(*test.wantSetVolume)); string(req.body) != want {
 					serverErr <- fmt.Errorf("unexpected SET_PARAMETER body %q", string(req.body))
 					return
 				}
@@ -1407,7 +1644,19 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 	if noAudio {
 		screenStreamFormats = 0x800000 // deliberately unsupported
 	}
-	client.info = &ReceiverInfo{SupportedFormats: StreamFormats{ScreenStream: screenStreamFormats}}
+	client.info = &ReceiverInfo{
+		Model:            test.model,
+		Manufacturer:     test.manufacturer,
+		Features:         test.features,
+		SupportedFormats: StreamFormats{ScreenStream: screenStreamFormats},
+	}
+	if test.initialVolume != nil {
+		client.info.InitialVolume = *test.initialVolume
+		client.info.InitialVolumeKnown = true
+	}
+	if test.fetchVolume != nil {
+		client.info.SourceVersion = "120.2.0"
+	}
 
 	session, err := client.SetupMirror(ctx, StreamConfig{FPS: 30, NoAudio: noAudio})
 	if err != nil {
@@ -1447,16 +1696,16 @@ func testSetupMirrorAudioSessionNegotiation(t *testing.T, test audioSessionCase)
 	}
 
 	wantMethods := []string{"SETUP", "SETUP", "SETUP"}
+	if test.fetchVolume != nil && !noAudio {
+		wantMethods = append(wantMethods, "GET_PARAMETER")
+	}
 	recordIndex := -1
 	if !skipRecord {
 		recordIndex = len(wantMethods)
 		wantMethods = append(wantMethods, "RECORD")
 	}
-	// The two volume SET_PARAMETERs are sent only when the session carries
-	// audio: `volume: 0.000000` is 0 dB — full scale — so a video-only
-	// session would force the receiver to maximum.
-	if !noAudio {
-		wantMethods = append(wantMethods, "SET_PARAMETER", "SET_PARAMETER")
+	if test.wantSetVolume != nil && !noAudio {
+		wantMethods = append(wantMethods, "SET_PARAMETER")
 	}
 	wantMethods = append(wantMethods, "POST", "TEARDOWN")
 	got := make([]rtspTestRequest, 0, len(wantMethods))

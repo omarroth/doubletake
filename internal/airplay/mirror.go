@@ -34,7 +34,156 @@ const (
 
 	failedMirrorSetupTeardownTimeout = 2 * time.Second
 	asyncPTPClockWaitTimeout         = 2 * time.Second
+	initialVolumeFetchTimeout        = 3 * time.Second
+
+	airPlayDefaultVolumeDB = -20.0
+	airPlayQuietVolumeDB   = -27.0
+	airPlayMutedVolumeDB   = -144.0
+	airPlayMinimumVolumeDB = -30.0
 )
+
+type initialVolumeAdjustment uint8
+
+const (
+	initialVolumeAdjustmentInvalid initialVolumeAdjustment = 1 << iota
+	initialVolumeAdjustmentQuiet
+	initialVolumeAdjustmentLoud
+)
+
+func (a initialVolumeAdjustment) String() string {
+	switch a {
+	case 0:
+		return "none"
+	case initialVolumeAdjustmentInvalid:
+		return "invalid"
+	case initialVolumeAdjustmentQuiet:
+		return "quiet"
+	case initialVolumeAdjustmentLoud:
+		return "loud"
+	default:
+		return fmt.Sprintf("unknown(%d)", a)
+	}
+}
+
+type receiverVolumeState struct {
+	volumeDB   float64
+	muted      bool
+	known      bool
+	adjusted   bool
+	source     string
+	family     string
+	adjustment initialVolumeAdjustment
+}
+
+func receiverVolumeFromInfo(info *ReceiverInfo) receiverVolumeState {
+	if info == nil || !info.InitialVolumeKnown {
+		return receiverVolumeState{volumeDB: airPlayDefaultVolumeDB, source: "missing initialVolume"}
+	}
+	return receiverVolumeState{
+		volumeDB: info.InitialVolume,
+		muted:    info.InitialMutedKnown && info.InitialMuted,
+		known:    true,
+		source:   "GET /info",
+	}
+}
+
+func initialVolumeAdjustmentPolicy(info *ReceiverInfo) (string, initialVolumeAdjustment) {
+	model := ""
+	manufacturer := ""
+	if info != nil {
+		model = strings.ToLower(strings.TrimSpace(info.Model))
+		manufacturer = strings.ToLower(strings.TrimSpace(info.Manufacturer))
+	}
+
+	// This is the family order used by
+	// endpointdelegate_getInitialVolumeDBAndIsMuted. Apple's endpoint
+	// description derives the first three from device subtype, with these model
+	// prefixes as its fallback. ThirdPartyTVFamily is feature 49 on a receiver
+	// identified as third-party by feature 26 or 51.
+	switch {
+	case strings.HasPrefix(model, "audioaccessory"):
+		return "Apple audio accessory", initialVolumeAdjustmentInvalid
+	case strings.HasPrefix(model, "appletv"):
+		// A normal, non-clustered Apple TV supports invalid and quiet fixes.
+		return "Apple TV", initialVolumeAdjustmentInvalid | initialVolumeAdjustmentQuiet
+	case strings.HasPrefix(model, "airport"):
+		return "AirPort Express", initialVolumeAdjustmentInvalid | initialVolumeAdjustmentQuiet
+	case strings.HasPrefix(manufacturer, "apple"):
+		return "Apple receiver", initialVolumeAdjustmentInvalid
+	case info != nil && info.isThirdPartyReceiver() && info.HasFeature(featureThirdPartyTVFamily):
+		return "third-party TV", initialVolumeAdjustmentInvalid
+	default:
+		return "unclassified receiver", initialVolumeAdjustmentInvalid | initialVolumeAdjustmentQuiet | initialVolumeAdjustmentLoud
+	}
+}
+
+func applyInitialVolumeHeuristics(info *ReceiverInfo, state receiverVolumeState) receiverVolumeState {
+	family, supported := initialVolumeAdjustmentPolicy(info)
+	state.family = family
+
+	adjustment := initialVolumeAdjustment(0)
+	targetDB := state.volumeDB
+	if !state.known || math.IsNaN(state.volumeDB) || math.IsInf(state.volumeDB, 0) {
+		adjustment = initialVolumeAdjustmentInvalid
+		targetDB = airPlayDefaultVolumeDB
+	} else {
+		// Apple converts the float to an integer before classifying it. That
+		// makes (-1, 0] a zero/loud value, while values whose truncated integer
+		// is -30 or lower are overly quiet.
+		integerDB := math.Trunc(state.volumeDB)
+		switch {
+		case integerDB >= 0:
+			adjustment = initialVolumeAdjustmentLoud
+			targetDB = airPlayDefaultVolumeDB
+		case integerDB <= airPlayMinimumVolumeDB:
+			adjustment = initialVolumeAdjustmentQuiet
+			targetDB = airPlayQuietVolumeDB
+		}
+	}
+
+	state.adjustment = adjustment
+	if adjustment != 0 && supported&adjustment != 0 {
+		state.volumeDB = targetDB
+		state.known = true
+		state.adjusted = true
+	}
+	// A receiver may report only the -144 dB mute sentinel, without a separate
+	// isMuted value. Retain a useful unmute level while preserving that state.
+	if !state.adjusted && state.known && state.volumeDB == airPlayMutedVolumeDB {
+		state.volumeDB = airPlayDefaultVolumeDB
+		state.muted = true
+	}
+	return state
+}
+
+func normalizeOutgoingVolume(volumeDB float64) float64 {
+	if volumeDB == airPlayMutedVolumeDB {
+		return volumeDB
+	}
+	if math.IsNaN(volumeDB) || math.IsInf(volumeDB, 0) || volumeDB < airPlayMinimumVolumeDB || volumeDB > 0 {
+		return airPlayDefaultVolumeDB
+	}
+	return volumeDB
+}
+
+func parseReceiverVolume(body []byte) (float64, error) {
+	for _, line := range strings.Split(string(body), "\n") {
+		name, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok || !strings.EqualFold(strings.TrimSpace(name), "volume") {
+			continue
+		}
+		volumeDB, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || math.IsNaN(volumeDB) || math.IsInf(volumeDB, 0) {
+			return 0, fmt.Errorf("invalid volume value %q", strings.TrimSpace(value))
+		}
+		return volumeDB, nil
+	}
+	return 0, errors.New("volume parameter missing from response")
+}
+
+func audioVolumeBody(volumeDB float64) []byte {
+	return []byte(fmt.Sprintf("volume: %.6f\r\n", volumeDB))
+}
 
 var errPTPClockUnavailable = errors.New("receiver did not establish a PTP clock")
 
@@ -1206,6 +1355,34 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	}
 	dbg("[SETUP] data channel connected: %s (TCP_NODELAY, sndbuf=64K)", dataAddr)
 
+	// Apple distinguishes an explicit 0 dB initial volume from an omitted
+	// initialVolume. When it is omitted, fetch the current stream value before
+	// RECORD if the receiver satisfies AirPlaySender's SupportsInitialVolume
+	// capability rule. Family-specific correction happens after that fetch.
+	receiverVolume := receiverVolumeFromInfo(c.info)
+	if !cfg.NoAudio && !receiverVolume.known && supportsInitialVolume(c.info) {
+		body, _, fetchErr := c.httpRequestWithHeadersTimeout(
+			"GET_PARAMETER", audioURI, "text/parameters", []byte("volume\r\n"), initialVolumeFetchTimeout,
+		)
+		if fetchErr != nil {
+			if hasIncompleteResponse(fetchErr) {
+				controlConnectionUsable = false
+				return nil, fmt.Errorf("GET_PARAMETER initial volume: %w", fetchErr)
+			}
+			dbg("[SETUP] receiver declined GET_PARAMETER volume; applying Apple's missing-volume family policy: %v", fetchErr)
+		} else if volumeDB, parseErr := parseReceiverVolume(body); parseErr != nil {
+			// Apple's parser substitutes -20 dB for a successful but malformed
+			// GetVolume response. Do the same, while keeping a protocol refusal
+			// above non-fatal for broader receiver compatibility.
+			receiverVolume = receiverVolumeState{volumeDB: math.NaN(), source: "malformed GET_PARAMETER"}
+			dbg("[SETUP] invalid GET_PARAMETER volume response: %v", parseErr)
+		} else {
+			receiverVolume = receiverVolumeState{volumeDB: volumeDB, known: true, source: "GET_PARAMETER"}
+			dbg("[SETUP] initial receiver volume fetched: %.3f dB", volumeDB)
+		}
+	}
+	receiverVolume = applyInitialVolumeHeuristics(c.info, receiverVolume)
+
 	// The sender activates the session in its second start stage, after every
 	// transport stream has been set up. A receiver may waive that final RECORD
 	// request with skipRecord, but accepting the control SETUP alone does not
@@ -1216,31 +1393,29 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		return nil, err
 	}
 
-	// Only set the receiver's volume when this session actually carries audio.
-	// `volume: 0.000000` is 0 dB — full scale in AirPlay, not silence — so a
-	// video-only session would force the receiver to maximum on every connect.
-	// Sending -144 instead would be equally destructive of the user's setting;
-	// a session that transmits no audio has no use for the receiver's audio
-	// state and should leave its volume untouched.
+	// Apple seeds its sender-side volume state from the advertised/fetched value
+	// instead of unconditionally replacing it with unity gain. A normal value is
+	// already the receiver's state, so doubletake does not need to reapply it.
 	if cfg.NoAudio {
 		dbg("[SETUP] no-audio session: skipping SET_PARAMETER volume")
-	} else {
-		// Positive dB values are invalid here and current receivers may
-		// interpret them as zero gain. Real senders send the sender's own
-		// slider value; 0 dB is this sender's fixed choice.
-		volumeBody := audioVolumeBody(false)
+	} else if receiverVolume.known && (receiverVolume.adjusted || receiverVolume.muted) {
+		volumeDB := receiverVolume.volumeDB
+		if receiverVolume.muted {
+			volumeDB = airPlayMutedVolumeDB
+		}
+		volumeBody := audioVolumeBody(volumeDB)
 		if _, _, err := setupRTSPRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil); err != nil {
 			if !controlConnectionUsable {
 				return nil, fmt.Errorf("SET_PARAMETER volume: %w", err)
 			}
 			dbg("[SETUP] SET_PARAMETER volume failed (non-fatal): %v", err)
 		} else {
-			dbg("[SETUP] SET_PARAMETER volume=0 sent")
+			dbg("[SETUP] applied initial receiver volume %.3f dB (source=%s, family=%s, adjustment=%s)", volumeDB, receiverVolume.source, receiverVolume.family, receiverVolume.adjustment)
 		}
-		// Send volume twice (pcap shows real senders do this)
-		if _, _, err := setupRTSPRequest("SET_PARAMETER", audioURI, "text/parameters", volumeBody, nil); err != nil && !controlConnectionUsable {
-			return nil, fmt.Errorf("repeat SET_PARAMETER volume: %w", err)
-		}
+	} else if receiverVolume.known {
+		dbg("[SETUP] preserving initial receiver volume %.3f dB (source=%s, family=%s)", receiverVolume.volumeDB, receiverVolume.source, receiverVolume.family)
+	} else {
+		dbg("[SETUP] initial receiver volume unavailable; leaving it untouched")
 	}
 
 	if timingProtocol == timingProtocolPTP {
@@ -1251,20 +1426,22 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	}
 
 	session := &MirrorSession{
-		client:         c,
-		dataConn:       dataConn,
-		eventConn:      receiverEventConn,
-		cancel:         cancelSession,
-		DataPort:       dataPort,
-		videoCodec:     videoCodec,
-		firstFrameSent: make(chan struct{}),
-		streamDone:     make(chan struct{}),
-		noAudio:        cfg.NoAudio,
-		sessionURI:     audioURI,
-		timingConn:     timingConn,
-		timestampBias:  latencies.video,
-		timingProtocol: timingProtocol,
-		mediaClock:     clock,
+		client:                c,
+		dataConn:              dataConn,
+		eventConn:             receiverEventConn,
+		cancel:                cancelSession,
+		DataPort:              dataPort,
+		videoCodec:            videoCodec,
+		firstFrameSent:        make(chan struct{}),
+		streamDone:            make(chan struct{}),
+		noAudio:               cfg.NoAudio,
+		receiverVolumeDB:      normalizeOutgoingVolume(receiverVolume.volumeDB),
+		receiverVolumeDBKnown: receiverVolume.known,
+		sessionURI:            audioURI,
+		timingConn:            timingConn,
+		timestampBias:         latencies.video,
+		timingProtocol:        timingProtocol,
+		mediaClock:            clock,
 	}
 
 	// Set up the video cipher. Encrypted pair-verify uses ChaCha20-Poly1305 with
@@ -2346,32 +2523,32 @@ func (s *MirrorSession) HasAudio() bool {
 	return s.audioStream != nil
 }
 
-// SetAudioMuted updates mirrored audio volume on the receiver.
-// AirPlay uses SET_PARAMETER volume where 0 dB is max and -144 dB is muted.
+// SetAudioMuted updates mirrored audio volume on the receiver. AirPlay uses
+// -144 dB as its mute sentinel; unmute restores the receiver's initial volume
+// rather than forcing the old hard-coded 0 dB (full-scale) value.
 func (s *MirrorSession) SetAudioMuted(muted bool) error {
 	if s == nil || s.client == nil || s.sessionURI == "" {
 		return fmt.Errorf("audio control unavailable")
 	}
-	// A session started with audio disabled must not write the receiver's
-	// volume either: unmuting sends 0 dB — full scale — which would discard
-	// whatever the user had set, exactly as the setup path once did. The
-	// session negotiates an audio stream even in this mode, so HasAudio() is
-	// not sufficient to tell the two apart.
+	// A session started with audio disabled must not write the receiver's volume.
+	// The session still negotiates an audio stream, so HasAudio() alone is not
+	// sufficient to distinguish this mode.
 	if s.noAudio {
 		return fmt.Errorf("audio control unavailable: session was started with audio disabled")
 	}
 
-	if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", audioVolumeBody(muted), nil); err != nil {
+	volumeDB := s.receiverVolumeDB
+	if !s.receiverVolumeDBKnown {
+		volumeDB = airPlayDefaultVolumeDB
+	}
+	if muted {
+		volumeDB = airPlayMutedVolumeDB
+	}
+	volumeDB = normalizeOutgoingVolume(volumeDB)
+	if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", audioVolumeBody(volumeDB), nil); err != nil {
 		return fmt.Errorf("set audio muted=%t: %w", muted, err)
 	}
 	return nil
-}
-
-func audioVolumeBody(muted bool) []byte {
-	if muted {
-		return []byte("volume: -144.000000\r\n")
-	}
-	return []byte("volume: 0.000000\r\n")
 }
 
 // AudioStream returns the audio stream for this session (may be nil).

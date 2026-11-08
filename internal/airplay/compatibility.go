@@ -40,6 +40,7 @@ const (
 	featureAudioFormatAACELD44100Stereo uint   = 21
 	featureVolumeControl                uint   = 32
 	featurePTP                          uint   = 41
+	featureThirdPartyTVFamily           uint   = 49
 	featureAudioStreamConnectionSetup   uint   = 59
 	featureAudioMediaDataControl        uint   = 60
 	featureRFC2198Redundancy            uint   = 61

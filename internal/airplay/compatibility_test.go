@@ -197,6 +197,28 @@ func TestSupportsPTPSourceVersion(t *testing.T) {
 	}
 }
 
+func TestSupportsInitialVolume(t *testing.T) {
+	featureReceiver := receiverWithFeatures(featureVolumeControl)
+	for _, test := range []struct {
+		name string
+		info *ReceiverInfo
+		want bool
+	}{
+		{name: "nil receiver"},
+		{name: "volume feature", info: &featureReceiver, want: true},
+		{name: "version below floor", info: &ReceiverInfo{SourceVersion: "120.1.99"}},
+		{name: "version at floor", info: &ReceiverInfo{SourceVersion: "120.2.0"}, want: true},
+		{name: "newer version", info: &ReceiverInfo{SourceVersion: "377.40.00"}, want: true},
+		{name: "invalid version", info: &ReceiverInfo{SourceVersion: "unknown"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := supportsInitialVolume(test.info); got != test.want {
+				t.Fatalf("supportsInitialVolume(%+v) = %t, want %t", test.info, got, test.want)
+			}
+		})
+	}
+}
+
 func TestScreenAudioCodecUsesAdvertisedFormatMask(t *testing.T) {
 	for _, test := range []struct {
 		name         string

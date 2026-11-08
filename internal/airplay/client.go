@@ -48,6 +48,9 @@ type ReceiverInfo struct {
 	HDRCapability                 string              `plist:"receiverHDRCapability"`
 	VolumeControlType             int                 `plist:"volumeControlType"`
 	InitialVolume                 float64             `plist:"initialVolume"`
+	InitialMuted                  bool                `plist:"isMuted"`
+	InitialVolumeKnown            bool                `plist:"-"`
+	InitialMutedKnown             bool                `plist:"-"`
 	KeepAliveBody                 plistFlag           `plist:"keepAliveSendStatsAsBody"`
 	PSI                           string              `plist:"psi"`
 	PI                            string              `plist:"pi"`
@@ -644,6 +647,8 @@ func (c *AirPlayClient) getInfoWithTimeout(timeout time.Duration) (*ReceiverInfo
 	info.Server = responseHeaders["server"]
 	_, info.hasPTPInfo = fullInfo["PTPInfo"]
 	_, info.hasSupportedFormats = fullInfo["supportedFormats"]
+	_, info.InitialVolumeKnown = fullInfo["initialVolume"]
+	_, info.InitialMutedKnown = fullInfo["isMuted"]
 
 	c.mu.Lock()
 	var advertisement *AirPlayDevice
@@ -719,6 +724,12 @@ func (c *AirPlayClient) applyReceiverInfoUpdate(update map[string]interface{}, s
 	}
 	if _, ok := update["PTPInfo"]; ok {
 		info.hasPTPInfo = true
+	}
+	if _, ok := update["initialVolume"]; ok {
+		info.InitialVolumeKnown = true
+	}
+	if _, ok := update["isMuted"]; ok {
+		info.InitialMutedKnown = true
 	}
 	c.info = &info
 	return &info, nil
