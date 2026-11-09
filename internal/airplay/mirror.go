@@ -1744,14 +1744,14 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 					maximumWriteDuration = duration
 				}
 				if capture.rate != nil && !writeEnded.Before(nextTransportSample) {
-					metrics, sampled := videoTransportMetrics{At: writeEnded}, false
+					metrics := videoTransportMetrics{At: writeEnded}
 					if transportSampler != nil {
-						metrics, sampled = transportSampler.sample(writeEnded)
+						if sampled, ok := transportSampler.sample(writeEnded); ok {
+							metrics = sampled
+						}
 					}
 					metrics.WriteDuration = maximumWriteDuration
-					if sampled || maximumWriteDuration >= videoSlowWrite {
-						capture.rate.observe(rateReceiverID, metrics)
-					}
+					capture.rate.observe(rateReceiverID, metrics)
 					maximumWriteDuration = 0
 					nextTransportSample = writeEnded.Add(videoTelemetryInterval)
 				}

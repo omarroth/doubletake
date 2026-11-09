@@ -97,6 +97,27 @@ func TestVideoRateControllerBacksOffOnRetransmission(t *testing.T) {
 	}
 }
 
+func TestVideoRateControllerRecoversFromPortableSlowWrite(t *testing.T) {
+	runtime := &fakeCaptureRuntimeController{}
+	controller := newVideoRateController(runtime, 6000, 30, nil)
+	receiver := controller.attachReceiver()
+	now := time.Now()
+	controller.observe(receiver, videoTransportMetrics{
+		At: now, WriteDuration: videoSlowWrite,
+	})
+	if !reflect.DeepEqual(runtime.bitrates, []int{4500}) {
+		t.Fatalf("bitrate changes = %v, want a single 25%% slow-write backoff", runtime.bitrates)
+	}
+
+	// Platforms without TCP_INFO still provide periodic write observations. A
+	// healthy interval starts the recovery hold and a later one raises the rate.
+	controller.observe(receiver, videoTransportMetrics{At: now.Add(videoTelemetryInterval)})
+	controller.observe(receiver, videoTransportMetrics{At: now.Add(videoTelemetryInterval + videoRecoveryHold)})
+	if !reflect.DeepEqual(runtime.bitrates, []int{4500, 5625}) {
+		t.Fatalf("bitrate changes = %v, want bounded recovery after the hold", runtime.bitrates)
+	}
+}
+
 func TestVideoRateControllerIgnoresNormalSmallSendBufferOccupancy(t *testing.T) {
 	runtime := &fakeCaptureRuntimeController{}
 	controller := newVideoRateController(runtime, 4147, 30, nil)
