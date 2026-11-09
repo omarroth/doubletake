@@ -111,6 +111,28 @@ This creates `bin/doubletake-test-receiver`. It is excluded from default builds,
 installation, and release artifacts. Its manual is available at
 `man/man1/doubletake-test-receiver.1`.
 
+### Experimental linked GStreamer backend
+
+Linux developers can build a dynamically linked prototype which owns the video
+pipeline in-process instead of launching `gst-launch-1.0`:
+
+```sh
+make doubletake-gstreamer-cgo
+```
+
+This creates `bin/doubletake-gstreamer-cgo` and requires the GStreamer core,
+app, and video development packages plus a C compiler. It uses the same capture,
+scaling, encoder, parser, and timestamp graph as the normal binary. The linked
+backend adds live target-bitrate and force-key-frame controls at the capture API;
+the default and release binaries do not link GStreamer and continue using the
+`gst-launch-1.0` subprocess.
+
+This is an integration prototype, not an automatic network controller yet.
+Apple's sender couples its live encoder to a rate controller and data pacer fed
+by bandwidth and delay measurements. doubletake does not currently have
+equivalent video transport feedback, so the prototype deliberately does not
+infer bandwidth from receiver identity or apply an unvalidated bitrate policy.
+
 ## Install
 
 Install binaries and man pages (default prefix: `/usr/local`):
