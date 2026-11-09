@@ -1048,28 +1048,32 @@ func (as *AudioStream) buildAudioPacketWithClearPrefixLocked(payload []byte, cle
 		panic("invalid clear audio payload prefix")
 	}
 
-	// RTP header: 12 bytes
-	header := make([]byte, 12)
-	header[0] = 0x80
-	header[1] = payloadType // M=0 (screen senders never set the marker bit)
-	binary.BigEndian.PutUint16(header[2:4], seq)
-	binary.BigEndian.PutUint32(header[4:8], rtpTime)
-	binary.BigEndian.PutUint32(header[8:12], as.ssrc)
-
-	// Encrypt payload according to the negotiated audio security mode.
 	clearPayload := payload[:clearPrefix]
 	protectedPayload := payload[clearPrefix:]
-	packetPayload := payload
+	wirePayloadBytes := len(payload)
+	if as.chachaCipher != nil {
+		wirePayloadBytes += as.chachaCipher.Overhead() + audioChaChaNonceSize
+	}
+	// Build directly in the immutable message-ring backing. This avoids separate
+	// header, encrypted-payload, and final-datagram allocations on every frame.
+	packet := make([]byte, 12, 12+wirePayloadBytes)
+	packet[0] = 0x80
+	packet[1] = payloadType // M=0 (screen senders never set the marker bit)
+	binary.BigEndian.PutUint16(packet[2:4], seq)
+	binary.BigEndian.PutUint32(packet[4:8], rtpTime)
+	binary.BigEndian.PutUint32(packet[8:12], as.ssrc)
+
+	// Encrypt payload according to the negotiated audio security mode.
 	usedNonce := uint64(0)
 	if as.chachaCipher != nil {
 		var nonce [audioChaChaNonceSize]byte
 		usedNonce, nonce = as.nextAudioChaChaNonce(seq, rtpTime, reuseNonce)
-		aad := as.audioChaChaAAD(header, rtpTime)
-		sealed := as.chachaCipher.Seal(nil, nonce[:], protectedPayload, aad)
-		packetPayload = make([]byte, len(clearPayload)+len(sealed)+audioChaChaNonceSize)
-		copy(packetPayload, clearPayload)
-		copy(packetPayload[len(clearPayload):], sealed)
-		binary.LittleEndian.PutUint64(packetPayload[len(clearPayload)+len(sealed):], usedNonce)
+		aad := as.audioChaChaAAD(packet[:12], rtpTime)
+		packet = append(packet, clearPayload...)
+		sealedStart := len(packet)
+		packet = as.chachaCipher.Seal(packet, nonce[:], protectedPayload, aad)
+		sealed := packet[sealedStart:]
+		packet = append(packet, nonce[:]...)
 		if seq <= 3 {
 			tagStart := len(sealed) - as.chachaCipher.Overhead()
 			if tagStart < 0 {
@@ -1077,19 +1081,22 @@ func (as *AudioStream) buildAudioPacketWithClearPrefixLocked(payload []byte, cle
 			}
 			dbg("[AUDIO-CHACHA] seq=%d nonce=%d aad=%s clear=%d plain=%d sealed=%d tag=%02x tail=%02x",
 				seq, usedNonce, as.chachaAADMode.String(), len(clearPayload), len(protectedPayload), len(sealed),
-				sealed[tagStart:], packetPayload[len(packetPayload)-audioChaChaNonceSize:])
+				sealed[tagStart:], packet[len(packet)-audioChaChaNonceSize:])
 		}
 	} else if as.cipher != nil && as.aesIV != nil {
-		encrypted := aesEncryptAudioPayload(as.cipher, as.aesIV, protectedPayload)
-		packetPayload = make([]byte, len(clearPayload)+len(encrypted))
-		copy(packetPayload, clearPayload)
-		copy(packetPayload[len(clearPayload):], encrypted)
+		packet = append(packet, payload...)
+		protectedStart := 12 + len(clearPayload)
+		blockSize := as.cipher.BlockSize()
+		encLen := (len(protectedPayload) / blockSize) * blockSize
+		if encLen > 0 {
+			encryptedPayload := packet[protectedStart:]
+			enc := cipher.NewCBCEncrypter(as.cipher, as.aesIV)
+			enc.CryptBlocks(encryptedPayload[:encLen], encryptedPayload[:encLen])
+		}
 
 		// Self-decrypt check on first packet to verify key/IV correctness
 		if seq == 1 {
-			blockSize := as.cipher.BlockSize()
-			encryptedPayload := packetPayload[len(clearPayload):]
-			encLen := (len(encryptedPayload) / blockSize) * blockSize
+			encryptedPayload := packet[protectedStart:]
 			if encLen > 0 {
 				decrypted := append([]byte(nil), encryptedPayload...)
 				dec := cipher.NewCBCDecrypter(as.cipher, as.aesIV)
@@ -1108,11 +1115,10 @@ func (as *AudioStream) buildAudioPacketWithClearPrefixLocked(payload []byte, cle
 				dbg("[AUDIO] *** IV: %02x", as.aesIV)
 			}
 		}
+	} else {
+		packet = append(packet, payload...)
 	}
 
-	packet := make([]byte, 12+len(packetPayload))
-	copy(packet[:12], header)
-	copy(packet[12:], packetPayload)
 	return packet, usedNonce
 }
 
