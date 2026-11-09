@@ -305,6 +305,7 @@ func TestStatusReportsCaptureFormatAndPortalSourcePerStream(t *testing.T) {
 		format: airplay.CaptureFormat{
 			Width: 1920, Height: 1080, FPS: 30, Codec: airplay.VideoCodecH264,
 			BitrateKbps: 4147, Encoder: "vah264enc", HardwareEncoded: true,
+			Adaptive: true, EstimatedBandwidthKbps: 5600, RateControlReceivers: 2,
 		},
 		source: source,
 	}
@@ -315,7 +316,8 @@ func TestStatusReportsCaptureFormatAndPortalSourcePerStream(t *testing.T) {
 	stream := d.handleStatus().Streams[0]
 	if stream.Width != 1920 || stream.Height != 1080 || stream.FPS != 30 ||
 		stream.Codec != airplay.VideoCodecH264 || stream.BitrateKbps != 4147 ||
-		stream.Encoder != "vah264enc" || !stream.HardwareEncoded {
+		stream.Encoder != "vah264enc" || !stream.HardwareEncoded || !stream.Adaptive ||
+		stream.EstimatedBandwidthKbps != 5600 || stream.RateControlReceivers != 2 {
 		t.Fatalf("stream format = %+v", stream)
 	}
 	if stream.Source == nil || *stream.Source != *source {

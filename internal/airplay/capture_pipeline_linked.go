@@ -12,6 +12,7 @@ package airplay
 typedef struct {
 	GstElement *pipeline;
 	GstElement *encoder;
+	GstElement *rate;
 	GstAppSink *sink;
 	GstBus *bus;
 } DTGstPipeline;
@@ -76,10 +77,12 @@ static DTGstPipeline *dt_gst_pipeline_new(char **argv, char **error_out) {
 	DTGstPipeline *result = g_new0(DTGstPipeline, 1);
 	result->pipeline = pipeline;
 	result->encoder = gst_bin_get_by_name(GST_BIN(pipeline), "doubletake-encoder");
+	result->rate = gst_bin_get_by_name(GST_BIN(pipeline), "doubletake-rate");
 	GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "doubletake-output");
-	if (result->encoder == NULL || sink == NULL || !GST_IS_APP_SINK(sink)) {
-		dt_set_error(error_out, "linked pipeline is missing its named encoder or appsink");
+	if (result->encoder == NULL || result->rate == NULL || sink == NULL || !GST_IS_APP_SINK(sink)) {
+		dt_set_error(error_out, "linked pipeline is missing its named rate control, encoder, or appsink");
 		if (sink != NULL) gst_object_unref(sink);
+		if (result->rate != NULL) gst_object_unref(result->rate);
 		if (result->encoder != NULL) gst_object_unref(result->encoder);
 		gst_object_unref(pipeline);
 		g_free(result);
@@ -99,6 +102,7 @@ static DTGstPipeline *dt_gst_pipeline_new(char **argv, char **error_out) {
 		gst_element_set_state(pipeline, GST_STATE_NULL);
 		gst_object_unref(result->bus);
 		gst_object_unref(result->sink);
+		gst_object_unref(result->rate);
 		gst_object_unref(result->encoder);
 		gst_object_unref(result->pipeline);
 		g_free(result);
@@ -141,17 +145,18 @@ static int dt_gst_pipeline_pull(DTGstPipeline *p, unsigned char **data_out, size
 	return 1;
 }
 
-static int dt_gst_pipeline_set_uint(DTGstPipeline *p, const char *property, guint64 value, char **error_out) {
-	if (p == NULL || p->encoder == NULL || property == NULL) {
+static int dt_gst_element_set_uint(GstElement *element, const char *property, guint64 value, gboolean require_mutable, char **error_out) {
+	if (element == NULL || property == NULL) {
 		dt_set_error(error_out, "invalid linked-pipeline property request");
 		return 0;
 	}
-	GParamSpec *spec = g_object_class_find_property(G_OBJECT_GET_CLASS(p->encoder), property);
+	GParamSpec *spec = g_object_class_find_property(G_OBJECT_GET_CLASS(element), property);
 	if (spec == NULL) {
 		dt_set_error(error_out, "encoder does not expose the requested property");
 		return 0;
 	}
-	if ((spec->flags & G_PARAM_WRITABLE) == 0 || (spec->flags & GST_PARAM_MUTABLE_PLAYING) == 0) {
+	if ((spec->flags & G_PARAM_WRITABLE) == 0 ||
+		(require_mutable && (spec->flags & GST_PARAM_MUTABLE_PLAYING) == 0)) {
 		dt_set_error(error_out, "encoder property is not mutable while PLAYING");
 		return 0;
 	}
@@ -175,9 +180,53 @@ static int dt_gst_pipeline_set_uint(DTGstPipeline *p, const char *property, guin
 		dt_set_error(error_out, "requested encoder value is outside the supported range");
 		return 0;
 	}
-	g_object_set_property(G_OBJECT(p->encoder), property, &setting);
+	g_object_set_property(G_OBJECT(element), property, &setting);
 	g_value_unset(&setting);
 	return 1;
+}
+
+static int dt_gst_pipeline_set_encoder_bitrate(DTGstPipeline *p, guint64 value, char **error_out) {
+	if (p == NULL || p->encoder == NULL) {
+		dt_set_error(error_out, "invalid linked-pipeline bitrate request");
+		return 0;
+	}
+	return dt_gst_element_set_uint(p->encoder, "bitrate", value, TRUE, error_out);
+}
+
+static int dt_gst_pipeline_set_v4l2_bitrate(DTGstPipeline *p, guint value, char **error_out) {
+	if (p == NULL || p->encoder == NULL) {
+		dt_set_error(error_out, "invalid linked-pipeline V4L2 bitrate request");
+		return 0;
+	}
+	GParamSpec *spec = g_object_class_find_property(G_OBJECT_GET_CLASS(p->encoder), "extra-controls");
+	if (spec == NULL || (spec->flags & G_PARAM_WRITABLE) == 0) {
+		dt_set_error(error_out, "V4L2 encoder does not expose writable extra-controls");
+		return 0;
+	}
+	GstStructure *existing = NULL;
+	g_object_get(G_OBJECT(p->encoder), "extra-controls", &existing, NULL);
+	GstStructure *controls = existing != NULL ? gst_structure_copy(existing) : gst_structure_new_empty("controls");
+	if (existing != NULL) gst_structure_free(existing);
+	if (controls == NULL) {
+		dt_set_error(error_out, "allocate V4L2 extra-controls");
+		return 0;
+	}
+	// Preserve the encoder's mode, GOP, B-frame, and sequence-header controls;
+	// only replace the stateful driver's bitrate control while it is streaming.
+	gst_structure_set(controls, "video_bitrate", G_TYPE_INT, (gint)value, NULL);
+	g_object_set(G_OBJECT(p->encoder), "extra-controls", controls, NULL);
+	gst_structure_free(controls);
+	return 1;
+}
+
+static int dt_gst_pipeline_set_frame_rate(DTGstPipeline *p, guint value, char **error_out) {
+	if (p == NULL || p->rate == NULL) {
+		dt_set_error(error_out, "invalid linked-pipeline frame-rate request");
+		return 0;
+	}
+	// videorate protects max-rate internally but does not annotate it with
+	// GST_PARAM_MUTABLE_PLAYING. It is specifically intended for live updates.
+	return dt_gst_element_set_uint(p->rate, "max-rate", value, FALSE, error_out);
 }
 
 static int dt_gst_pipeline_request_key_frame(DTGstPipeline *p, char **error_out) {
@@ -211,6 +260,7 @@ static void dt_gst_pipeline_free(DTGstPipeline *p) {
 	dt_gst_pipeline_stop(p);
 	if (p->bus != NULL) gst_object_unref(p->bus);
 	if (p->sink != NULL) gst_object_unref(p->sink);
+	if (p->rate != NULL) gst_object_unref(p->rate);
 	if (p->encoder != NULL) gst_object_unref(p->encoder);
 	if (p->pipeline != NULL) gst_object_unref(p->pipeline);
 	g_free(p);
@@ -406,17 +456,46 @@ func (p *linkedGStreamerPipeline) withHandle(action func(*C.DTGstPipeline, **C.c
 }
 
 func (p *linkedGStreamerPipeline) setBitrateKbps(bitrate int) error {
-	value := uint64(bitrate)
-	if p.encoder == "openh264enc" {
-		value *= 1000
+	value, v4l2, err := linkedEncoderBitrateValue(p.encoder, bitrate)
+	if err != nil {
+		return err
 	}
-	if p.encoder == "v4l2h264enc" {
-		return fmt.Errorf("v4l2h264enc runtime bitrate control requires changing its V4L2 extra-controls structure")
+	if v4l2 {
+		if value > uint64(^uint32(0)) {
+			return fmt.Errorf("V4L2 bitrate is outside the supported range")
+		}
+		return p.withHandle(func(handle *C.DTGstPipeline, message **C.char) C.int {
+			return C.dt_gst_pipeline_set_v4l2_bitrate(handle, C.guint(value), message)
+		})
 	}
 	return p.withHandle(func(handle *C.DTGstPipeline, message **C.char) C.int {
-		property := C.CString("bitrate")
-		defer C.free(unsafe.Pointer(property))
-		return C.dt_gst_pipeline_set_uint(handle, property, C.guint64(value), message)
+		return C.dt_gst_pipeline_set_encoder_bitrate(handle, C.guint64(value), message)
+	})
+}
+
+func linkedEncoderBitrateValue(encoder string, bitrateKbps int) (value uint64, v4l2 bool, err error) {
+	if bitrateKbps <= 0 {
+		return 0, false, fmt.Errorf("bitrate must be positive")
+	}
+	value = uint64(bitrateKbps)
+	switch encoder {
+	case "openh264enc", "v4l2h264enc":
+		if value > ^uint64(0)/1000 {
+			return 0, false, fmt.Errorf("bitrate is outside the supported range")
+		}
+		return value * 1000, encoder == "v4l2h264enc", nil
+	default:
+		// x264/x265, VA, NVENC, and Vulkan encoders expose kbit/s.
+		return value, false, nil
+	}
+}
+
+func (p *linkedGStreamerPipeline) setFrameRate(fps int) error {
+	if fps <= 0 {
+		return fmt.Errorf("frame rate must be positive")
+	}
+	return p.withHandle(func(handle *C.DTGstPipeline, message **C.char) C.int {
+		return C.dt_gst_pipeline_set_frame_rate(handle, C.guint(fps), message)
 	})
 }
 

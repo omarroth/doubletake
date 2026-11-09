@@ -13,6 +13,7 @@ import (
 // element properties cannot be changed by the parent process.
 type captureRuntimeController interface {
 	setBitrateKbps(int) error
+	setFrameRate(int) error
 	requestKeyFrame() error
 	stop()
 }

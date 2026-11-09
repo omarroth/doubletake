@@ -587,6 +587,12 @@ func (s *BroadcastSink) AsCapture() *ScreenCapture {
 		waitCh:     s.done,
 		streamOnly: true,
 	}
+	if s.owner != nil && s.owner.src != nil {
+		// Sinks share rate policy with the one encoder they consume. They must
+		// not inherit runtime ownership: stopping one sink must never stop the
+		// encoder used by its peers.
+		capture.rate = s.owner.src.rate
+	}
 	if s.owner != nil && s.owner.frames {
 		capture.frames = s
 	}

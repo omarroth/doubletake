@@ -554,6 +554,7 @@ func TestBuildGstVideoPipeline(t *testing.T) {
 		"!", "videorate", "drop-only=true",
 		"!", "video/x-raw,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "videorate", "name=doubletake-rate", "drop-only=true", "skip-to-first=true",
 		"!", "testh264enc", "bitrate=2500",
 		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
@@ -712,6 +713,7 @@ func TestBuildGstVideoPipelineSharesEncodingSuffix(t *testing.T) {
 		false,
 	)
 	wantSuffix := []string{
+		"!", "videorate", "name=doubletake-rate", "drop-only=true", "skip-to-first=true",
 		"!", "vulkanupload",
 		"!", "vulkanh264enc", "bitrate=2500",
 		"!", "h264parse", "config-interval=-1",
@@ -1081,6 +1083,7 @@ func TestSystemWaylandPipelineDetachesBeforeRetention(t *testing.T) {
 		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
 		"!", "video/x-raw,format=I420,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "videorate", "name=doubletake-rate", "drop-only=true", "skip-to-first=true",
 		"!", "openh264enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
@@ -1107,6 +1110,7 @@ func TestVAPostprocPlainRawWaylandPipelineScalesBeforeRetention(t *testing.T) {
 		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
 		"!", "video/x-raw,format=P010_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "videorate", "name=doubletake-rate", "drop-only=true", "skip-to-first=true",
 		"!", "nvh265enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
@@ -1125,6 +1129,7 @@ func TestVAPostprocPlainRawWaylandPipelineConvertsX265LayoutAfterScale(t *testin
 		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
 		"!", "video/x-raw,format=I420_10LE,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
 		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "videorate", "name=doubletake-rate", "drop-only=true", "skip-to-first=true",
 		"!", "x265enc",
 	}
 	if !containsPipelineSequence(pipeline, wantOrder) {
@@ -1238,7 +1243,7 @@ func TestWaylandEncoderPathMatrix(t *testing.T) {
 					}
 				}
 			}
-			if test.encoder.needsVulkan && !strings.Contains(joined, "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! vulkanupload ! vulkanh264enc") {
+			if test.encoder.needsVulkan && !strings.Contains(joined, "videorate name=doubletake-rate drop-only=true skip-to-first=true ! vulkanupload ! vulkanh264enc") {
 				t.Fatalf("Vulkan upload is not immediately before its encoder: %s", joined)
 			}
 		})

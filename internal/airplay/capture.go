@@ -82,6 +82,11 @@ type CaptureFormat struct {
 	BitrateKbps     int        `json:"bitrate_kbps"`
 	Encoder         string     `json:"encoder"`
 	HardwareEncoded bool       `json:"hardware_encoded"`
+	Adaptive        bool       `json:"adaptive"`
+	// EstimatedBandwidthKbps is the weakest current receiver-path estimate.
+	// It is zero until a linked pipeline has usable transport telemetry.
+	EstimatedBandwidthKbps int `json:"estimated_bandwidth_kbps,omitempty"`
+	RateControlReceivers   int `json:"rate_control_receivers,omitempty"`
 }
 
 // ValidateHWAccel checks a capture encoder preference. An empty value keeps the
@@ -113,6 +118,7 @@ type ScreenCapture struct {
 	frames   videoAccessUnitReader
 	cancel   context.CancelFunc
 	runtime  captureRuntimeController
+	rate     *videoRateController
 	pwNodeID uint32
 	portal   io.Closer     // portal session (must stay open for Wayland)
 	waitCh   chan struct{} // closed when process exits
@@ -991,6 +997,19 @@ func lowLatencyVideoQueueStage() gstStage {
 	}
 }
 
+const runtimeFrameRateElementName = "doubletake-rate"
+
+func runtimeFrameRateStage() gstStage {
+	// This final raw-video stage is a no-op at startup because capture is already
+	// paced. The linked backend changes max-rate while PLAYING, allowing the
+	// Apple-style bandwidth controller to shed encoder work without rebuilding
+	// the source, scaling, parser, or timestamp pipeline.
+	return gstStage{
+		"videorate", "name=" + runtimeFrameRateElementName,
+		"drop-only=true", "skip-to-first=true",
+	}
+}
+
 func waylandFramePacingStage() gstStage {
 	// The screen sender drives capture at its configured display cadence and
 	// converts each resulting sample timestamp to network time. Retain videorate's
@@ -1068,13 +1087,16 @@ func buildGstVideoPipeline(source gstStage, beforeConvert, afterScale []gstStage
 	for _, stage := range afterScale {
 		args = appendGstStage(args, stage)
 	}
-	if encoder.needsVulkan {
-		args = appendGstStage(args, gstStage{"vulkanupload"})
-	}
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
 func appendGstVideoEncoding(args []string, encoder encoderResult, timestampedOutput bool) []string {
+	args = appendGstStage(args, runtimeFrameRateStage())
+	if encoder.needsVulkan {
+		// videorate consumes ordinary raw video. Upload only after its adaptive
+		// frame drop so Vulkan encoders do not upload pictures they will not use.
+		args = appendGstStage(args, gstStage{"vulkanupload"})
+	}
 	args = appendGstStage(args, encoder.parts)
 	args = appendGstStage(args, encoder.afterEncoder)
 	parser, mediaType, payloader := "h264parse", "video/x-h264", "rtph264pay"
@@ -1213,9 +1235,6 @@ func buildSystemWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder enc
 		args = appendGstStage(args, stage)
 	}
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
-	if encoder.needsVulkan {
-		args = appendGstStage(args, gstStage{"vulkanupload"})
-	}
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
@@ -1246,9 +1265,6 @@ func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int,
 		args = appendGstStage(args, stage)
 	}
 	args = appendGstStage(args, lowLatencyVideoQueueStage())
-	if encoder.needsVulkan {
-		args = appendGstStage(args, gstStage{"vulkanupload"})
-	}
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
@@ -1461,6 +1477,7 @@ func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan way
 		stderr:   pipeline.stderr,
 		format:   captureFormat(cfg, plan.encoder),
 	}
+	capture.enableAutomaticVideoRateControl(cfg)
 	if timestampedOutput {
 		capture.frames = newRTPVideoAccessUnitReader(pipeline.stdout, plan.encoder.codec)
 	}
@@ -1838,6 +1855,7 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 		runtime: pipeline.runtime, waitCh: make(chan struct{}),
 		stderr: pipeline.stderr, format: captureFormat(cfg, encoder),
 	}
+	capture.enableAutomaticVideoRateControl(cfg)
 	if timestampedOutput {
 		capture.frames = newRTPVideoAccessUnitReader(pipeline.stdout, encoder.codec)
 	}
@@ -1879,7 +1897,7 @@ func (sc *ScreenCapture) Read(buf []byte) (int, error) {
 	return sc.stdout.Read(buf)
 }
 
-// Format returns immutable metadata for the encoded stream.
+// Format returns the encoded stream's current format and adaptive state.
 func (sc *ScreenCapture) Format() CaptureFormat {
 	if sc == nil {
 		return CaptureFormat{}
@@ -1887,6 +1905,22 @@ func (sc *ScreenCapture) Format() CaptureFormat {
 	sc.formatMu.RLock()
 	defer sc.formatMu.RUnlock()
 	return sc.format
+}
+
+func (sc *ScreenCapture) enableAutomaticVideoRateControl(cfg CaptureConfig) {
+	if sc == nil || sc.runtime == nil || cfg.Bitrate > 0 {
+		return
+	}
+	format := sc.Format()
+	sc.rate = newVideoRateController(sc.runtime, format.BitrateKbps, format.FPS, func(state videoRateState) {
+		sc.formatMu.Lock()
+		sc.format.Adaptive = true
+		sc.format.BitrateKbps = state.bitrateKbps
+		sc.format.FPS = state.fps
+		sc.format.EstimatedBandwidthKbps = state.estimatedBandwidthKbps
+		sc.format.RateControlReceivers = state.receivers
+		sc.formatMu.Unlock()
+	})
 }
 
 // SupportsRuntimeVideoControl reports whether this capture owns an in-process
@@ -1914,6 +1948,28 @@ func (sc *ScreenCapture) SetBitrateKbps(bitrate int) error {
 	}
 	sc.formatMu.Lock()
 	sc.format.BitrateKbps = bitrate
+	sc.formatMu.Unlock()
+	return nil
+}
+
+// SetFrameRate changes the maximum frame rate of a running, in-process
+// GStreamer pipeline by dropping raw frames immediately before the encoder.
+// It does not rebuild or duplicate the capture source.
+func (sc *ScreenCapture) SetFrameRate(fps int) error {
+	if sc == nil {
+		return fmt.Errorf("video capture is nil")
+	}
+	if fps <= 0 {
+		return fmt.Errorf("video frame rate must be positive")
+	}
+	if sc.runtime == nil {
+		return fmt.Errorf("runtime video control requires a gstreamer_cgo build")
+	}
+	if err := sc.runtime.setFrameRate(fps); err != nil {
+		return err
+	}
+	sc.formatMu.Lock()
+	sc.format.FPS = fps
 	sc.formatMu.Unlock()
 	return nil
 }
@@ -2351,6 +2407,7 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 		runtime: pipeline.runtime, waitCh: make(chan struct{}),
 		stderr: pipeline.stderr, format: captureFormat(cfg, encoder),
 	}
+	capture.enableAutomaticVideoRateControl(cfg)
 	if timestampedOutput {
 		capture.frames = newRTPVideoAccessUnitReader(pipeline.stdout, encoder.codec)
 	}

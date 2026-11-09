@@ -1674,6 +1674,13 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	if err := s.streamFailure(); err != nil {
 		return err
 	}
+	var rateReceiverID uint64
+	var transportSampler *videoTransportSampler
+	if capture.rate != nil {
+		rateReceiverID = capture.rate.attachReceiver()
+		defer capture.rate.detachReceiver(rateReceiverID)
+		transportSampler = newVideoTransportSampler(s.dataConn)
+	}
 	codec := normalizeVideoCodec(s.videoCodec)
 	var reader videoAccessUnitReader = capture
 	if capture.frames == nil {
@@ -1695,6 +1702,8 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 	packetizer := mirrorVideoPacketizer{codec: codec}
 	frameCount := 0
 	var lastProgress time.Time
+	var maximumWriteDuration time.Duration
+	nextTransportSample := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1726,8 +1735,25 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 				if s.streamCipher != nil {
 					payload = s.streamCipher(payload)
 				}
+				writeStarted := time.Now()
 				if err := s.sendFrame(payload, frame.keyframe, timestamp, timeline); err != nil {
 					return fmt.Errorf("send %s frame: %w", codec, err)
+				}
+				writeEnded := time.Now()
+				if duration := writeEnded.Sub(writeStarted); duration > maximumWriteDuration {
+					maximumWriteDuration = duration
+				}
+				if capture.rate != nil && !writeEnded.Before(nextTransportSample) {
+					metrics, sampled := videoTransportMetrics{At: writeEnded}, false
+					if transportSampler != nil {
+						metrics, sampled = transportSampler.sample(writeEnded)
+					}
+					metrics.WriteDuration = maximumWriteDuration
+					if sampled || maximumWriteDuration >= videoSlowWrite {
+						capture.rate.observe(rateReceiverID, metrics)
+					}
+					maximumWriteDuration = 0
+					nextTransportSample = writeEnded.Add(videoTelemetryInterval)
 				}
 				// Configuration alone does not start audio: wait for a picture.
 				if frameCount == 0 {

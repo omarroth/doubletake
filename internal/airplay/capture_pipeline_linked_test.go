@@ -29,6 +29,32 @@ func TestLinkedPipelineArgumentsNameControllableElements(t *testing.T) {
 	}
 }
 
+func TestLinkedEncoderBitrateUnitsCoverSelectedBackends(t *testing.T) {
+	tests := []struct {
+		encoder string
+		value   uint64
+		v4l2    bool
+	}{
+		{"x264enc", 2500, false},
+		{"x265enc", 2500, false},
+		{"vulkanh264enc", 2500, false},
+		{"nvh264enc", 2500, false},
+		{"nvh265enc", 2500, false},
+		{"vah264enc", 2500, false},
+		{"openh264enc", 2_500_000, false},
+		{"v4l2h264enc", 2_500_000, true},
+	}
+	for _, test := range tests {
+		value, v4l2, err := linkedEncoderBitrateValue(test.encoder, 2500)
+		if err != nil {
+			t.Fatalf("%s: %v", test.encoder, err)
+		}
+		if value != test.value || v4l2 != test.v4l2 {
+			t.Errorf("%s setting = (%d, %t), want (%d, %t)", test.encoder, value, v4l2, test.value, test.v4l2)
+		}
+	}
+}
+
 func TestLinkedTestCaptureChangesBitrateAndRequestsKeyFrame(t *testing.T) {
 	if !hasGstElement("x264enc") || !supportsTimestampedVideoOutput(VideoCodecH264) {
 		t.Skip("GStreamer H.264 timestamp pipeline is unavailable")
@@ -52,6 +78,12 @@ func TestLinkedTestCaptureChangesBitrateAndRequestsKeyFrame(t *testing.T) {
 	}
 	if got := capture.Format().BitrateKbps; got != 700 {
 		t.Fatalf("reported bitrate = %d kbps, want 700", got)
+	}
+	if err := capture.SetFrameRate(5); err != nil {
+		t.Fatalf("change live pipeline frame rate: %v", err)
+	}
+	if got := capture.Format().FPS; got != 5 {
+		t.Fatalf("reported frame rate = %d, want 5", got)
 	}
 	if err := capture.RequestKeyFrame(); err != nil {
 		t.Fatalf("request live x264 key frame: %v", err)
