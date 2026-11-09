@@ -1741,21 +1741,10 @@ videoReady:
 		// messages continuous and feeds deadline misses back into its dynamic
 		// latency manager instead.
 		latencySamples := audioStream.currentLatencySamples()
-		late := !usingFirstFrame && timestampedAudio &&
+		lowHeadroom := !usingFirstFrame && timestampedAudio &&
 			audioFrameIsStale(framePTS, mediaNow(), latencySamples, minimumAudioSendLead)
-		if late && audioStream.restoreLatencyAfterSenderGlitch() {
+		if lowHeadroom && audioStream.restoreLatencyAfterSenderGlitch() {
 			latencySamples = audioStream.currentLatencySamples()
-			late = audioFrameIsStale(framePTS, mediaNow(), latencySamples, minimumAudioSendLead)
-		}
-		if late {
-			lateFrames++
-			if lateFrames == 1 || lateFrames%100 == 0 {
-				dbg("[AUDIO] sending late source frame %v old (latency=%v, late=%d)",
-					mediaNow().Sub(framePTS), audioLatencyDuration(latencySamples), lateFrames)
-			}
-		} else if lateFrames > 0 {
-			dbg("[AUDIO] source caught up after %d late frames", lateFrames)
-			lateFrames = 0
 		}
 		if frameCount > 0 {
 			if timestampedAudio {
@@ -1788,6 +1777,25 @@ videoReady:
 		}
 		if err := framePacer.wait(ctx, frameRTP, spf, pacingDeadline); err != nil {
 			return err
+		}
+		// Recheck at the actual send boundary. The pacing timer itself can wake
+		// late under CPU pressure even when the frame had enough lead above.
+		latencySamples = audioStream.currentLatencySamples()
+		sentAt := mediaNow()
+		late := timestampedAudio && audioFrameIsStale(framePTS, sentAt, latencySamples, 0)
+		if late && audioStream.restoreLatencyAfterSenderGlitch() {
+			latencySamples = audioStream.currentLatencySamples()
+			late = audioFrameIsStale(framePTS, sentAt, latencySamples, 0)
+		}
+		if late {
+			lateFrames++
+			if lateFrames == 1 || lateFrames%100 == 0 {
+				dbg("[AUDIO] sending late source frame %v old (latency=%v, late=%d)",
+					sentAt.Sub(framePTS), audioLatencyDuration(latencySamples), lateFrames)
+			}
+		} else if lateFrames > 0 {
+			dbg("[AUDIO] source caught up after %d late frames", lateFrames)
+			lateFrames = 0
 		}
 		redundantFrames := 0
 		if !useRedundancy {
