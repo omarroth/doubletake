@@ -112,6 +112,7 @@ type ScreenCapture struct {
 	stdout   io.ReadCloser
 	frames   videoAccessUnitReader
 	cancel   context.CancelFunc
+	runtime  captureRuntimeController
 	pwNodeID uint32
 	portal   io.Closer     // portal session (must stay open for Wayland)
 	waitCh   chan struct{} // closed when process exits
@@ -119,6 +120,7 @@ type ScreenCapture struct {
 	stopped  bool
 	stopOnce sync.Once
 	stderr   *captureStderrTail
+	formatMu sync.RWMutex
 	format   CaptureFormat
 	// Synthetic relays have no process exit status. Their readers own terminal
 	// errors even after waitCh closes; treating that channel as EOF loses them.
@@ -1443,46 +1445,27 @@ func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan way
 		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
 	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
-	cmd.ExtraFiles = []*os.File{pwFd}
-
-	stdout, err := cmd.StdoutPipe()
+	pipeline, err := launchGStreamerPipeline(captureCtx, gstArgs, plan.encoder, []*os.File{pwFd})
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gst stdout pipe: %w", err)
+		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		_ = stdout.Close()
-		return nil, fmt.Errorf("gst stderr pipe: %w", err)
-	}
-
-	waitResult, err := startGStreamerCommand(cmd)
-	if err != nil {
-		cancel()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, fmt.Errorf("start gst-launch: %w", err)
-	}
-
-	stderrTail := newCaptureStderrTail()
-	go logStderr("GST", stderr, stderrTail)
 
 	capture := &ScreenCapture{
-		cmd:      cmd,
-		stdout:   stdout,
+		cmd:      pipeline.cmd,
+		stdout:   pipeline.stdout,
 		cancel:   cancel,
+		runtime:  pipeline.runtime,
 		pwNodeID: nodeID,
 		waitCh:   make(chan struct{}),
-		stderr:   stderrTail,
+		stderr:   pipeline.stderr,
 		format:   captureFormat(cfg, plan.encoder),
 	}
 	if timestampedOutput {
-		capture.frames = newRTPVideoAccessUnitReader(stdout, plan.encoder.codec)
+		capture.frames = newRTPVideoAccessUnitReader(pipeline.stdout, plan.encoder.codec)
 	}
 	go func() {
-		capture.waitErr = <-waitResult
+		capture.waitErr = <-pipeline.waitResult
 		close(capture.waitCh)
 	}()
 
@@ -1844,44 +1827,22 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 	gstArgs := buildGstVideoPipeline(ximageSrcArgs, beforeConvert, nil, encoder, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
 	dbg("[CAPTURE] gst-launch-1.0 (x11) %s", strings.Join(gstArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
-
-	stdout, err := cmd.StdoutPipe()
+	pipeline, err := launchGStreamerPipeline(captureCtx, gstArgs, encoder, nil)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gst stdout pipe: %w", err)
+		return nil, fmt.Errorf("X11 capture on DISPLAY=%q failed startup validation: %w", display, err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		_ = stdout.Close()
-		return nil, fmt.Errorf("gst stderr pipe: %w", err)
-	}
-
-	waitResult, err := startGStreamerCommand(cmd)
-	if err != nil {
-		cancel()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		return nil, fmt.Errorf("start gst-launch: %w", err)
-	}
-
-	stderrTail := newCaptureStderrTail()
-	go logStderr("GST", stderr, stderrTail)
 
 	capture := &ScreenCapture{
-		cmd:    cmd,
-		stdout: stdout,
-		cancel: cancel,
-		waitCh: make(chan struct{}),
-		stderr: stderrTail,
-		format: captureFormat(cfg, encoder),
+		cmd: pipeline.cmd, stdout: pipeline.stdout, cancel: cancel,
+		runtime: pipeline.runtime, waitCh: make(chan struct{}),
+		stderr: pipeline.stderr, format: captureFormat(cfg, encoder),
 	}
 	if timestampedOutput {
-		capture.frames = newRTPVideoAccessUnitReader(stdout, encoder.codec)
+		capture.frames = newRTPVideoAccessUnitReader(pipeline.stdout, encoder.codec)
 	}
 	go func() {
-		capture.waitErr = <-waitResult
+		capture.waitErr = <-pipeline.waitResult
 		close(capture.waitCh)
 	}()
 
@@ -1923,7 +1884,51 @@ func (sc *ScreenCapture) Format() CaptureFormat {
 	if sc == nil {
 		return CaptureFormat{}
 	}
+	sc.formatMu.RLock()
+	defer sc.formatMu.RUnlock()
 	return sc.format
+}
+
+// SupportsRuntimeVideoControl reports whether this capture owns an in-process
+// encoder whose properties and key-frame events can be changed while running.
+func (sc *ScreenCapture) SupportsRuntimeVideoControl() bool {
+	return sc != nil && sc.runtime != nil
+}
+
+// SetBitrateKbps changes the target bitrate of a running, in-process
+// GStreamer encoder. It is available only in binaries built with
+// -tags gstreamer_cgo and only when the selected encoder exposes a bitrate
+// property which is mutable in PLAYING state.
+func (sc *ScreenCapture) SetBitrateKbps(bitrate int) error {
+	if sc == nil {
+		return fmt.Errorf("video capture is nil")
+	}
+	if bitrate <= 0 {
+		return fmt.Errorf("video bitrate must be positive")
+	}
+	if sc.runtime == nil {
+		return fmt.Errorf("runtime video control requires a gstreamer_cgo build")
+	}
+	if err := sc.runtime.setBitrateKbps(bitrate); err != nil {
+		return err
+	}
+	sc.formatMu.Lock()
+	sc.format.BitrateKbps = bitrate
+	sc.formatMu.Unlock()
+	return nil
+}
+
+// RequestKeyFrame asks the live encoder for a new random-access frame. The
+// request travels upstream through the encoder source pad, matching GStreamer's
+// normal force-key-unit mechanism without restarting capture.
+func (sc *ScreenCapture) RequestKeyFrame() error {
+	if sc == nil {
+		return fmt.Errorf("video capture is nil")
+	}
+	if sc.runtime == nil {
+		return fmt.Errorf("runtime video control requires a gstreamer_cgo build")
+	}
+	return sc.runtime.requestKeyFrame()
 }
 
 // ReadVideoAccessUnit returns one complete encoded frame with its source PTS.
@@ -1956,6 +1961,9 @@ func (sc *ScreenCapture) Stop() {
 	}
 	sc.stopOnce.Do(func() {
 		sc.stopped = true
+		if sc.runtime != nil {
+			sc.runtime.stop()
+		}
 		if sc.cancel != nil {
 			sc.cancel()
 		}
@@ -1974,6 +1982,12 @@ func (sc *ScreenCapture) Stop() {
 					_ = sc.cmd.Process.Kill()
 					<-sc.waitCh
 				}
+			}
+		}
+		if sc.cmd == nil && sc.runtime != nil && sc.waitCh != nil {
+			select {
+			case <-sc.waitCh:
+			case <-time.After(2 * time.Second):
 			}
 		}
 
@@ -2326,39 +2340,22 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 	gstArgs := buildGstVideoPipeline(source, beforeConvert, nil, encoder, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
 	dbg("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(gstArgs, " "))
-	cmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
-
-	stdout, err := cmd.StdoutPipe()
+	pipeline, err := launchGStreamerPipeline(captureCtx, gstArgs, encoder, nil)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("gst stdout pipe: %w", err)
+		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("gst stderr pipe: %w", err)
-	}
-
-	waitResult, err := startGStreamerCommand(cmd)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("start gst-launch-1.0: %w", err)
-	}
-
-	go logStderr("GST", stderr)
 
 	capture := &ScreenCapture{
-		cmd:    cmd,
-		stdout: stdout,
-		cancel: cancel,
-		waitCh: make(chan struct{}),
-		format: captureFormat(cfg, encoder),
+		cmd: pipeline.cmd, stdout: pipeline.stdout, cancel: cancel,
+		runtime: pipeline.runtime, waitCh: make(chan struct{}),
+		stderr: pipeline.stderr, format: captureFormat(cfg, encoder),
 	}
 	if timestampedOutput {
-		capture.frames = newRTPVideoAccessUnitReader(stdout, encoder.codec)
+		capture.frames = newRTPVideoAccessUnitReader(pipeline.stdout, encoder.codec)
 	}
 	go func() {
-		capture.waitErr = <-waitResult
+		capture.waitErr = <-pipeline.waitResult
 		close(capture.waitCh)
 	}()
 

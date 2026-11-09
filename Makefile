@@ -1,4 +1,4 @@
-.PHONY: all build doubletake doubletake-ctl doubletake-test-receiver doubletake-release doubletake-ctl-release manpages-release install install-bin install-man install-systemd uninstall test clean
+.PHONY: all build doubletake doubletake-ctl doubletake-gstreamer-cgo doubletake-test-receiver doubletake-release doubletake-ctl-release manpages-release install install-bin install-man install-systemd uninstall test clean
 
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
@@ -13,6 +13,12 @@ doubletake:
 
 doubletake-ctl:
 	go build -o bin/doubletake-ctl ./cmd/doubletake-ctl
+
+# Experimental dynamically linked build. Video capture runs libgstreamer in
+# process, making live encoder controls available without changing the default
+# or release builds.
+doubletake-gstreamer-cgo:
+	CGO_ENABLED=1 go build -tags gstreamer_cgo -o bin/doubletake-gstreamer-cgo ./cmd/doubletake
 
 # Developer-only diagnostic receiver; build explicitly when needed.
 doubletake-test-receiver:

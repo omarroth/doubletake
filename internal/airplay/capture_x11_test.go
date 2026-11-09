@@ -76,8 +76,8 @@ func TestX11CaptureValidatesAndRetainsLiveXvfbPipeline(t *testing.T) {
 	if !ok || len(prefetched.units) < 2 {
 		t.Fatalf("validated X11 capture retained %#v, want prefetched live access units", capture.frames)
 	}
-	if capture.cmd == nil || capture.cmd.Process == nil {
-		t.Fatal("validated X11 capture did not retain its production process")
+	if (capture.cmd == nil || capture.cmd.Process == nil) && capture.runtime == nil {
+		t.Fatal("validated X11 capture did not retain its production pipeline")
 	}
 	select {
 	case <-capture.waitCh:
@@ -151,7 +151,7 @@ func TestX11CaptureRejectsStaleDisplayWithGStreamerEvidence(t *testing.T) {
 	if err == nil {
 		t.Fatal("stale DISPLAY returned no error")
 	}
-	for _, want := range []string{"failed startup validation", "GStreamer stderr", display} {
+	for _, want := range []string{"failed startup validation", "GStreamer", display} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("stale DISPLAY error %q is missing %q", err, want)
 		}
