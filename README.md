@@ -123,15 +123,27 @@ make doubletake-gstreamer-cgo
 This creates `bin/doubletake-gstreamer-cgo` and requires the GStreamer core,
 app, and video development packages plus a C compiler. It uses the same capture,
 scaling, encoder, parser, and timestamp graph as the normal binary. The linked
-backend adds live target-bitrate and force-key-frame controls at the capture API;
-the default and release binaries do not link GStreamer and continue using the
-`gst-launch-1.0` subprocess.
+backend adds live target-bitrate, frame-rate, and force-key-frame controls at
+the capture API. The default and release binaries do not link GStreamer and
+continue using the `gst-launch-1.0` subprocess.
 
-This is an integration prototype, not an automatic network controller yet.
-Apple's sender couples its live encoder to a rate controller and data pacer fed
-by bandwidth and delay measurements. doubletake does not currently have
-equivalent video transport feedback, so the prototype deliberately does not
-infer bandwidth from receiver identity or apply an unvalidated bitrate policy.
+With `-bitrate 0`, the linked backend also enables an experimental automatic
+network controller. On Linux it samples each video TCP connection's delivery
+rate, pacing rate, congestion window, retransmitted bytes, and unsent queue;
+portable socket-write delay remains a fallback signal. A shared multiroom
+encoder follows the weakest current receiver path. Matching Apple's screen
+policy, 75 percent of estimated bandwidth is allocated to video, with a 1
+Mbit/s floor and doubletake's resolution/FPS budget as the ceiling. Frame rate
+moves through 10/20/30/60 fps tiers after five seconds of stable telemetry.
+Recovery is deliberately gradual. Supplying a nonzero `-bitrate` keeps a fixed
+target and disables these automatic changes.
+
+The same control adapter covers x264, x265, OpenH264, NVENC, VA, Vulkan/NVENC,
+and V4L2 encoders selected by doubletake. V4L2 updates its `video_bitrate`
+extra-control; the others update their live `bitrate` property. Availability
+still depends on the installed GStreamer plugin and driver exposing a mutable
+control. The controller is receiver-neutral: it does not identify receiver
+models or apply per-device presets.
 
 ## Install
 
@@ -345,7 +357,7 @@ doubletake-ctl disconnect
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
 | `-pair` | false | Force new pairing |
 | `-fps` | 30 | Frames per second |
-| `-bitrate` | 0 | Video bitrate in kbps (`0` = automatic resolution/FPS budget) |
+| `-bitrate` | 0 | Video bitrate in kbps (`0` = automatic budget; the experimental linked build also adapts it during streaming) |
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
@@ -360,8 +372,9 @@ doubletake-ctl disconnect
 | `-debug` | false | Verbose debug logging |
 | `-help`, `-h` | | Show command-line help |
 
-Automatic bitrate is selected once when capture starts; it does not currently
-change in response to network conditions during a session.
+The ordinary binary selects automatic bitrate once when capture starts. The
+experimental linked GStreamer build can adjust that budget during a session as
+described above.
 
 Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
 `nvh264enc`, `vah264enc`, `v4l2h264enc`, `openh264enc`, then `x264enc`. Explicit selections
@@ -405,6 +418,12 @@ so connection order does not determine another receiver's size. For example, a
 receiver reporting a 1920x1080 canvas and a 3840x2160 maximum joins the
 1920x1080 H.264 group in automatic mode. An explicit HEVC request uses the
 maximum canvas and forms a separate group.
+
+With the linked backend, `status` reports the live `adaptive`,
+`estimated_bandwidth_kbps`, and `rate_control_receivers` fields for each stream.
+Streams sharing an encoder report the same weakest-path estimate and current
+bitrate/frame rate.
+
 Fan-out uses a bounded queue per target within each group. A
 stalled target is detached when its queue fills, without blocking peers that
 share the encoder. Other canvas groups continue independently as well.

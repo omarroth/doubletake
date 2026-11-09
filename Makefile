@@ -15,8 +15,8 @@ doubletake-ctl:
 	go build -o bin/doubletake-ctl ./cmd/doubletake-ctl
 
 # Experimental dynamically linked build. Video capture runs libgstreamer in
-# process, making live encoder controls available without changing the default
-# or release builds.
+# process, making live encoder controls and transport-driven rate adjustment
+# available without changing the default or release builds.
 doubletake-gstreamer-cgo:
 	CGO_ENABLED=1 go build -tags gstreamer_cgo -o bin/doubletake-gstreamer-cgo ./cmd/doubletake
 
