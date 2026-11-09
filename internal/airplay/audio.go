@@ -1147,6 +1147,19 @@ func (as *AudioStream) audioPacketForRetransmit(seq uint16) []byte {
 	return entry.packet
 }
 
+// resendRememberedAudioPacket sends the immutable wire datagram retained by
+// the message ring. Redundant delivery is byte-identical to the original, so
+// rebuilding and re-encrypting it only adds allocator and crypto jitter to the
+// real-time sender path.
+func (as *AudioStream) resendRememberedAudioPacket(seq uint16) error {
+	packet := as.audioPacketForRetransmit(seq)
+	if packet == nil {
+		return fmt.Errorf("audio packet %d is no longer in retransmission history", seq)
+	}
+	_, err := as.conn.WriteTo(packet, as.remoteAddr)
+	return err
+}
+
 type audioRetransmitRequest struct {
 	requestSeq uint16
 	firstSeq   uint16
@@ -1683,7 +1696,6 @@ videoReady:
 		payload []byte
 		rtpTime uint32
 		seq     uint16
-		nonce   uint64
 	}
 	var retransmitBuf [retransmitDepth]audioFrame
 	redHistory := make([]audioREDFrame, 0, audioRedundancyCount)
@@ -1833,15 +1845,18 @@ videoReady:
 			for age := 0; age < available; age++ {
 				index := (retransmitIdx - 1 - age + retransmitDepth) % retransmitDepth
 				frame := &retransmitBuf[index]
-				var reuseNonce *uint64
-				if age > 0 {
-					reuseNonce = &frame.nonce
+				if age == 0 {
+					if _, err := sendPacket(frame.payload, frame.rtpTime, frame.seq, audioDataPayloadType, nil); err != nil {
+						return fmt.Errorf("audio send: %w", err)
+					}
+				} else {
+					if err := burstLimiter.wait(ctx); err != nil {
+						return err
+					}
+					if err := audioStream.resendRememberedAudioPacket(frame.seq); err != nil {
+						return fmt.Errorf("audio redundancy send: %w", err)
+					}
 				}
-				nonce, err := sendPacket(frame.payload, frame.rtpTime, frame.seq, audioDataPayloadType, reuseNonce)
-				if err != nil {
-					return fmt.Errorf("audio send: %w", err)
-				}
-				frame.nonce = nonce
 			}
 		}
 		if audioStream.rfc2198 {
