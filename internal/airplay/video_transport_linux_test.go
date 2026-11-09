@@ -36,9 +36,10 @@ func TestVideoTransportSamplerReadsTCPInfo(t *testing.T) {
 	defer server.Close()
 
 	payload := make([]byte, 64<<10)
+	received := make([]byte, len(payload))
 	readDone := make(chan error, 1)
 	go func() {
-		_, err := io.ReadFull(server, payload)
+		_, err := io.ReadFull(server, received)
 		readDone <- err
 	}()
 	if _, err := client.Write(payload); err != nil {
