@@ -17,6 +17,26 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
+type audioTestControlConn struct {
+	recordingPacketConn
+	done chan struct{}
+	once sync.Once
+}
+
+func newAudioTestControlConn() *audioTestControlConn {
+	return &audioTestControlConn{done: make(chan struct{})}
+}
+
+func (c *audioTestControlConn) ReadFrom([]byte) (int, net.Addr, error) {
+	<-c.done
+	return 0, nil, io.EOF
+}
+
+func (c *audioTestControlConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return nil
+}
+
 func TestUseAudioRedundancyDefaults(t *testing.T) {
 	if !useAudioRedundancy(AudioCodecALAC) {
 		t.Fatal("expected ALAC screen sessions to use recent-packet redundancy")
@@ -374,6 +394,37 @@ type steadyTimestampedPCMFramesForTest struct {
 	age       time.Duration
 }
 
+type delayedTimestampedPCMFramesForTest struct {
+	base      time.Time
+	remaining int
+	sourceRTP uint32
+	spf       uint32
+	delay     time.Duration
+}
+
+func (r *delayedTimestampedPCMFramesForTest) ReadPCMFrame(dst []byte) (time.Time, error) {
+	position, err := r.ReadPCMFramePosition(dst)
+	return position.PTS, err
+}
+
+func (r *delayedTimestampedPCMFramesForTest) ReadPCMFramePosition(dst []byte) (audioPCMFramePosition, error) {
+	if r.remaining == 0 {
+		return audioPCMFramePosition{}, io.EOF
+	}
+	if r.sourceRTP == r.spf {
+		time.Sleep(r.delay)
+	}
+	position := audioPCMFramePosition{
+		PTS:          r.base.Add(audioSamplesDuration(uint64(r.sourceRTP))),
+		SourceRTP:    r.sourceRTP,
+		HasSourceRTP: true,
+	}
+	r.sourceRTP += r.spf
+	r.remaining--
+	clear(dst)
+	return position, nil
+}
+
 func (r *steadyTimestampedPCMFramesForTest) ReadPCMFrame(dst []byte) (time.Time, error) {
 	position, err := r.ReadPCMFramePosition(dst)
 	return position.PTS, err
@@ -420,22 +471,35 @@ func TestStreamAudioKeepsTimestampedFramesWithPositivePlayoutLead(t *testing.T) 
 	assertAudioPacketSequences(t, packets, []uint16{1, 2, 1, 3, 2, 1, 4, 3, 2, 5, 4, 3, 6, 5, 4})
 }
 
+func TestStreamAudioPreservesContinuityAfterSenderStall(t *testing.T) {
+	const frames = 8
+	reader := &delayedTimestampedPCMFramesForTest{
+		base:      time.Now(),
+		remaining: frames,
+		spf:       352,
+		delay:     100 * time.Millisecond,
+	}
+	_, packets := streamAudioPacketsForCodecTest(
+		t, "plaintext", reader, frames, AudioCodecALAC, false,
+		samplesFor44k1(defaultAudioLatencyNormal),
+	)
+	var want []uint16
+	for seq := uint16(1); seq <= frames; seq++ {
+		for age := uint16(0); age <= audioRedundancyCount && age < seq; age++ {
+			want = append(want, seq-age)
+		}
+	}
+	assertAudioPacketSequences(t, packets, want)
+}
+
 func streamAudioPacketsForTest(t *testing.T, security string, frames audioPCMFrameReader, count int, rfc2198 ...bool) (*AudioStream, [][]byte) {
 	return streamAudioPacketsForCodecTest(t, security, frames, count, AudioCodecALAC, len(rfc2198) > 0 && rfc2198[0])
 }
 
 func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioPCMFrameReader, count int, codec AudioCodec, rfc2198 bool, latencyOverride ...uint32) (*AudioStream, [][]byte) {
 	t.Helper()
-	ctrlConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ctrlConn.Close() })
-	ctrlPeer, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ctrlPeer.Close() })
+	var err error
+	ctrlConn := newAudioTestControlConn()
 	dataConn := &recordingPacketConn{}
 	latencySamples := uint32(audioSampleRate)
 	if len(latencyOverride) > 0 {
@@ -443,7 +507,7 @@ func streamAudioPacketsForCodecTest(t *testing.T, security string, frames audioP
 	}
 	stream := &AudioStream{
 		conn: dataConn, ctrlConn: ctrlConn, remoteAddr: &netUDPAddrForAudioTest,
-		ctrlAddr: ctrlPeer.LocalAddr().(*net.UDPAddr),
+		ctrlAddr: &netUDPAddrForAudioTest,
 		// This fixture tests packet order, independent of scheduler latency.
 		ct: byte(codec), latencySamples: latencySamples, rfc2198: rfc2198,
 	}

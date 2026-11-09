@@ -213,7 +213,10 @@ performance reports are telemetry only. Other receivers, and an explicit
 
 Capture PTS and audio sample positions determine presentation time, regardless of
 when an individual sender drains its queue. Queues are bounded: a stalled audio
-consumer loses its subscription instead of blocking the other rooms. Shared
+consumer loses its subscription instead of blocking the other rooms. Timestamped
+capture preserves complete frames through short sender stalls and catches up in
+bounded bursts instead of creating RTP gaps; an adaptive stream also returns to
+the safest latency tier as soon as a sender deadline is missed. Shared
 capture requires GStreamer's RTP/ONVIF timestamp elements; output-time timestamp
 fallback cannot align rooms. The daemon's status JSON reports `shared_audio`
 source/encoder/receiver counts, `video_encoders`, and `playout_latency_ms`.

@@ -390,6 +390,40 @@ func (as *AudioStream) applyPerformanceReport(report audioPerformanceReport) boo
 	return true
 }
 
+// restoreLatencyAfterSenderGlitch returns an adaptive stream to the safest
+// latency in its negotiated profile. Apple's real-time audio engine immediately
+// feeds receiver glitch notifications into its DynamicLatencyManager. A sender
+// deadline miss is the corresponding condition observable on this side; waiting
+// for the next periodic receiver report can leave the stream at a latency which
+// has already proved too small.
+func (as *AudioStream) restoreLatencyAfterSenderGlitch() bool {
+	if as == nil {
+		return false
+	}
+	as.mu.Lock()
+	if !as.adaptiveLatency || len(as.latencyTiers) < 2 || as.latencyTier == 0 {
+		as.mu.Unlock()
+		return false
+	}
+	oldSamples := as.latencySamples
+	as.latencyTier = 0
+	as.latencySamples = as.latencyTiers[0]
+	newSamples := as.latencySamples
+	as.performanceReports = nil
+	changedSignal := as.latencyChanged
+	as.mu.Unlock()
+
+	dbg("[AUDIO-DLM] restored latency from %v to %v after a sender deadline miss",
+		audioLatencyDuration(oldSamples), audioLatencyDuration(newSamples))
+	if changedSignal != nil {
+		select {
+		case changedSignal <- struct{}{}:
+		default:
+		}
+	}
+	return true
+}
+
 func plistNumericValue(value interface{}) (float64, bool) {
 	switch number := value.(type) {
 	case uint64:

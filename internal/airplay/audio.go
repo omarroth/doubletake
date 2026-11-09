@@ -1694,7 +1694,7 @@ videoReady:
 	framePosition := firstFramePosition
 	framePTS := firstFramePosition.PTS
 	frameRTP := firstFrameRTP
-	staleFrames := 0
+	lateFrames := 0
 	lastTimingReportAt := time.Time{}
 	lastTimingReportRTP := firstFrameRTP
 	lastFrameSentAt := time.Time{}
@@ -1735,25 +1735,27 @@ videoReady:
 			framePosition.PTS = framePTS
 		}
 		// The source callback may deliver multiple frames after a scheduler stall.
-		// Keep every frame whose render deadline is still in the future and let the
-		// bounded burst sender catch up. Reserve the same small delivery margin used
-		// by the pacer: a frame which reaches the UDP socket at its render deadline
-		// is already too late on a real network. Discarding a recoverable frame
-		// creates an RTP hole, so keep every frame whose negotiated render deadline
-		// remains reachable.
+		// Preserve every complete frame and let the bounded burst sender catch up.
+		// Dropping a frame here creates an otherwise avoidable RTP/sample hole and
+		// forces the receiver to conceal it. Apple's real-time sender keeps queued
+		// messages continuous and feeds deadline misses back into its dynamic
+		// latency manager instead.
 		latencySamples := audioStream.currentLatencySamples()
-		stale := !usingFirstFrame && timestampedAudio && audioFrameIsStale(framePTS, mediaNow(), latencySamples, minimumAudioSendLead)
-		if stale {
-			staleFrames++
-			if staleFrames == 1 || staleFrames%100 == 0 {
-				dbg("[AUDIO] dropping stale source frame %v old (latency=%v, dropped=%d)",
-					time.Since(framePTS), audioLatencyDuration(latencySamples), staleFrames)
-			}
-			continue
+		late := !usingFirstFrame && timestampedAudio &&
+			audioFrameIsStale(framePTS, mediaNow(), latencySamples, minimumAudioSendLead)
+		if late && audioStream.restoreLatencyAfterSenderGlitch() {
+			latencySamples = audioStream.currentLatencySamples()
+			late = audioFrameIsStale(framePTS, mediaNow(), latencySamples, minimumAudioSendLead)
 		}
-		if staleFrames > 0 {
-			dbg("[AUDIO] source caught up after dropping %d stale frames", staleFrames)
-			staleFrames = 0
+		if late {
+			lateFrames++
+			if lateFrames == 1 || lateFrames%100 == 0 {
+				dbg("[AUDIO] sending late source frame %v old (latency=%v, late=%d)",
+					mediaNow().Sub(framePTS), audioLatencyDuration(latencySamples), lateFrames)
+			}
+		} else if lateFrames > 0 {
+			dbg("[AUDIO] source caught up after %d late frames", lateFrames)
+			lateFrames = 0
 		}
 		if frameCount > 0 {
 			if timestampedAudio {

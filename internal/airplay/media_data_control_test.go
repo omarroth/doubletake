@@ -99,6 +99,38 @@ func TestAudioDynamicLatencyNormalizesGlitchesToPromotionWindow(t *testing.T) {
 	}
 }
 
+func TestAudioSenderDeadlineMissRestoresSafestLatency(t *testing.T) {
+	tiers, _ := dynamicAudioLatencyTiers(samplesFor44k1(defaultAudioLatencyHigh))
+	audio := &AudioStream{
+		latencySamples:  tiers[len(tiers)-1],
+		adaptiveLatency: true,
+		latencyTiers:    tiers,
+		latencyTier:     len(tiers) - 1,
+		latencyChanged:  make(chan struct{}, 1),
+		performanceReports: []audioPerformanceReport{{
+			durationSecs: 60,
+		}},
+	}
+	if !audio.restoreLatencyAfterSenderGlitch() {
+		t.Fatal("sender deadline miss did not restore adaptive latency")
+	}
+	if got := audio.currentLatencySamples(); got != tiers[0] {
+		t.Fatalf("restored latency = %v, want %v", audioLatencyDuration(got), audioLatencyDuration(tiers[0]))
+	}
+	if audio.latencyTier != 0 || len(audio.performanceReports) != 0 {
+		t.Fatalf("restored dynamic state = tier %d reports %d, want tier 0 and no reports",
+			audio.latencyTier, len(audio.performanceReports))
+	}
+	select {
+	case <-audio.latencyChanged:
+	default:
+		t.Fatal("latency restoration did not request an immediate TimeAnnounce")
+	}
+	if audio.restoreLatencyAfterSenderGlitch() {
+		t.Fatal("already-safe latency was reported as another change")
+	}
+}
+
 func TestMediaDataControlEncryptedRoundTripAndReportApplication(t *testing.T) {
 	const seed = uint64(18446744073709551600)
 	secret := []byte("0123456789abcdef0123456789abcdef")
