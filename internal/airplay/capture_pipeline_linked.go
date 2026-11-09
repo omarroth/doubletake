@@ -15,6 +15,9 @@ typedef struct {
 	GstElement *rate;
 	GstAppSink *sink;
 	GstBus *bus;
+	GstSample *pulled_sample;
+	GstBuffer *pulled_buffer;
+	GstMapInfo pulled_map;
 } DTGstPipeline;
 
 static void dt_set_error(char **out, const char *message) {
@@ -111,10 +114,25 @@ static DTGstPipeline *dt_gst_pipeline_new(char **argv, char **error_out) {
 	return result;
 }
 
+static void dt_gst_pipeline_release_sample(DTGstPipeline *p) {
+	if (p == NULL || p->pulled_sample == NULL) return;
+	if (p->pulled_buffer != NULL) {
+		gst_buffer_unmap(p->pulled_buffer, &p->pulled_map);
+	}
+	gst_sample_unref(p->pulled_sample);
+	p->pulled_sample = NULL;
+	p->pulled_buffer = NULL;
+}
+
+// The returned pointer remains valid until dt_gst_pipeline_release_sample.
 // Returns one for a sample, zero for EOS/stop, and minus one for an error.
-static int dt_gst_pipeline_pull(DTGstPipeline *p, unsigned char **data_out, size_t *size_out, char **error_out) {
+static int dt_gst_pipeline_pull(DTGstPipeline *p, const unsigned char **data_out, size_t *size_out, char **error_out) {
 	if (p == NULL || data_out == NULL || size_out == NULL) {
 		dt_set_error(error_out, "invalid linked-pipeline pull arguments");
+		return -1;
+	}
+	if (p->pulled_sample != NULL) {
+		dt_set_error(error_out, "previous linked-pipeline sample was not released");
 		return -1;
 	}
 	*data_out = NULL;
@@ -130,18 +148,15 @@ static int dt_gst_pipeline_pull(DTGstPipeline *p, unsigned char **data_out, size
 		return 0;
 	}
 	GstBuffer *buffer = gst_sample_get_buffer(sample);
-	GstMapInfo map;
-	if (buffer == NULL || !gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+	if (buffer == NULL || !gst_buffer_map(buffer, &p->pulled_map, GST_MAP_READ)) {
 		dt_set_error(error_out, "map GStreamer appsink buffer");
 		gst_sample_unref(sample);
 		return -1;
 	}
-	if (map.size != 0) {
-		*data_out = g_memdup2(map.data, map.size);
-		*size_out = map.size;
-	}
-	gst_buffer_unmap(buffer, &map);
-	gst_sample_unref(sample);
+	p->pulled_sample = sample;
+	p->pulled_buffer = buffer;
+	*data_out = p->pulled_map.data;
+	*size_out = p->pulled_map.size;
 	return 1;
 }
 
@@ -258,6 +273,7 @@ static void dt_gst_pipeline_stop(DTGstPipeline *p) {
 static void dt_gst_pipeline_free(DTGstPipeline *p) {
 	if (p == NULL) return;
 	dt_gst_pipeline_stop(p);
+	dt_gst_pipeline_release_sample(p);
 	if (p->bus != NULL) gst_object_unref(p->bus);
 	if (p->sink != NULL) gst_object_unref(p->sink);
 	if (p->rate != NULL) gst_object_unref(p->rate);
@@ -420,7 +436,7 @@ func (p *linkedGStreamerPipeline) run() {
 		var data *C.uchar
 		var size C.size_t
 		var message *C.char
-		status := C.dt_gst_pipeline_pull(p.handle, &data, &size, &message)
+		status := C.dt_gst_pipeline_pull(p.handle, (**C.uchar)(unsafe.Pointer(&data)), &size, &message)
 		if status < 0 {
 			result = cError(message)
 			return
@@ -429,7 +445,7 @@ func (p *linkedGStreamerPipeline) run() {
 			return
 		}
 		payload := C.GoBytes(unsafe.Pointer(data), C.int(size))
-		C.dt_gst_free(unsafe.Pointer(data))
+		C.dt_gst_pipeline_release_sample(p.handle)
 		if len(payload) == 0 {
 			continue
 		}
