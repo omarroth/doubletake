@@ -57,5 +57,6 @@ func (s *videoTransportSampler) sample(at time.Time) (videoTransportMetrics, boo
 		BytesAcked:              info.Bytes_acked,
 		BytesRetransmitted:      info.Bytes_retrans,
 		NotSentBytes:            info.Notsent_bytes,
+		transportSampled:        true,
 	}, true
 }

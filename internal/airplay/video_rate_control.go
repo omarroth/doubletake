@@ -34,6 +34,16 @@ type videoTransportMetrics struct {
 	BytesRetransmitted      uint64
 	NotSentBytes            uint32
 	WriteDuration           time.Duration
+	transportSampled        bool
+}
+
+func (sample videoTransportMetrics) hasTransportSample() bool {
+	// Tests and future platform samplers may construct useful partial metrics.
+	// The explicit bit distinguishes a valid all-zero kernel sample from the
+	// portable write-only observation used when socket telemetry is unavailable.
+	return sample.transportSampled || sample.DeliveryRateBps != 0 || sample.PacingRateBps != 0 ||
+		sample.CongestionWindowRateBps != 0 || sample.BytesAcked != 0 ||
+		sample.BytesRetransmitted != 0 || sample.NotSentBytes != 0
 }
 
 type videoReceiverRateState struct {
@@ -148,10 +158,12 @@ func (c *videoRateController) observe(id uint64, sample videoTransportMetrics) {
 	dbg("[RATE] receiver=%d available=%d kbps delivery=%d kbps pacing=%d kbps cwnd=%d kbps notsent=%d write=%v congested=%t reason=%s",
 		id, receiver.availableBps/1000, sample.DeliveryRateBps/1000, sample.PacingRateBps/1000,
 		sample.CongestionWindowRateBps/1000, sample.NotSentBytes, sample.WriteDuration, receiver.congested, reason)
-	receiver.bytesAcked = sample.BytesAcked
-	receiver.bytesRetransmitted = sample.BytesRetransmitted
-	receiver.notSentBytes = sample.NotSentBytes
-	receiver.hasCounters = true
+	if sample.hasTransportSample() {
+		receiver.bytesAcked = sample.BytesAcked
+		receiver.bytesRetransmitted = sample.BytesRetransmitted
+		receiver.notSentBytes = sample.NotSentBytes
+		receiver.hasCounters = true
+	}
 	c.recalculateLocked(sample.At)
 }
 
@@ -186,6 +198,9 @@ func (c *videoRateController) estimateAvailableBandwidthLocked(sample videoTrans
 func (c *videoRateController) sampleIsCongestedLocked(receiver *videoReceiverRateState, sample videoTransportMetrics) (bool, string) {
 	if sample.WriteDuration >= videoSlowWrite {
 		return true, "slow-write"
+	}
+	if !sample.hasTransportSample() {
+		return false, "none"
 	}
 	if receiver.hasCounters && sample.BytesRetransmitted > receiver.bytesRetransmitted {
 		retransmitted := sample.BytesRetransmitted - receiver.bytesRetransmitted

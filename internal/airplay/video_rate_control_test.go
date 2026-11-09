@@ -118,6 +118,28 @@ func TestVideoRateControllerRecoversFromPortableSlowWrite(t *testing.T) {
 	}
 }
 
+func TestVideoRateControllerPreservesCountersAcrossTelemetryGap(t *testing.T) {
+	runtime := &fakeCaptureRuntimeController{}
+	controller := newVideoRateController(runtime, 6000, 30, nil)
+	receiver := controller.attachReceiver()
+	now := time.Now()
+	controller.observe(receiver, videoTransportMetrics{
+		At: now, CongestionWindowRateBps: 8_000_000,
+		BytesAcked: 10_000, BytesRetransmitted: 100_000,
+	})
+
+	// A socket-metrics failure still supplies a healthy write observation, but
+	// must not replace cumulative TCP counters with zero.
+	controller.observe(receiver, videoTransportMetrics{At: now.Add(videoTelemetryInterval)})
+	controller.observe(receiver, videoTransportMetrics{
+		At: now.Add(2 * videoTelemetryInterval), CongestionWindowRateBps: 8_000_000,
+		BytesAcked: 60_000, BytesRetransmitted: 100_000,
+	})
+	if len(runtime.bitrates) != 0 {
+		t.Fatalf("unchanged retransmission counter after telemetry gap changed bitrate: %v", runtime.bitrates)
+	}
+}
+
 func TestVideoRateControllerIgnoresNormalSmallSendBufferOccupancy(t *testing.T) {
 	runtime := &fakeCaptureRuntimeController{}
 	controller := newVideoRateController(runtime, 4147, 30, nil)
