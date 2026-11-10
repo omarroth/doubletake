@@ -26,9 +26,9 @@ type runningGStreamerPipeline struct {
 	runtime    captureRuntimeController
 }
 
-// launchGStreamerPipeline selects the build-time capture backend. Ordinary
-// builds retain the gst-launch child process. A build made with
-// -tags gstreamer_cgo links libgstreamer and owns the same graph in-process.
+// launchGStreamerPipeline selects the build-time capture backend. The default
+// binary links libgstreamer and owns the graph in-process. The static fallback
+// retains the gst-launch child process.
 func launchGStreamerPipeline(ctx context.Context, args []string, encoder encoderResult, extraFiles []*os.File) (*runningGStreamerPipeline, error) {
 	if pipeline, handled, err := launchLinkedGStreamerPipeline(ctx, args, encoder, extraFiles); handled {
 		if err != nil {

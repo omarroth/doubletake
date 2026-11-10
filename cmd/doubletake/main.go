@@ -66,7 +66,7 @@ func main() {
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
 	expectedDeviceID := flag.String("device-id", "", "Device ID of the receiver meant, e.g. from discovery. Its saved pairing applies even if the device at -target names itself differently, and such a device is refused")
 	fps := flag.Int("fps", 30, "Frames per second")
-	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic budget; linked GStreamer builds adapt it to transport telemetry)")
+	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic adaptive budget; doubletake-static selects the budget only at startup)")
 	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon uses shared 250 ms)")
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto uses H.264 for receiver compatibility)")
@@ -81,6 +81,9 @@ func main() {
 	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
+	if !airplay.HasInProcessGStreamer() {
+		log.Println("warning: static fallback build uses gst-launch-1.0 for video; adaptive stream quality is unavailable")
+	}
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)
 	}

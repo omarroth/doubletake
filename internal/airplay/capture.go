@@ -1110,7 +1110,7 @@ func appendGstVideoEncoding(args []string, encoder encoderResult, timestampedOut
 		// extension serializes each encoded buffer's absolute capture PTS. The
 		// RFC4571 length prefix makes the packet stream safe to carry over stdout.
 		args = appendGstStage(args, gstStage{
-			payloader, "pt=96", "mtu=60000", "aggregate-mode=none",
+			payloader, "pt=96", "mtu=60000",
 			"timestamp-offset=0", "seqnum-offset=0",
 		})
 		args = appendGstStage(args, gstStage{
@@ -1930,9 +1930,9 @@ func (sc *ScreenCapture) SupportsRuntimeVideoControl() bool {
 }
 
 // SetBitrateKbps changes the target bitrate of a running, in-process
-// GStreamer encoder. It is available only in binaries built with
-// -tags gstreamer_cgo and only when the selected encoder exposes a bitrate
-// property which is mutable in PLAYING state.
+// GStreamer encoder. It is available in the default dynamically linked binary
+// when the selected encoder exposes a bitrate property which is mutable in
+// PLAYING state.
 func (sc *ScreenCapture) SetBitrateKbps(bitrate int) error {
 	if sc == nil {
 		return fmt.Errorf("video capture is nil")
@@ -1941,7 +1941,7 @@ func (sc *ScreenCapture) SetBitrateKbps(bitrate int) error {
 		return fmt.Errorf("video bitrate must be positive")
 	}
 	if sc.runtime == nil {
-		return fmt.Errorf("runtime video control requires a gstreamer_cgo build")
+		return fmt.Errorf("runtime video control is unavailable in the static fallback build")
 	}
 	if err := sc.runtime.setBitrateKbps(bitrate); err != nil {
 		return err
@@ -1963,7 +1963,7 @@ func (sc *ScreenCapture) SetFrameRate(fps int) error {
 		return fmt.Errorf("video frame rate must be positive")
 	}
 	if sc.runtime == nil {
-		return fmt.Errorf("runtime video control requires a gstreamer_cgo build")
+		return fmt.Errorf("runtime video control is unavailable in the static fallback build")
 	}
 	if err := sc.runtime.setFrameRate(fps); err != nil {
 		return err
@@ -1982,7 +1982,7 @@ func (sc *ScreenCapture) RequestKeyFrame() error {
 		return fmt.Errorf("video capture is nil")
 	}
 	if sc.runtime == nil {
-		return fmt.Errorf("runtime video control requires a gstreamer_cgo build")
+		return fmt.Errorf("runtime video control is unavailable in the static fallback build")
 	}
 	return sc.runtime.requestKeyFrame()
 }
@@ -2380,14 +2380,15 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 		fps = 30
 	}
 
-	// pattern=18 = ball (bouncing ball with motion); timeoverlay adds a frame counter.
-	// Keep test source live/infinite so long-running audio tests do not stop with EOF.
+	// pattern=18 = ball (bouncing ball with motion). Keep the test source
+	// live/infinite so long-running audio tests do not stop with EOF. Avoid
+	// decorative overlays here so the synthetic capture uses only production
+	// runtime dependencies.
 	source := gstStage{
 		"videotestsrc", "pattern=18", "is-live=true", "do-timestamp=true",
 	}
 	beforeConvert := []gstStage{
 		{fmt.Sprintf("video/x-raw,width=%d,height=%d,framerate=%d/1", testCaptureWidth, testCaptureHeight, fps)},
-		{"timeoverlay"},
 		lowLatencyVideoQueueStage(),
 	}
 	// Match the production capture paths: if conversion/encoding cannot keep up,

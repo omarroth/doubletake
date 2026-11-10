@@ -3,11 +3,25 @@ package airplay
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
+
+func gstreamerVersionAtLeast(t *testing.T, wantMajor, wantMinor int) bool {
+	t.Helper()
+	out, err := exec.Command("gst-launch-1.0", "--version").Output()
+	if err != nil {
+		t.Fatalf("get GStreamer version: %v", err)
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(string(out), "gst-launch-1.0 version %d.%d", &major, &minor); err != nil {
+		t.Fatalf("parse GStreamer version %q: %v", strings.TrimSpace(string(out)), err)
+	}
+	return major > wantMajor || major == wantMajor && minor >= wantMinor
+}
 
 func TestWaylandOrientationAppliedBeforeCanvas(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420", codec: VideoCodecH264}
@@ -60,6 +74,13 @@ func TestWaylandOrientationPixels(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.tag, func(t *testing.T) {
+			if (test.tag == "flip-rotate-90" || test.tag == "flip-rotate-270") && !gstreamerVersionAtLeast(t, 1, 20) {
+				// GStreamer 1.16 uses the opposite names for these two diagonal
+				// transforms. Its contemporary PipeWire plugin does not publish
+				// orientation tags, so retain the portable pipeline and exercise
+				// the standardized mapping where that integration is available.
+				t.Skip("legacy GStreamer diagonal orientation-tag mapping")
+			}
 			w, h := width, height
 			if test.swap {
 				w, h = h, w

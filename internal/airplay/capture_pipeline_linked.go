@@ -9,6 +9,10 @@ package airplay
 #include <gst/video/video-event.h>
 #include <stdlib.h>
 
+#if !GST_CHECK_VERSION(1, 16, 0)
+#error "doubletake requires GStreamer 1.16 or newer"
+#endif
+
 typedef struct {
 	GstElement *pipeline;
 	GstElement *encoder;
@@ -56,6 +60,12 @@ static DTGstPipeline *dt_gst_pipeline_new(char **argv, char **error_out) {
 	if (!gst_init_check(NULL, NULL, &error)) {
 		dt_set_gerror(error_out, "initialize GStreamer", error);
 		if (error != NULL) g_error_free(error);
+		return NULL;
+	}
+	guint major = 0, minor = 0, micro = 0, nano = 0;
+	gst_version(&major, &minor, &micro, &nano);
+	if (major < 1 || (major == 1 && minor < 16)) {
+		dt_set_error(error_out, "GStreamer 1.16 or newer is required");
 		return NULL;
 	}
 
@@ -303,6 +313,10 @@ const (
 	linkedEncoderName = "doubletake-encoder"
 	linkedOutputName  = "doubletake-output"
 )
+
+// HasInProcessGStreamer reports whether this binary owns its video pipeline
+// through libgstreamer and can change encoder properties while streaming.
+func HasInProcessGStreamer() bool { return true }
 
 type linkedGStreamerPipeline struct {
 	mu       sync.Mutex

@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+func TestLinkedBuildReportsInProcessGStreamer(t *testing.T) {
+	if !HasInProcessGStreamer() {
+		t.Fatal("linked build did not report in-process GStreamer support")
+	}
+}
+
 func TestLinkedPipelineArgumentsNameControllableElements(t *testing.T) {
 	got, err := linkedPipelineArguments([]string{
 		"--quiet", "videotestsrc", "!", "x264enc", "bitrate=1000", "!",

@@ -586,7 +586,7 @@ func TestBuildGstVideoPipelineTimestampedOutput(t *testing.T) {
 	wantSuffix := []string{
 		"!", "h264parse", "config-interval=-1",
 		"!", "video/x-h264,stream-format=byte-stream,alignment=au",
-		"!", "rtph264pay", "pt=96", "mtu=60000", "aggregate-mode=none", "timestamp-offset=0", "seqnum-offset=0",
+		"!", "rtph264pay", "pt=96", "mtu=60000", "timestamp-offset=0", "seqnum-offset=0",
 		"!", "rtponviftimestamp", "ntp-offset=-1", "set-e-bit=false", "set-t-bit=false",
 		"!", "rtpstreampay",
 		"!", "fdsink", "fd=1", "sync=false", "async=false",
