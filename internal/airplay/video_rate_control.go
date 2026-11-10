@@ -20,6 +20,8 @@ const (
 	videoRecoveryHold      = 2 * time.Second
 	videoFPSHysteresis     = 5 * time.Second
 	videoSlowWrite         = 25 * time.Millisecond
+	videoQueueDelayLimit   = 10 * time.Millisecond
+	videoQueueDelaySamples = 3
 )
 
 // videoTransportMetrics is deliberately independent of Linux's tcp_info.
@@ -33,6 +35,9 @@ type videoTransportMetrics struct {
 	BytesAcked              uint64
 	BytesRetransmitted      uint64
 	NotSentBytes            uint32
+	RoundTripTime           time.Duration
+	RoundTripVariation      time.Duration
+	MinimumRoundTripTime    time.Duration
 	WriteDuration           time.Duration
 	transportSampled        bool
 }
@@ -43,7 +48,8 @@ func (sample videoTransportMetrics) hasTransportSample() bool {
 	// portable write-only observation used when socket telemetry is unavailable.
 	return sample.transportSampled || sample.DeliveryRateBps != 0 || sample.PacingRateBps != 0 ||
 		sample.CongestionWindowRateBps != 0 || sample.BytesAcked != 0 ||
-		sample.BytesRetransmitted != 0 || sample.NotSentBytes != 0
+		sample.BytesRetransmitted != 0 || sample.NotSentBytes != 0 ||
+		sample.RoundTripTime != 0 || sample.MinimumRoundTripTime != 0
 }
 
 type videoReceiverRateState struct {
@@ -53,6 +59,9 @@ type videoReceiverRateState struct {
 	bytesRetransmitted uint64
 	notSentBytes       uint32
 	queuePressure      int
+	minimumRTT         time.Duration
+	queueDelay         time.Duration
+	delayPressure      int
 	hasCounters        bool
 	congested          bool
 }
@@ -155,9 +164,10 @@ func (c *videoRateController) observe(id uint64, sample videoTransportMetrics) {
 			videoBandwidthAllocationNumerator,
 		)
 	}
-	dbg("[RATE] receiver=%d available=%d kbps delivery=%d kbps pacing=%d kbps cwnd=%d kbps notsent=%d write=%v congested=%t reason=%s",
+	dbg("[RATE] receiver=%d available=%d kbps delivery=%d kbps pacing=%d kbps cwnd=%d kbps rtt=%v rttvar=%v queue-delay=%v notsent=%d write=%v congested=%t reason=%s",
 		id, receiver.availableBps/1000, sample.DeliveryRateBps/1000, sample.PacingRateBps/1000,
-		sample.CongestionWindowRateBps/1000, sample.NotSentBytes, sample.WriteDuration, receiver.congested, reason)
+		sample.CongestionWindowRateBps/1000, sample.RoundTripTime, sample.RoundTripVariation, receiver.queueDelay,
+		sample.NotSentBytes, sample.WriteDuration, receiver.congested, reason)
 	if sample.hasTransportSample() {
 		receiver.bytesAcked = sample.BytesAcked
 		receiver.bytesRetransmitted = sample.BytesRetransmitted
@@ -201,6 +211,35 @@ func (c *videoRateController) sampleIsCongestedLocked(receiver *videoReceiverRat
 	}
 	if !sample.hasTransportSample() {
 		return false, "none"
+	}
+	// Apple's rate controller records one-way relative delay so it can react to
+	// queue growth before packets are lost. TCP_INFO does not expose receiver
+	// OWRD, but RTT growth above the connection minimum is the same receiver-
+	// neutral signal with the reverse-path component folded in. Require three
+	// consecutive observations above ten milliseconds to ignore an isolated
+	// wireless or scheduler spike.
+	receiver.queueDelay = 0
+	if sample.RoundTripTime > 0 {
+		minimumRTT := sample.MinimumRoundTripTime
+		if minimumRTT <= 0 {
+			minimumRTT = sample.RoundTripTime
+		}
+		if receiver.minimumRTT == 0 || minimumRTT < receiver.minimumRTT {
+			receiver.minimumRTT = minimumRTT
+		}
+		if sample.RoundTripTime > receiver.minimumRTT {
+			receiver.queueDelay = sample.RoundTripTime - receiver.minimumRTT
+		}
+		if receiver.queueDelay > videoQueueDelayLimit {
+			receiver.delayPressure++
+		} else {
+			receiver.delayPressure = 0
+		}
+		if receiver.delayPressure >= videoQueueDelaySamples {
+			return true, "queue-delay"
+		}
+	} else {
+		receiver.delayPressure = 0
 	}
 	if receiver.hasCounters && sample.BytesRetransmitted > receiver.bytesRetransmitted {
 		retransmitted := sample.BytesRetransmitted - receiver.bytesRetransmitted

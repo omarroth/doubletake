@@ -61,4 +61,7 @@ func TestVideoTransportSamplerReadsTCPInfo(t *testing.T) {
 	if !metrics.At.Equal(now) {
 		t.Fatalf("sample time = %v, want %v", metrics.At, now)
 	}
+	if metrics.RoundTripTime <= 0 || metrics.MinimumRoundTripTime <= 0 {
+		t.Fatalf("TCP_INFO returned invalid RTT metrics: current=%v minimum=%v", metrics.RoundTripTime, metrics.MinimumRoundTripTime)
+	}
 }

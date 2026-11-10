@@ -129,14 +129,16 @@ continue using the `gst-launch-1.0` subprocess.
 
 With `-bitrate 0`, the linked backend also enables an experimental automatic
 network controller. On Linux it samples each video TCP connection's delivery
-rate, pacing rate, congestion window, retransmitted bytes, and unsent queue;
-portable socket-write delay remains a fallback signal. A shared multiroom
-encoder follows the weakest current receiver path. Matching Apple's screen
-policy, 75 percent of estimated bandwidth is allocated to video, with a 1
-Mbit/s floor and doubletake's resolution/FPS budget as the ceiling. Frame rate
-moves through 10/20/30/60 fps tiers after five seconds of stable telemetry.
-Recovery is deliberately gradual. Supplying a nonzero `-bitrate` keeps a fixed
-target and disables these automatic changes.
+rate, pacing rate, congestion window, RTT growth, retransmitted bytes, and
+unsent queue; portable socket-write delay remains a fallback signal. Persistent
+RTT growth supplies the same early queue-pressure role as the relative-delay
+telemetry in Apple's controller. A shared multiroom encoder follows the weakest
+current receiver path. Matching Apple's screen policy, 75 percent of estimated
+bandwidth is allocated to video, with a 1 Mbit/s floor and doubletake's
+resolution/FPS budget as the ceiling. Frame rate moves through 10/20/30/60 fps
+tiers after five seconds of stable telemetry. Recovery is deliberately gradual.
+Supplying a nonzero `-bitrate` keeps a fixed target and disables these automatic
+changes.
 
 The same control adapter covers x264, x265, OpenH264, NVENC, VA, Vulkan/NVENC,
 and V4L2 encoders selected by doubletake. V4L2 updates its `video_bitrate`

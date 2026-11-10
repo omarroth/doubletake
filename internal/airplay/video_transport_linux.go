@@ -57,6 +57,9 @@ func (s *videoTransportSampler) sample(at time.Time) (videoTransportMetrics, boo
 		BytesAcked:              info.Bytes_acked,
 		BytesRetransmitted:      info.Bytes_retrans,
 		NotSentBytes:            info.Notsent_bytes,
+		RoundTripTime:           time.Duration(info.Rtt) * time.Microsecond,
+		RoundTripVariation:      time.Duration(info.Rttvar) * time.Microsecond,
+		MinimumRoundTripTime:    time.Duration(info.Min_rtt) * time.Microsecond,
 		transportSampled:        true,
 	}, true
 }

@@ -176,6 +176,42 @@ func TestVideoRateControllerBacksOffOnPersistentGrowingQueue(t *testing.T) {
 	}
 }
 
+func TestVideoRateControllerBacksOffOnPersistentQueueDelay(t *testing.T) {
+	runtime := &fakeCaptureRuntimeController{}
+	controller := newVideoRateController(runtime, 6000, 30, nil)
+	receiver := controller.attachReceiver()
+	now := time.Now()
+	controller.observe(receiver, videoTransportMetrics{
+		At: now, CongestionWindowRateBps: 20_000_000,
+		RoundTripTime: 2 * time.Millisecond, MinimumRoundTripTime: 2 * time.Millisecond,
+	})
+	for sample := 1; sample <= videoQueueDelaySamples; sample++ {
+		controller.observe(receiver, videoTransportMetrics{
+			At: now.Add(time.Duration(sample) * videoTelemetryInterval), CongestionWindowRateBps: 20_000_000,
+			RoundTripTime: 13 * time.Millisecond, MinimumRoundTripTime: 2 * time.Millisecond,
+		})
+	}
+	if !reflect.DeepEqual(runtime.bitrates, []int{4500}) {
+		t.Fatalf("bitrate changes = %v, want persistent queue-delay backoff", runtime.bitrates)
+	}
+}
+
+func TestVideoRateControllerIgnoresSingleQueueDelaySpike(t *testing.T) {
+	runtime := &fakeCaptureRuntimeController{}
+	controller := newVideoRateController(runtime, 6000, 30, nil)
+	receiver := controller.attachReceiver()
+	now := time.Now()
+	for sample, rtt := range []time.Duration{2 * time.Millisecond, 20 * time.Millisecond, 3 * time.Millisecond, 20 * time.Millisecond} {
+		controller.observe(receiver, videoTransportMetrics{
+			At: now.Add(time.Duration(sample) * videoTelemetryInterval), CongestionWindowRateBps: 20_000_000,
+			RoundTripTime: rtt, MinimumRoundTripTime: 2 * time.Millisecond,
+		})
+	}
+	if len(runtime.bitrates) != 0 {
+		t.Fatalf("isolated queue-delay spikes changed bitrate: %v", runtime.bitrates)
+	}
+}
+
 func TestAppleVideoFrameRateTiers(t *testing.T) {
 	tests := []struct {
 		bandwidth uint64
