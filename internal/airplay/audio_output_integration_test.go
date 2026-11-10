@@ -225,6 +225,7 @@ func TestDedicatedAudioOutputContinuityIntegration(t *testing.T) {
 	previousRead := time.Time{}
 	minReadGap, maxReadGap := time.Duration(1<<63-1), time.Duration(0)
 	minPTSDelta, maxPTSDelta := time.Duration(1<<63-1), time.Duration(0)
+	minSourceAge, maxSourceAge := time.Duration(1<<63-1), time.Duration(0)
 	burstReads := 0
 	for frame := range 750 {
 		position, err := capture.readPCMFramePosition(pcm)
@@ -232,6 +233,11 @@ func TestDedicatedAudioOutputContinuityIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		now := time.Now()
+		sourceAge := now.Sub(position.PTS)
+		if sourceAge < minSourceAge {
+			minSourceAge = sourceAge
+		}
+		maxSourceAge = max(maxSourceAge, sourceAge)
 		if frame > 0 {
 			if delta := position.SourceRTP - previous.SourceRTP; delta != 352 {
 				t.Fatalf("frame %d source RTP advanced by %d samples", frame, delta)
@@ -255,6 +261,6 @@ func TestDedicatedAudioOutputContinuityIntegration(t *testing.T) {
 	if reader.discontinuities != 0 {
 		t.Fatalf("capture reported %d discontinuities", reader.discontinuities)
 	}
-	t.Logf("750 frames: read gaps %v..%v, PTS deltas %v..%v, sub-millisecond batch reads %d",
-		minReadGap, maxReadGap, minPTSDelta, maxPTSDelta, burstReads)
+	t.Logf("750 frames: source age %v..%v, read gaps %v..%v, PTS deltas %v..%v, sub-millisecond batch reads %d",
+		minSourceAge, maxSourceAge, minReadGap, maxReadGap, minPTSDelta, maxPTSDelta, burstReads)
 }

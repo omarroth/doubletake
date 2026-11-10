@@ -67,6 +67,7 @@ const (
 	// PCM. This queue has no minimum threshold, so it does not add steady-state
 	// latency; source PTS still decides whether a recovered frame is timely.
 	audioCaptureStallBuffer = 250 * time.Millisecond
+	audioPulseDeviceBuffer  = 50 * time.Millisecond
 
 	// A diagnostic tone can reach speakers whose receiver resets to full volume
 	// when an AirPlay session starts. Keep it safely below full scale: 0.01
@@ -173,10 +174,10 @@ func pulseMonitorSourceArgs(monitor string, codec AudioCodec) []string {
 	return []string{
 		"pulsesrc",
 		fmt.Sprintf("device=%s", monitor),
-		// Keep the source read granularity at one codec frame, but give the
-		// device-side ring enough capacity to survive a scheduler stall. The
-		// downstream queue cannot preserve samples that pulsesrc has not read.
-		fmt.Sprintf("buffer-time=%d", audioCaptureStallBuffer/time.Microsecond),
+		// The timestamped downstream queue carries the longer scheduler-stall
+		// reserve. Keep Pulse's device ring short so its callback batching does
+		// not consume the receiver's playout lead before Go can pace the frames.
+		fmt.Sprintf("buffer-time=%d", audioPulseDeviceBuffer/time.Microsecond),
 		fmt.Sprintf("latency-time=%d", fragmentTime/time.Microsecond),
 	}
 }
@@ -309,7 +310,7 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 		case "pulse":
 			fragmentTime := audioCaptureFragmentTime(codec)
 			dbg("[AUDIO] using pulsesrc device=%s (buffer=%s fragment=%s)",
-				monitor, audioCaptureStallBuffer, fragmentTime)
+				monitor, audioPulseDeviceBuffer, fragmentTime)
 		case "pipewire":
 			dbg("[AUDIO] using default pipewiresrc")
 		default:

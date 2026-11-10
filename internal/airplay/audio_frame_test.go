@@ -63,7 +63,7 @@ func TestPulseMonitorSourceSeparatesStallBufferFromFragment(t *testing.T) {
 	for _, want := range []string{
 		"pulsesrc",
 		"device=test.monitor",
-		"buffer-time=250000",
+		"buffer-time=50000",
 		"latency-time=7982",
 	} {
 		if !strings.Contains(args, want) {
@@ -87,12 +87,12 @@ func TestAudioMonitorSourceSelection(t *testing.T) {
 		{
 			name: "Pulse monitor preferred when both plugins exist", hasPulse: true,
 			monitor: "test.monitor", hasPipeWire: true, wantSource: "pulse",
-			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=250000", "latency-time=7982"},
+			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=50000", "latency-time=7982"},
 		},
 		{
 			name: "native Pulse monitor", hasPulse: true,
 			monitor: "test.monitor", wantSource: "pulse",
-			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=250000", "latency-time=7982"},
+			wantArgs: []string{"pulsesrc", "device=test.monitor", "buffer-time=50000", "latency-time=7982"},
 		},
 		{
 			name: "PipeWire fallback without Pulse plugin", hasPipeWire: true, wantSource: "pipewire",
