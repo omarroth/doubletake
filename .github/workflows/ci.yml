@@ -20,7 +20,62 @@ jobs:
           go-version-file: go.mod
       - run: make test
 
-  build:
+  build-gstreamer:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            suffix: ""
+          - runner: ubuntu-24.04-arm
+            suffix: "-arm64"
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:20.04
+    needs: test
+    steps:
+      - name: Install Ubuntu 20.04 GStreamer build and runtime dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential pkg-config binutils \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+            gstreamer1.0-pulseaudio pulseaudio-utils
+
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test linked GStreamer backend
+        run: make test-gstreamer
+
+      - name: Build dynamically linked doubletake
+        run: make doubletake-release
+
+      - name: Verify minimum-runtime compatibility
+        run: |
+          gst-inspect-1.0 x264enc >/dev/null
+          gst-inspect-1.0 rtponviftimestamp >/dev/null
+          ldd ./doubletake | grep -F libgstreamer-1.0.so.0
+          ./doubletake -help >/dev/null
+          if readelf --version-info ./doubletake | grep -Eq 'Name: GLIBC_2\.(3[2-9]|[4-9][0-9])'; then
+            echo "doubletake requires a glibc newer than Ubuntu 20.04" >&2
+            exit 1
+          fi
+
+      - name: Add architecture suffix
+        if: matrix.suffix != ''
+        run: mv doubletake "doubletake${{ matrix.suffix }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-gstreamer${{ matrix.suffix }}
+          path: doubletake${{ matrix.suffix }}
+
+  build-static:
     strategy:
       matrix:
         include:
@@ -36,11 +91,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build doubletake
-        run: make doubletake-release
+      - name: Build static fallback
+        run: make doubletake-static-release
 
-      - name: Build doubletake-ctl
+      - name: Build static doubletake-ctl
         run: make doubletake-ctl-release
+
+      - name: Verify static release binaries
+        run: |
+          file ./doubletake-static | grep -F 'statically linked'
+          file ./doubletake-ctl | grep -F 'statically linked'
 
       - name: Bundle manpages
         if: matrix.suffix == ''
@@ -49,21 +109,21 @@ jobs:
       - name: Add architecture suffix
         if: matrix.suffix != ''
         run: |
-          mv doubletake "doubletake${{ matrix.suffix }}"
+          mv doubletake-static "doubletake-static${{ matrix.suffix }}"
           mv doubletake-ctl "doubletake-ctl${{ matrix.suffix }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-assets${{ matrix.suffix }}
+          name: release-assets-static${{ matrix.suffix }}
           path: |
-            doubletake${{ matrix.suffix }}
+            doubletake-static${{ matrix.suffix }}
             doubletake-ctl${{ matrix.suffix }}
             doubletake-manpages.tar.gz
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build-gstreamer, build-static]
     permissions:
       contents: write
     steps:
@@ -74,7 +134,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: release-assets*
+          pattern: release-assets-*
           merge-multiple: true
 
       - name: Extract release notes from tag
@@ -98,7 +158,9 @@ jobs:
           body: ${{ steps.notes.outputs.RELEASE_NOTES }}
           files: |
             doubletake
+            doubletake-static
             doubletake-ctl
             doubletake-arm64
+            doubletake-static-arm64
             doubletake-ctl-arm64
             doubletake-manpages.tar.gz

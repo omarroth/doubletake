@@ -20,23 +20,24 @@ AirPlay screen mirroring sender for Linux. Streams your desktop to Apple TV and 
 ## Requirements
 
 - Go 1.25+
-- GStreamer 1.0 (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
+- GStreamer 1.16+ (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
 - PulseAudio utilities (`pactl`; `pulseaudio-utils` on Ubuntu/Debian or the equivalent package on other distributions)
 - PipeWire (Wayland) or X11 for screen capture
 
 ### Ubuntu/Debian
 
 ```sh
-sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+sudo apt install build-essential pkg-config \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-tools \
-  gstreamer1.0-pipewire pulseaudio-utils
+  gstreamer1.0-pipewire gstreamer1.0-pulseaudio pulseaudio-utils
 ```
 
 ### Arch Linux
 
 ```sh
-sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
+sudo pacman -S --needed base-devel gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
   gst-plugins-ugly gst-libav libpulse
 ```
 
@@ -96,10 +97,17 @@ These are devices that have been tested with doubletake. If there are devices no
 make
 ```
 
-This builds the two binaries into `bin/`:
+This builds three binaries into `bin/`:
 
-- `bin/doubletake`
-- `bin/doubletake-ctl`
+- `bin/doubletake` dynamically links GStreamer and owns the video pipeline
+  in-process. This is the default and supports live quality adaptation.
+- `bin/doubletake-static` is the portable fallback. It launches
+  `gst-launch-1.0` for video and cannot adjust quality while streaming.
+- `bin/doubletake-ctl` is always static and has no GStreamer dependency.
+
+The word "static" describes doubletake itself, not the media stack:
+`doubletake-static` still requires `gst-launch-1.0` and the appropriate runtime
+plugins. It prints a startup warning that adaptive stream quality is unavailable.
 
 For developer testing, build the diagnostic receiver explicitly:
 
@@ -111,24 +119,24 @@ This creates `bin/doubletake-test-receiver`. It is excluded from default builds,
 installation, and release artifacts. Its manual is available at
 `man/man1/doubletake-test-receiver.1`.
 
-### Experimental linked GStreamer backend
+### In-process GStreamer backend
 
-Linux developers can build a dynamically linked prototype which owns the video
-pipeline in-process instead of launching `gst-launch-1.0`:
+Build either streaming variant directly with:
 
 ```sh
-make doubletake-gstreamer-cgo
+make doubletake
+make doubletake-static
 ```
 
-This creates `bin/doubletake-gstreamer-cgo` and requires the GStreamer core,
-app, and video development packages plus a C compiler. It uses the same capture,
-scaling, encoder, parser, and timestamp graph as the normal binary. The linked
-backend adds live target-bitrate, frame-rate, and force-key-frame controls at
-the capture API. The default and release binaries do not link GStreamer and
-continue using the `gst-launch-1.0` subprocess.
+The default build requires the GStreamer core, app, and video development
+packages plus a C compiler. It uses the same capture, scaling, encoder, parser,
+and timestamp graph as the static fallback, while adding live target-bitrate,
+frame-rate, and force-key-frame controls. Release builds target GStreamer 1.16
+and are linked on Ubuntu 20.04 so their glibc baseline remains compatible with
+that distribution and newer Linux systems.
 
-With `-bitrate 0`, the linked backend also enables an experimental automatic
-network controller. On Linux it samples each video TCP connection's delivery
+With `-bitrate 0`, the default build enables the automatic network controller.
+On Linux it samples each video TCP connection's delivery
 rate, pacing rate, congestion window, RTT growth, retransmitted bytes, and
 unsent queue; portable socket-write delay remains a fallback signal. Persistent
 RTT growth supplies the same early queue-pressure role as the relative-delay
@@ -138,7 +146,8 @@ bandwidth is allocated to video, with a 1 Mbit/s floor and doubletake's
 resolution/FPS budget as the ceiling. Frame rate moves through 10/20/30/60 fps
 tiers after five seconds of stable telemetry. Recovery is deliberately gradual.
 Supplying a nonzero `-bitrate` keeps a fixed target and disables these automatic
-changes.
+changes. The static fallback always selects the automatic budget only once at
+startup.
 
 The same control adapter covers x264, x265, OpenH264, NVENC, VA, Vulkan/NVENC,
 and V4L2 encoders selected by doubletake. V4L2 updates its `video_bitrate`
@@ -362,7 +371,7 @@ doubletake-ctl disconnect
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
 | `-pair` | false | Force new pairing |
 | `-fps` | 30 | Frames per second |
-| `-bitrate` | 0 | Video bitrate in kbps (`0` = automatic budget; the experimental linked build also adapts it during streaming) |
+| `-bitrate` | 0 | Video bitrate in kbps (`0` = adaptive budget in `doubletake`; startup-only automatic budget in `doubletake-static`) |
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
@@ -377,9 +386,9 @@ doubletake-ctl disconnect
 | `-debug` | false | Verbose debug logging |
 | `-help`, `-h` | | Show command-line help |
 
-The ordinary binary selects automatic bitrate once when capture starts. The
-experimental linked GStreamer build can adjust that budget during a session as
-described above.
+The default `doubletake` can adjust an automatic bitrate budget during a
+session. `doubletake-static` selects that budget once when capture starts and
+warns that adaptive stream quality is unavailable.
 
 Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
 `nvh264enc`, `vah264enc`, `v4l2h264enc`, `openh264enc`, then `x264enc`. Explicit selections
@@ -424,7 +433,7 @@ receiver reporting a 1920x1080 canvas and a 3840x2160 maximum joins the
 1920x1080 H.264 group in automatic mode. An explicit HEVC request uses the
 maximum canvas and forms a separate group.
 
-With the linked backend, `status` reports the live `adaptive`,
+With the default dynamically linked backend, `status` reports the live `adaptive`,
 `estimated_bandwidth_kbps`, and `rate_control_receivers` fields for each stream.
 Streams sharing an encoder report the same weakest-path estimate and current
 bitrate/frame rate.
