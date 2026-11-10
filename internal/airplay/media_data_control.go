@@ -202,19 +202,19 @@ func parseAudioPerformanceReport(values map[string]interface{}) (audioPerformanc
 	if uint64(duration) < dynamicLatencyMinimumReportDuration {
 		return report, false, nil
 	}
-	deadline, ok := plistNumericValue(values["RenderDeadlineMinMs"])
-	if !ok || deadline < math.MinInt32 || deadline > math.MaxInt32 || math.Trunc(deadline) != deadline {
-		return report, false, fmt.Errorf("invalid RenderDeadlineMinMs %v", values["RenderDeadlineMinMs"])
-	}
-
 	// Screen variants consume live-adaptive reports. A non-startup histogram is
-	// valid receiver telemetry, but belongs to the non-live latency managers.
+	// valid receiver telemetry, but belongs to the non-live latency managers and
+	// may carry a deadline sentinel outside the live report's numeric range.
 	histogramMap, ok := values["LiveAdaptiveGlitchHistogram"].(map[string]interface{})
 	if !ok {
 		if _, nonStartup := values["NonStartupGlitchHistogram"]; nonStartup {
 			return report, false, nil
 		}
 		return report, false, fmt.Errorf("report omitted LiveAdaptiveGlitchHistogram")
+	}
+	deadline, ok := plistNumericValue(values["RenderDeadlineMinMs"])
+	if !ok || deadline < math.MinInt32 || deadline > math.MaxInt32 || math.Trunc(deadline) != deadline {
+		return report, false, fmt.Errorf("invalid RenderDeadlineMinMs %v", values["RenderDeadlineMinMs"])
 	}
 	histogram, err := parseSerializedHistogram(histogramMap)
 	if err != nil {

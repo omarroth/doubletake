@@ -68,7 +68,7 @@ func TestAudioPerformanceReportRequiresMinimumDurationAndLiveHistogram(t *testin
 	nonLive := map[string]interface{}{
 		"ProtocolVersion":           uint64(1),
 		"SessionDurationSec":        uint64(5),
-		"RenderDeadlineMinMs":       int64(8),
+		"RenderDeadlineMinMs":       int64(-16090342052502),
 		"NonStartupGlitchHistogram": testSerializedGlitchHistogram(uint64(0), uint64(0), uint64(0)),
 	}
 	if _, ok, err := parseAudioPerformanceReport(nonLive); err != nil || ok {
