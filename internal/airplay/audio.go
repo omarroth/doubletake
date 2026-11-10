@@ -176,7 +176,7 @@ func pulseMonitorSourceArgs(monitor string, codec AudioCodec) []string {
 		fmt.Sprintf("device=%s", monitor),
 		// The timestamped downstream queue carries the longer scheduler-stall
 		// reserve. Keep Pulse's device ring short so its callback batching does
-		// not consume the receiver's playout lead before Go can pace the frames.
+		// not consume the receiver's playout lead before Go can send the frames.
 		fmt.Sprintf("buffer-time=%d", audioPulseDeviceBuffer/time.Microsecond),
 		fmt.Sprintf("latency-time=%d", fragmentTime/time.Microsecond),
 	}
@@ -213,8 +213,7 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 	if timestamped {
 		// The real-time sender is normally driven by one source callback per
 		// codec frame. Give the Go side that same boundary instead of splitting a
-		// sound-server buffer into smaller RTP packets and reconstructing a frame
-		// before holding it on a second timer.
+		// sound-server buffer into smaller RTP packets and reconstructing a frame.
 		args = append(args,
 			"!", "audiobuffersplit", fmt.Sprintf("output-buffer-duration=%d/%d", codecSPF, audioSampleRate),
 			"strict-buffer-size=true",
@@ -1355,7 +1354,6 @@ const (
 	maximumInitialCatchupFrames = 128
 	audioSendBurstWindow        = 5 * time.Millisecond
 	maximumAudioPacketsPerBurst = 12
-	maximumAudioPacingFrames    = 4
 )
 
 // audioSendBurstLimiter bounds only catch-up bursts. At normal ALAC/AAC-ELD
@@ -1396,67 +1394,6 @@ func (limiter *audioSendBurstLimiter) wait(ctx context.Context) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
-	}
-}
-
-// audioPacingFramesForLatency uses only the playout budget above the low-latency
-// profile for sender-side staging. Four ALAC frames cover about 32 milliseconds,
-// enough to smooth the callback batches produced by common sound servers while
-// preserving at least 50 milliseconds of receiver/network lead.
-func audioPacingFramesForLatency(latencySamples, frameSamples uint32) uint32 {
-	if frameSamples == 0 {
-		return 0
-	}
-	budget := audioLatencyDuration(latencySamples) - defaultAudioLatencyLow
-	if budget <= 0 {
-		return 0
-	}
-	frames := uint32(budget / audioSamplesDuration(uint64(frameSamples)))
-	if frames > maximumAudioPacingFrames {
-		return maximumAudioPacingFrames
-	}
-	return frames
-}
-
-// audioFramePacer releases capture at its RTP sample cadence. Sound servers can
-// deliver several correctly timestamped frames in one callback; sending that
-// callback as a UDP burst makes receiver buffering needlessly uneven.
-type audioFramePacer struct {
-	anchorRTP    uint32
-	anchorTime   time.Time
-	bufferFrames uint32
-}
-
-func (pacer *audioFramePacer) reserveDelay(now time.Time, rtpTime, frameSamples uint32, deadline time.Time) time.Duration {
-	if now.IsZero() || frameSamples == 0 {
-		return 0
-	}
-	if pacer.anchorTime.IsZero() {
-		pacer.anchorRTP = rtpTime
-		pacer.anchorTime = now.Add(audioSamplesDuration(uint64(frameSamples) * uint64(pacer.bufferFrames)))
-	}
-	target := pacer.anchorTime.Add(audioSamplesDuration(uint64(rtpTime - pacer.anchorRTP)))
-	if !deadline.IsZero() && target.After(deadline) {
-		target = deadline
-	}
-	if delay := target.Sub(now); delay > 0 {
-		return delay
-	}
-	return 0
-}
-
-func (pacer *audioFramePacer) wait(ctx context.Context, rtpTime, frameSamples uint32, deadline time.Time) error {
-	delay := pacer.reserveDelay(time.Now(), rtpTime, frameSamples, deadline)
-	if delay <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 
@@ -1574,12 +1511,10 @@ videoReady:
 		dbg("[AUDIO] discarded %d timestamped startup frames to restore positive playout lead", catchupFrames)
 	}
 	timestampedAudio := !firstFramePosition.PTS.IsZero()
-	pacingFrames := audioPacingFramesForLatency(audioStream.currentLatencySamples(), spf)
-	pacingDuration := audioSamplesDuration(uint64(spf) * uint64(pacingFrames))
 	if timestampedAudio {
-		dbg("[AUDIO] timestamped frame pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
+		dbg("[AUDIO] timestamped capture: forwarding callback-ready frames immediately")
 	} else {
-		dbg("[AUDIO] fallback pacing reservoir: %d frames (%v)", pacingFrames, pacingDuration)
+		dbg("[AUDIO] fallback capture: forwarding callback-ready frames immediately")
 	}
 	if firstFramePosition.PTS.IsZero() {
 		// Transparent raw fallback: preserve the historical read-time anchor.
@@ -1686,7 +1621,6 @@ videoReady:
 		dbg("[AUDIO] packet redundancy enabled: current frame plus two recent frames")
 	}
 	var burstLimiter audioSendBurstLimiter
-	framePacer := audioFramePacer{bufferFrames: pacingFrames}
 	sendPacket := func(payload []byte, rtpTime uint32, seq uint16, payloadType byte, reuseNonce *uint64) (uint64, error) {
 		if err := burstLimiter.wait(ctx); err != nil {
 			return 0, err
@@ -1790,15 +1724,11 @@ videoReady:
 		copy(payload, frameBuf[:n])
 
 		frameCount++
-		pacingDeadline := time.Time{}
-		if timestampedAudio {
-			pacingDeadline = framePTS.Add(audioLatencyDuration(audioStream.currentLatencySamples()) - minimumAudioSendLead)
-		}
-		if err := framePacer.wait(ctx, frameRTP, spf, pacingDeadline); err != nil {
-			return err
-		}
-		// Recheck at the actual send boundary. The pacing timer itself can wake
-		// late under CPU pressure even when the frame had enough lead above.
+		// Apple's real-time sender transcodes and sends data directly from its
+		// source callback. Do the same here: deliberately staging even a few codec
+		// frames spends receiver playout lead and turns an otherwise harmless
+		// capture callback delay into a render deadline miss. The burst limiter
+		// above still bounds pathological catch-up without delaying normal input.
 		latencySamples = audioStream.currentLatencySamples()
 		sentAt := mediaNow()
 		late := timestampedAudio && audioFrameIsStale(framePTS, sentAt, latencySamples, 0)
