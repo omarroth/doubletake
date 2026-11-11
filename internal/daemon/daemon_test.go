@@ -91,18 +91,38 @@ func TestNewDefaultsVideoCodecToAuto(t *testing.T) {
 	}
 }
 
+func TestNewRejectsIncompleteTargetResolution(t *testing.T) {
+	for _, cfg := range []Config{
+		{TargetWidth: 1920},
+		{TargetHeight: 1080},
+		{TargetWidth: -1, TargetHeight: 1080},
+		{TargetWidth: 1, TargetHeight: 1},
+	} {
+		if daemon, err := New(cfg); err == nil {
+			if daemon != nil {
+				t.Fatal("New returned a daemon for an invalid target canvas")
+			}
+			t.Fatal("New accepted an invalid target canvas")
+		}
+	}
+}
+
 func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 	d := &Daemon{cfg: Config{
-		FPS:     60,
-		Bitrate: 8000,
-		PortMin: 60000,
-		PortMax: 60010,
-		NoAudio: true,
+		FPS:          60,
+		TargetWidth:  2560,
+		TargetHeight: 1440,
+		Bitrate:      8000,
+		PortMin:      60000,
+		PortMax:      60010,
+		NoAudio:      true,
 	}}
 
 	want := airplay.StreamConfig{
 		PreferredAudioCodec: airplay.AudioCodecALAC,
 		FPS:                 60,
+		TargetWidth:         2560,
+		TargetHeight:        1440,
 		Bitrate:             8000,
 		PortMin:             60000,
 		PortMax:             60010,

@@ -57,6 +57,48 @@ func parsePortRange(s string) (int, int, error) {
 	return lo, hi, nil
 }
 
+type videoTarget struct {
+	width, height int
+	refreshRate   int
+}
+
+// parseVideoTarget accepts the same compact size shape used by UxPlay's
+// receiver advertisement. For a sender, the optional refresh rate selects the
+// capture FPS; "max" leaves the canvas at the receiver's highest usable mode.
+func parseVideoTarget(value string) (videoTarget, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return videoTarget{}, fmt.Errorf("expected max or WIDTHxHEIGHT[@REFRESH]")
+	}
+	parts := strings.Split(value, "@")
+	if len(parts) > 2 {
+		return videoTarget{}, fmt.Errorf("expected max or WIDTHxHEIGHT[@REFRESH], got %q", value)
+	}
+	target := videoTarget{}
+	if len(parts) == 2 {
+		refresh, err := strconv.Atoi(parts[1])
+		if err != nil || refresh < 1 || refresh > 255 {
+			return videoTarget{}, fmt.Errorf("refresh rate %q must be from 1 to 255", parts[1])
+		}
+		target.refreshRate = refresh
+	}
+	size := strings.ToLower(parts[0])
+	if size == "max" {
+		return target, nil
+	}
+	dimensions := strings.Split(size, "x")
+	if len(dimensions) != 2 {
+		return videoTarget{}, fmt.Errorf("expected max or WIDTHxHEIGHT[@REFRESH], got %q", value)
+	}
+	width, widthErr := strconv.Atoi(dimensions[0])
+	height, heightErr := strconv.Atoi(dimensions[1])
+	if widthErr != nil || heightErr != nil || width < 2 || height < 2 || width > 9999 || height > 9999 {
+		return videoTarget{}, fmt.Errorf("width and height in %q must each be from 2 to 9999", value)
+	}
+	target.width, target.height = width, height
+	return target, nil
+}
+
 func main() {
 	target := flag.String("target", "", "AirPlay receiver IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
@@ -66,10 +108,13 @@ func main() {
 	forcePair := flag.Bool("pair", false, "Force new pairing even if credentials exist")
 	expectedDeviceID := flag.String("device-id", "", "Device ID of the receiver meant, e.g. from discovery. Its saved pairing applies even if the device at -target names itself differently, and such a device is refused")
 	fps := flag.Int("fps", 30, "Frames per second")
+	resolution := "max"
+	flag.StringVar(&resolution, "resolution", "max", "Target video canvas: max or WIDTHxHEIGHT[@REFRESH] (highest usable receiver mode by default)")
+	flag.StringVar(&resolution, "s", "max", "Alias for -resolution")
 	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic adaptive budget; doubletake-static selects the budget only at startup)")
 	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon uses shared 250 ms)")
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
-	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto uses H.264 for receiver compatibility)")
+	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
 	audioSource := flag.String("audio-source", "output", "Audio route: output (selectable doubletake sink) or monitor (copy default output)")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
@@ -93,6 +138,16 @@ func main() {
 	if err := airplay.ValidateAudioSource(*audioSource); err != nil {
 		log.Fatalf("invalid -audio-source: %v", err)
 	}
+	targetVideo, err := parseVideoTarget(resolution)
+	if err != nil {
+		log.Fatalf("invalid -resolution: %v", err)
+	}
+	if targetVideo.refreshRate > 0 {
+		*fps = targetVideo.refreshRate
+	}
+	if *fps <= 0 {
+		log.Fatalf("invalid -fps: must be positive")
+	}
 	portMin, portMax, err := parsePortRange(*portRange)
 	if err != nil {
 		log.Fatalf("invalid -port-range: %v", err)
@@ -110,21 +165,23 @@ func main() {
 
 	if *daemonize {
 		runDaemon(daemon.Config{
-			SocketPath:  *socketPath,
-			CredFile:    *credFile,
-			CredBackend: *credBackend,
-			FPS:         *fps,
-			Bitrate:     *bitrate,
-			PortMin:     portMin,
-			PortMax:     portMax,
-			HWAccel:     *hwaccel,
-			VideoCodec:  airplay.VideoCodec(*videoCodec),
-			Debug:       *debug,
-			TestMode:    *testMode,
-			NoAudio:     *noAudio,
-			AudioSource: airplay.AudioSource(*audioSource),
-			ShowCursor:  !*noCursor,
-			Code:        credential,
+			SocketPath:   *socketPath,
+			CredFile:     *credFile,
+			CredBackend:  *credBackend,
+			FPS:          *fps,
+			TargetWidth:  targetVideo.width,
+			TargetHeight: targetVideo.height,
+			Bitrate:      *bitrate,
+			PortMin:      portMin,
+			PortMax:      portMax,
+			HWAccel:      *hwaccel,
+			VideoCodec:   airplay.VideoCodec(*videoCodec),
+			Debug:        *debug,
+			TestMode:     *testMode,
+			NoAudio:      *noAudio,
+			AudioSource:  airplay.AudioSource(*audioSource),
+			ShowCursor:   !*noCursor,
+			Code:         credential,
 		})
 		return
 	}
@@ -401,12 +458,14 @@ func main() {
 	}
 
 	streamCfg := airplay.StreamConfig{
-		FPS:        *fps,
-		Bitrate:    *bitrate,
-		VideoCodec: airplay.VideoCodec(*videoCodec),
-		NoAudio:    *noAudio,
-		PortMin:    portMin,
-		PortMax:    portMax,
+		FPS:          *fps,
+		TargetWidth:  targetVideo.width,
+		TargetHeight: targetVideo.height,
+		Bitrate:      *bitrate,
+		VideoCodec:   airplay.VideoCodec(*videoCodec),
+		NoAudio:      *noAudio,
+		PortMin:      portMin,
+		PortMax:      portMax,
 	}
 	// Complete the potentially interactive Wayland portal request before SETUP,
 	// but delay encoder startup until control SETUP returns session-time display

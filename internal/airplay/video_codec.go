@@ -54,31 +54,58 @@ type videoSelection struct {
 	reason        string
 }
 
-// selectVideo chooses one concrete codec and canvas from the final receiver
-// snapshot. The ordinary AVC path can use the advertised maximum up to 1080p;
-// larger canvases require a separate high-resolution codec path.
+// selectVideo chooses the highest usable concrete codec and canvas from the
+// final receiver snapshot.
 func (i *ReceiverInfo) selectVideo(requested VideoCodec, automaticHEVCAvailable bool) (videoSelection, error) {
-	_ = automaticHEVCAvailable // Retained for programmatic compatibility.
+	return i.selectVideoTarget(requested, automaticHEVCAvailable, 0, 0)
+}
+
+// selectVideoTarget applies an optional requested canvas to the receiver's
+// codec-specific ceiling. A zero target means the highest usable receiver
+// mode. Automatic mode uses HEVC only when both endpoints can provide it and
+// the selected canvas exceeds the ordinary H.264 path.
+func (i *ReceiverInfo) selectVideoTarget(requested VideoCodec, automaticHEVCAvailable bool, targetWidth, targetHeight int) (videoSelection, error) {
 	if requested == "" {
 		requested = VideoCodecH264
 	}
 	if err := ValidateVideoCodec(string(requested)); err != nil {
 		return videoSelection{}, err
 	}
+	if (targetWidth == 0) != (targetHeight == 0) || targetWidth < 0 || targetHeight < 0 {
+		return videoSelection{}, fmt.Errorf("target video canvas must specify both positive dimensions or neither")
+	}
+	fitTarget := func(maximumWidth, maximumHeight int) (int, int) {
+		if targetWidth == 0 {
+			return maximumWidth &^ 1, maximumHeight &^ 1
+		}
+		width, height := fitVideoSize(targetWidth, targetHeight, maximumWidth, maximumHeight)
+		return width &^ 1, height &^ 1
+	}
 
 	switch requested {
 	case VideoCodecH264:
-		width, height := i.h264VideoCanvas()
+		width, height := fitTarget(i.h264VideoCanvas())
 		return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "explicit H.264"}, nil
 	case VideoCodecHEVC:
-		width, height, err := i.videoCanvas(VideoCodecHEVC)
+		maximumWidth, maximumHeight, err := i.videoCanvas(VideoCodecHEVC)
 		if err != nil {
 			return videoSelection{}, err
 		}
+		width, height := fitTarget(maximumWidth, maximumHeight)
 		return videoSelection{codec: VideoCodecHEVC, width: width, height: height, reason: "explicit HEVC"}, nil
 	case VideoCodecAuto:
-		width, height := i.h264VideoCanvas()
-		return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "automatic compatibility path"}, nil
+		h264Width, h264Height := i.h264VideoCanvas()
+		width, height := fitTarget(h264Width, h264Height)
+		if automaticHEVCAvailable && i.supportsVideoCodec(VideoCodecHEVC) {
+			maximumWidth, maximumHeight, highResolution := i.highResolutionVideoCanvas()
+			if highResolution {
+				hevcWidth, hevcHeight := fitTarget(maximumWidth, maximumHeight)
+				if hevcWidth > width || hevcHeight > height {
+					return videoSelection{codec: VideoCodecHEVC, width: hevcWidth, height: hevcHeight, reason: "automatic highest-resolution path"}, nil
+				}
+			}
+		}
+		return videoSelection{codec: VideoCodecH264, width: width, height: height, reason: "automatic H.264 path"}, nil
 	default:
 		panic("validated video codec has no selection policy")
 	}

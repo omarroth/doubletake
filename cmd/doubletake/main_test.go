@@ -109,6 +109,45 @@ func TestParsePortRange(t *testing.T) {
 	}
 }
 
+func TestParseVideoTarget(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		value      string
+		want       videoTarget
+		wantErrSub string
+	}{
+		{name: "maximum", value: "max"},
+		{name: "maximum with refresh", value: "max@60", want: videoTarget{refreshRate: 60}},
+		{name: "resolution", value: "1920x1080", want: videoTarget{width: 1920, height: 1080}},
+		{name: "upper-case separator", value: " 1280X720@30 ", want: videoTarget{width: 1280, height: 720, refreshRate: 30}},
+		{name: "empty", wantErrSub: "expected max"},
+		{name: "missing height", value: "1920", wantErrSub: "expected max"},
+		{name: "extra dimension", value: "1920x1080x60", wantErrSub: "expected max"},
+		{name: "zero width", value: "0x1080", wantErrSub: "2 to 9999"},
+		{name: "too large", value: "10000x1080", wantErrSub: "2 to 9999"},
+		{name: "empty refresh", value: "1920x1080@", wantErrSub: "refresh rate"},
+		{name: "zero refresh", value: "1920x1080@0", wantErrSub: "refresh rate"},
+		{name: "large refresh", value: "1920x1080@256", wantErrSub: "refresh rate"},
+		{name: "extra refresh", value: "1920x1080@60@30", wantErrSub: "expected max"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseVideoTarget(test.value)
+			if test.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErrSub) {
+					t.Fatalf("parseVideoTarget(%q) error = %v, want substring %q", test.value, err, test.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseVideoTarget(%q): %v", test.value, err)
+			}
+			if got != test.want {
+				t.Fatalf("parseVideoTarget(%q) = %+v, want %+v", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestReadCredentialPreservesPasswordAndEmptyInput(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader("password with spaces\n\n"))
 	if got := readCredential(reader, ""); got != "password with spaces" {

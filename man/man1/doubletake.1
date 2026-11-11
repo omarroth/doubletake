@@ -76,6 +76,14 @@ Path to credentials file (default: ~/.config/doubletake/credentials.json)
 .B \-fps \fIFPS\fR
 Frames per second (default: 30)
 .TP
+.B \-resolution \fIMAX|WIDTHxHEIGHT[@REFRESH]\fR, \-s \fIMAX|WIDTHxHEIGHT[@REFRESH]\fR
+Select the target encoded canvas. The default, \fBmax\fR, uses the highest
+receiver-advertised mode which the selected local codec path can sustain.
+Explicit dimensions are fitted within the receiver and codec ceilings while
+preserving their requested aspect ratio, then normalized to even dimensions.
+The optional refresh suffix selects the capture frame rate and overrides
+\fB\-fps\fR; for example, \fB\-s 1920x1080@60\fR.
+.TP
 .B \-bitrate \fIKBPS\fR
 Target bitrate in kbps. Zero selects an automatic resolution/FPS budget. The
 default dynamically linked binary adjusts bitrate and frame rate from transport
@@ -111,9 +119,10 @@ Only \fBauto\fR tries fallback encoders. An explicit method fails if its
 required GStreamer encoder is unavailable. The default is \fBauto\fR.
 .TP
 .B \-video-codec \fICODEC\fR
-Screen codec: compatible H.264 \fBauto\fR (default), forced \fBh264\fR, or
-forced \fBhevc\fR. Automatic mode uses H.264 at the receiver's nominal canvas.
-Forced HEVC uses the receiver's maximum canvas and may also use x265.
+Screen codec: highest usable \fBauto\fR (default), forced \fBh264\fR, or
+forced \fBhevc\fR. Automatic mode selects a receiver-advertised high-resolution
+HEVC canvas only after the local NVENC 4K timing preflight succeeds; otherwise
+it retains the ordinary H.264 canvas. Forced HEVC may also use x265.
 Main10 output does not fabricate HDR metadata for an SDR capture source.
 .TP
 .B \-test

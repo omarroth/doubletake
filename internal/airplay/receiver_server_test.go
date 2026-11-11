@@ -443,7 +443,7 @@ func TestSetupMirrorPreparesVideoFromSessionDisplayInfo(t *testing.T) {
 	}
 }
 
-func TestSetupMirrorAutomaticallySelectsNominalH264FromSessionDisplayInfo(t *testing.T) {
+func TestSetupMirrorAutomaticallySelectsHighestResolutionFromSessionDisplayInfo(t *testing.T) {
 	SetTargetLatency(0)
 	t.Cleanup(func() { SetTargetLatency(0) })
 	_, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: ReceiverProfileModern})
@@ -464,8 +464,8 @@ func TestSetupMirrorAutomaticallySelectsNominalH264FromSessionDisplayInfo(t *tes
 		MeasuredVideoLatency:   150 * time.Millisecond,
 	}, func(width, height int, codec VideoCodec) error {
 		callbackCount++
-		if codec != VideoCodecH264 || width != 1920 || height != 1080 {
-			return fmt.Errorf("automatic selection = %s %dx%d, want H.264 1920x1080", codec, width, height)
+		if codec != VideoCodecHEVC || width != 3840 || height != 2160 {
+			return fmt.Errorf("automatic selection = %s %dx%d, want HEVC 3840x2160", codec, width, height)
 		}
 		return nil
 	})
@@ -476,18 +476,18 @@ func TestSetupMirrorAutomaticallySelectsNominalH264FromSessionDisplayInfo(t *tes
 	if callbackCount != 1 {
 		t.Fatalf("video preparation callbacks = %d, want 1", callbackCount)
 	}
-	if session.videoCodec != VideoCodecH264 {
-		t.Fatalf("session codec = %s, want H.264", session.videoCodec)
+	if session.videoCodec != VideoCodecHEVC {
+		t.Fatalf("session codec = %s, want HEVC", session.videoCodec)
 	}
-	if session.timestampBias != defaultVideoLatencyNormal {
-		t.Fatalf("session video lead = %v, want %v", session.timestampBias, defaultVideoLatencyNormal)
+	if session.timestampBias != 150*time.Millisecond {
+		t.Fatalf("session video lead = %v, want 150ms", session.timestampBias)
 	}
-	if session.audioStream == nil || session.audioStream.latencySamples != samplesFor44k1(defaultAudioLatencyNormal) {
-		t.Fatalf("session audio lead = %#v, want %d samples", session.audioStream, samplesFor44k1(defaultAudioLatencyNormal))
+	if session.audioStream == nil || session.audioStream.latencySamples != samplesFor44k1(160*time.Millisecond) {
+		t.Fatalf("session audio lead = %#v, want %d samples", session.audioStream, samplesFor44k1(160*time.Millisecond))
 	}
 }
 
-func TestAutomaticVideoPreparationStartsNominalH264(t *testing.T) {
+func TestAutomaticVideoPreparationStartsHighestResolution(t *testing.T) {
 	SetTargetLatency(0)
 	t.Cleanup(func() { SetTargetLatency(0) })
 	server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: ReceiverProfileModern})
@@ -516,19 +516,94 @@ func TestAutomaticVideoPreparationStartsNominalH264(t *testing.T) {
 	}
 	defer session.Close()
 	want := []preparation{
-		{codec: VideoCodecH264, width: 1920, height: 1080},
+		{codec: VideoCodecHEVC, width: 3840, height: 2160},
 	}
 	if !reflect.DeepEqual(attempts, want) {
 		t.Fatalf("video preparation attempts = %#v, want %#v", attempts, want)
 	}
-	if session.videoCodec != VideoCodecH264 || session.timestampBias != defaultVideoLatencyNormal {
-		t.Fatalf("fallback session = codec %s lead %v, want H.264/%v", session.videoCodec, session.timestampBias, defaultVideoLatencyNormal)
+	if session.videoCodec != VideoCodecHEVC || session.timestampBias != 160*time.Millisecond {
+		t.Fatalf("session = codec %s lead %v, want HEVC/160ms", session.videoCodec, session.timestampBias)
 	}
-	if session.audioStream == nil || session.audioStream.latencySamples != samplesFor44k1(defaultAudioLatencyNormal) {
-		t.Fatalf("fallback audio lead = %#v, want %d samples", session.audioStream, samplesFor44k1(defaultAudioLatencyNormal))
+	if session.audioStream == nil || session.audioStream.latencySamples != samplesFor44k1(170*time.Millisecond) {
+		t.Fatalf("session audio lead = %#v, want %d samples", session.audioStream, samplesFor44k1(170*time.Millisecond))
 	}
 	if got := server.Stats().SetupRequests; got != 3 {
 		t.Fatalf("completed setup requests = %d, want 3", got)
+	}
+}
+
+func TestAutomaticVideoPreparationHonorsTargetResolution(t *testing.T) {
+	SetTargetLatency(0)
+	t.Cleanup(func() { SetTargetLatency(0) })
+	_, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: ReceiverProfileModern})
+	if err := client.Pair(ctx, ""); err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	if err := client.FairPlaySetup(ctx); err != nil {
+		t.Fatalf("FairPlay setup: %v", err)
+	}
+
+	session, err := client.SetupMirrorWithCalibratedVideoPreparation(ctx, StreamConfig{
+		VideoCodec:             VideoCodecAuto,
+		AutomaticHEVCAvailable: true,
+		TargetWidth:            1280,
+		TargetHeight:           720,
+		NoAudio:                true,
+	}, func(width, height int, codec VideoCodec) (VideoPreparationResult, error) {
+		if codec != VideoCodecH264 || width != 1280 || height != 720 {
+			return VideoPreparationResult{}, fmt.Errorf("target selection = %s %dx%d, want H.264 1280x720", codec, width, height)
+		}
+		return VideoPreparationResult{}, nil
+	})
+	if err != nil {
+		t.Fatalf("setup mirror: %v", err)
+	}
+	defer session.Close()
+	if session.videoCodec != VideoCodecH264 {
+		t.Fatalf("session codec = %s, want H.264", session.videoCodec)
+	}
+}
+
+func TestAutomaticHighestResolutionFallsBackToH264(t *testing.T) {
+	SetTargetLatency(0)
+	t.Cleanup(func() { SetTargetLatency(0) })
+	_, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: ReceiverProfileModern})
+	if err := client.Pair(ctx, ""); err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	if err := client.FairPlaySetup(ctx); err != nil {
+		t.Fatalf("FairPlay setup: %v", err)
+	}
+
+	type attempt struct {
+		codec         VideoCodec
+		width, height int
+	}
+	var attempts []attempt
+	session, err := client.SetupMirrorWithCalibratedVideoPreparation(ctx, StreamConfig{
+		VideoCodec:             VideoCodecAuto,
+		AutomaticHEVCAvailable: true,
+		NoAudio:                true,
+	}, func(width, height int, codec VideoCodec) (VideoPreparationResult, error) {
+		attempts = append(attempts, attempt{codec: codec, width: width, height: height})
+		if codec == VideoCodecHEVC {
+			return VideoPreparationResult{}, ErrAutomaticVideoCodecUnavailable
+		}
+		return VideoPreparationResult{}, nil
+	})
+	if err != nil {
+		t.Fatalf("setup mirror: %v", err)
+	}
+	defer session.Close()
+	want := []attempt{
+		{codec: VideoCodecHEVC, width: 3840, height: 2160},
+		{codec: VideoCodecH264, width: 1920, height: 1080},
+	}
+	if !reflect.DeepEqual(attempts, want) {
+		t.Fatalf("preparation attempts = %#v, want %#v", attempts, want)
+	}
+	if session.videoCodec != VideoCodecH264 {
+		t.Fatalf("fallback codec = %s, want H.264", session.videoCodec)
 	}
 }
 

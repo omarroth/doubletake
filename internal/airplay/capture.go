@@ -295,7 +295,9 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		kind:              kind,
 		timestampedOutput: supportsTimestampedVideoOutput(normalizeVideoCodec(validationCfg.VideoCodec)),
 	}
-	if cfg.VideoCodec == VideoCodecHEVC {
+	if cfg.VideoCodec == VideoCodecAuto {
+		preparation.automaticHEVCAvail, preparation.measuredVideoLatency = automaticHEVCProfile(cfg.HWAccel, cfg.FPS)
+	} else if cfg.VideoCodec == VideoCodecHEVC {
 		// Forced NVENC HEVC uses the same local pipeline and benefits from the
 		// same scheduling calibration. Explicit software x265 remains a deliberate
 		// opt-in and can be tuned with the joint latency override.
@@ -371,7 +373,9 @@ func PrepareTestCapture(ctx context.Context, cfg CaptureConfig) (*CapturePrepara
 		kind:              capturePreparationTest,
 		timestampedOutput: supportsTimestampedVideoOutput(normalizeVideoCodec(validationCfg.VideoCodec)),
 	}
-	if cfg.VideoCodec == VideoCodecHEVC {
+	if cfg.VideoCodec == VideoCodecAuto {
+		preparation.automaticHEVCAvail, preparation.measuredVideoLatency = automaticHEVCProfile(cfg.HWAccel, cfg.FPS)
+	} else if cfg.VideoCodec == VideoCodecHEVC {
 		_, preparation.measuredVideoLatency = automaticHEVCProfile(cfg.HWAccel, cfg.FPS)
 	}
 	if cfg.VideoCodec == VideoCodecHEVC && !preparation.timestampedOutput {
@@ -518,8 +522,8 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 	}
 }
 
-// AutomaticHEVCAvailable is retained for API compatibility. Automatic screen
-// capture uses H.264; HEVC is available only through an explicit selection.
+// AutomaticHEVCAvailable reports whether the prepared local hardware path
+// sustained the bounded 4K HEVC preflight used by automatic resolution choice.
 func (p *CapturePreparation) AutomaticHEVCAvailable() bool {
 	if p == nil {
 		return false
@@ -2396,7 +2400,7 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 	// raw backlog.
 	gstArgs := buildGstVideoPipeline(source, beforeConvert, nil, encoder, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
-	dbg("[CAPTURE] launching gst-launch-1.0 (test mode) %s", strings.Join(gstArgs, " "))
+	dbg("[CAPTURE] launching GStreamer test pipeline %s", strings.Join(gstArgs, " "))
 	pipeline, err := launchGStreamerPipeline(captureCtx, gstArgs, encoder, nil)
 	if err != nil {
 		cancel()

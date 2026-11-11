@@ -1438,9 +1438,11 @@ func (c *AirPlayClient) readDecryptedBytes(n int) ([]byte, error) {
 // StreamConfig holds the configuration for a mirroring session.
 type StreamConfig struct {
 	FPS                    int
+	TargetWidth            int // zero with TargetHeight selects the receiver's highest usable canvas
+	TargetHeight           int
 	Bitrate                int        // Video bitrate in kbps
-	VideoCodec             VideoCodec // empty/h264, auto (H.264), or explicitly requested hevc
-	AutomaticHEVCAvailable bool       // retained for programmatic compatibility
+	VideoCodec             VideoCodec // empty/h264, auto (highest usable), or explicitly requested hevc
+	AutomaticHEVCAvailable bool       // local measured 4K HEVC path passed its production preflight
 	// PreferredAudioCodec changes preference only when that format is offered.
 	PreferredAudioCodec AudioCodec
 	// PlayoutLatency fixes both media leads for a shared sender timeline. Zero

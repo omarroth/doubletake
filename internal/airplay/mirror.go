@@ -847,7 +847,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 			// is safer than creating a descriptor/TimeAnnounce mismatch after that
 			// protocol boundary. Automatic selection avoids this path by choosing H.264
 			// before the production capture is launched.
-			return fmt.Errorf("production HEVC requires %v video lead, but media-first audio SETUP already committed %v; use automatic/H.264 or an explicit joint target of at least %v", minimumVideoLead, latencies.video, minimumVideoLead)
+			return fmt.Errorf("production HEVC requires %v video lead, but media-first audio SETUP already committed %v; use H.264 or an explicit joint target of at least %v", minimumVideoLead, latencies.video, minimumVideoLead)
 		}
 		before := latencies
 		latencies = latencies.withMinimumVideoLead(minimumVideoLead)
@@ -993,7 +993,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		if videoPrepared {
 			return nil
 		}
-		selection, selectionErr := info.selectVideo(cfg.VideoCodec, cfg.AutomaticHEVCAvailable)
+		selection, selectionErr := info.selectVideoTarget(cfg.VideoCodec, cfg.AutomaticHEVCAvailable, cfg.TargetWidth, cfg.TargetHeight)
 		if selectionErr != nil {
 			return selectionErr
 		}
@@ -1003,7 +1003,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 			// latencyMax has been accepted. Keep the descriptor and TimeAnnounce
 			// coherent by retaining the nominal H.264 path for this session rather
 			// than selecting a calibrated HEVC clock too late.
-			selection, selectionErr = info.selectVideo(VideoCodecH264, false)
+			selection, selectionErr = info.selectVideoTarget(VideoCodecH264, false, cfg.TargetWidth, cfg.TargetHeight)
 			if selectionErr != nil {
 				return selectionErr
 			}
@@ -1034,7 +1034,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		if prepareErr != nil && cfg.VideoCodec == VideoCodecAuto && selection.codec == VideoCodecHEVC &&
 			errors.Is(prepareErr, ErrAutomaticVideoCodecUnavailable) {
 			dbg("[SETUP] automatic high-resolution capture failed; retrying the nominal H.264 canvas: %v", prepareErr)
-			selection, selectionErr = info.selectVideo(VideoCodecH264, false)
+			selection, selectionErr = info.selectVideoTarget(VideoCodecH264, false, cfg.TargetWidth, cfg.TargetHeight)
 			if selectionErr != nil {
 				return selectionErr
 			}

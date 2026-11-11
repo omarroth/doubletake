@@ -108,26 +108,30 @@ type DeviceInfo struct {
 
 // Config holds daemon configuration.
 type Config struct {
-	SocketPath  string
-	CredFile    string
-	CredBackend string
-	FPS         int
-	Bitrate     int
-	PortMin     int // inclusive local UDP port bound; zero with PortMax means ephemeral
-	PortMax     int // inclusive local UDP port bound; zero with PortMin means ephemeral
-	HWAccel     string
-	VideoCodec  airplay.VideoCodec
-	Debug       bool
-	TestMode    bool
-	NoAudio     bool
-	AudioSource airplay.AudioSource
-	ShowCursor  bool
-	Code        string // default pairing/Digest credential; request Pin overrides it
+	SocketPath   string
+	CredFile     string
+	CredBackend  string
+	FPS          int
+	TargetWidth  int
+	TargetHeight int
+	Bitrate      int
+	PortMin      int // inclusive local UDP port bound; zero with PortMax means ephemeral
+	PortMax      int // inclusive local UDP port bound; zero with PortMin means ephemeral
+	HWAccel      string
+	VideoCodec   airplay.VideoCodec
+	Debug        bool
+	TestMode     bool
+	NoAudio      bool
+	AudioSource  airplay.AudioSource
+	ShowCursor   bool
+	Code         string // default pairing/Digest credential; request Pin overrides it
 }
 
 func (d *Daemon) mirrorStreamConfig() airplay.StreamConfig {
 	return airplay.StreamConfig{
 		FPS:                 d.cfg.FPS,
+		TargetWidth:         d.cfg.TargetWidth,
+		TargetHeight:        d.cfg.TargetHeight,
 		Bitrate:             d.cfg.Bitrate,
 		VideoCodec:          d.cfg.VideoCodec,
 		NoAudio:             d.cfg.NoAudio,
@@ -365,6 +369,10 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	if cfg.VideoCodec == "" {
 		cfg.VideoCodec = airplay.VideoCodecAuto
+	}
+	if (cfg.TargetWidth == 0) != (cfg.TargetHeight == 0) || cfg.TargetWidth < 0 || cfg.TargetHeight < 0 ||
+		(cfg.TargetWidth > 0 && (cfg.TargetWidth < 2 || cfg.TargetHeight < 2)) {
+		return nil, fmt.Errorf("target video canvas must specify both positive dimensions or neither")
 	}
 	if err := validatePortRange(cfg.PortMin, cfg.PortMax); err != nil {
 		return nil, fmt.Errorf("port range: %w", err)

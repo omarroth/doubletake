@@ -26,32 +26,70 @@ func TestReceiverVideoCanvasUsesMaximumOnlyForCapabilityGatedHEVC(t *testing.T) 
 	}
 }
 
-func TestAutomaticVideoSelectionUsesNominalH264(t *testing.T) {
+func TestAutomaticVideoSelectionUsesHighestAvailableCanvas(t *testing.T) {
 	tests := []struct {
-		name string
-		info *ReceiverInfo
+		name                   string
+		info                   *ReceiverInfo
+		automaticHEVCAvailable bool
+		wantCodec              VideoCodec
+		wantWidth, wantHeight  int
 	}{
-		{name: "multi-codec high resolution", info: &ReceiverInfo{
+		{name: "multi-codec high resolution", automaticHEVCAvailable: true, wantCodec: VideoCodecHEVC, wantWidth: 3840, wantHeight: 2160, info: &ReceiverInfo{
 			Features: uint64(1) << featureScreenMultiCodec,
 			Displays: []DisplayInfo{{WidthPixels: 1280, HeightPixels: 720, WidthPixelsMax: 3840, HeightPixelsMax: 2160}},
 		}},
-		{name: "legacy receiver", info: &ReceiverInfo{
+		{name: "local HEVC unavailable", wantCodec: VideoCodecH264, wantWidth: 1280, wantHeight: 720, info: &ReceiverInfo{
+			Features: uint64(1) << featureScreenMultiCodec,
+			Displays: []DisplayInfo{{WidthPixels: 1280, HeightPixels: 720, WidthPixelsMax: 3840, HeightPixelsMax: 2160}},
+		}},
+		{name: "legacy receiver", automaticHEVCAvailable: true, wantCodec: VideoCodecH264, wantWidth: 1280, wantHeight: 720, info: &ReceiverInfo{
 			Displays: []DisplayInfo{{WidthPixels: 1280, HeightPixels: 720}},
 		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			selection, err := test.info.selectVideo(VideoCodecAuto, true)
+			selection, err := test.info.selectVideo(VideoCodecAuto, test.automaticHEVCAvailable)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if selection.codec != VideoCodecH264 || selection.width != 1280 || selection.height != 720 {
-				t.Fatalf("selection = %s %dx%d, want H.264 1280x720", selection.codec, selection.width, selection.height)
-			}
-			if !strings.Contains(selection.reason, "compatibility") {
-				t.Fatalf("reason = %q, want compatibility reason", selection.reason)
+			if selection.codec != test.wantCodec || selection.width != test.wantWidth || selection.height != test.wantHeight {
+				t.Fatalf("selection = %s %dx%d, want %s %dx%d", selection.codec, selection.width, selection.height, test.wantCodec, test.wantWidth, test.wantHeight)
 			}
 		})
+	}
+}
+
+func TestAutomaticVideoSelectionHonorsTargetCanvas(t *testing.T) {
+	info := &ReceiverInfo{
+		Features: uint64(1) << featureScreenMultiCodec,
+		Displays: []DisplayInfo{{
+			WidthPixels: 1280, HeightPixels: 720,
+			WidthPixelsMax: 3840, HeightPixelsMax: 2160,
+		}},
+	}
+	for _, test := range []struct {
+		name                  string
+		width, height         int
+		wantCodec             VideoCodec
+		wantWidth, wantHeight int
+	}{
+		{name: "ordinary target stays H264", width: 1280, height: 720, wantCodec: VideoCodecH264, wantWidth: 1280, wantHeight: 720},
+		{name: "larger target selects HEVC", width: 2560, height: 1440, wantCodec: VideoCodecHEVC, wantWidth: 2560, wantHeight: 1440},
+		{name: "oversize target fits receiver maximum", width: 5000, height: 3000, wantCodec: VideoCodecHEVC, wantWidth: 3600, wantHeight: 2160},
+		{name: "odd target normalizes for 4:2:0", width: 1279, height: 719, wantCodec: VideoCodecH264, wantWidth: 1278, wantHeight: 718},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selection, err := info.selectVideoTarget(VideoCodecAuto, true, test.width, test.height)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selection.codec != test.wantCodec || selection.width != test.wantWidth || selection.height != test.wantHeight {
+				t.Fatalf("selection = %s %dx%d, want %s %dx%d", selection.codec, selection.width, selection.height, test.wantCodec, test.wantWidth, test.wantHeight)
+			}
+		})
+	}
+	if _, err := info.selectVideoTarget(VideoCodecAuto, true, 1920, 0); err == nil {
+		t.Fatal("accepted an incomplete target canvas")
 	}
 }
 

@@ -291,7 +291,12 @@ Run with `-debug` to see the challenge and whether the retry was accepted.
 H.264 uses the receiver's advertised maximum canvas when it fits within
 1920x1080, even when its nominal display canvas is 720p. Missing maxima retain
 the nominal size; larger maxima require the separate high-resolution codec
-path. This selection applies to every receiver without a model-specific flag.
+path. By default, doubletake requests the highest usable canvas: automatic mode
+uses a receiver-advertised high-resolution HEVC mode only after the local NVENC
+4K preflight succeeds, and otherwise retains the H.264 canvas. Use
+`-resolution WIDTHxHEIGHT` (or `-s WIDTHxHEIGHT`) to request a smaller canvas.
+The optional `@REFRESH` suffix sets the capture frame rate and overrides
+`-fps`, for example `-s 1920x1080@60`.
 
 Saved PIN/password pairings record the receiver's identity and verify it on
 every reconnect. A failed identity check stops the connection; it does not
@@ -325,6 +330,10 @@ doubletake -target 192.168.1.77 -creds airplay-credentials.json
 # Adjust stream settings (bitrate 0 = auto)
 doubletake -target 192.168.1.77 -fps 30 -bitrate 0
 
+# Limit the target canvas; @60 also selects the capture frame rate
+doubletake -target 192.168.1.77 -resolution 1920x1080
+doubletake -target 192.168.1.77 -s 1920x1080@60
+
 # Force a lower bitrate on weaker Wi-Fi
 doubletake -target 192.168.1.77 -bitrate 2500
 
@@ -339,10 +348,10 @@ doubletake -target 192.168.1.77 -hwaccel v4l2    # Stateful V4L2 encoders (many 
 # OpenH264 software encoding
 doubletake -target 192.168.1.77 -hwaccel openh264
 
-# Automatic H.264 compatibility mode is the default
+# Select the highest usable receiver mode (the default)
 doubletake -target 192.168.1.77
 
-# Force one codec (HEVC uses the receiver's maximum canvas)
+# Force one codec while retaining the selected resolution ceiling
 doubletake -target 192.168.1.77 -video-codec hevc
 doubletake -target 192.168.1.77 -video-codec h264
 
@@ -371,10 +380,11 @@ doubletake-ctl disconnect
 | `-creds` | `~/.config/doubletake/credentials.json` | Credentials file path |
 | `-pair` | false | Force new pairing |
 | `-fps` | 30 | Frames per second |
+| `-resolution`, `-s` | `max` | Target canvas: `max` or `WIDTHxHEIGHT[@REFRESH]`; `@REFRESH` overrides `-fps` |
 | `-bitrate` | 0 | Video bitrate in kbps (`0` = adaptive budget in `doubletake`; startup-only automatic budget in `doubletake-static`) |
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
-| `-video-codec` | auto | Screen codec: compatible H.264 `auto`, forced `h264`, or forced `hevc` |
+| `-video-codec` | auto | Screen codec: highest usable `auto`, forced `h264`, or forced `hevc` |
 | `-no-audio` | false | Disable audio streaming |
 | `-audio-source` | output | Selectable doubletake output, or `monitor` to copy the default local output |
 | `-test` | false | Use synthetic video source |
@@ -394,11 +404,14 @@ Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
 `nvh264enc`, `vah264enc`, `v4l2h264enc`, `openh264enc`, then `x264enc`. Explicit selections
 fail if their required GStreamer encoder is unavailable; `none` forces x264 for
 H.264 or x265 for explicitly requested HEVC.
-The normal `-video-codec auto` path uses H.264 and includes valid advertised
-maximum dimensions within the ordinary 1920x1080 canvas. Larger maxima retain
-the nominal canvas. Explicit
+The normal `-video-codec auto` path uses the requested resolution when it fits
+the ordinary H.264 canvas. For a larger receiver-advertised maximum it selects
+HEVC only when the receiver advertises multi-codec screen support and the local
+NVENC 4K timing preflight succeeds; otherwise it falls back to H.264. Explicit
 `-video-codec hevc` remains available with `nvh265enc` or `x265enc`; use
-`-hwaccel none` to force the software path.
+`-hwaccel none` to force the software path. Requested dimensions larger than a
+receiver or codec ceiling are fitted within that ceiling while preserving the
+requested aspect ratio, then normalized to even 4:2:0 dimensions.
 
 Main10 alone does not turn an SDR X11 or portal capture into HDR: doubletake
 preserves encoder-provided HDR SEI but does not invent PQ/HLG mastering metadata
@@ -428,10 +441,10 @@ doubletake-ctl unmute [target]
 Daemon streams are grouped by codec and the normalized even-sized canvas resolved
 during each receiver's SETUP. Targets with the same key share one capture and
 encoder; targets with a different codec or canvas use independent encoders,
-so connection order does not determine another receiver's size. For example, a
-receiver reporting a 1920x1080 canvas and a 3840x2160 maximum joins the
-1920x1080 H.264 group in automatic mode. An explicit HEVC request uses the
-maximum canvas and forms a separate group.
+so connection order does not determine another receiver's size. A daemon-wide
+`-resolution` target is independently fitted to each receiver's advertised
+ceiling. Receivers which resolve to the same concrete codec and canvas share
+the encoder.
 
 With the default dynamically linked backend, `status` reports the live `adaptive`,
 `estimated_bandwidth_kbps`, and `rate_control_receivers` fields for each stream.
