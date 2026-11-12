@@ -97,17 +97,11 @@ These are devices that have been tested with doubletake. If there are devices no
 make
 ```
 
-This builds three binaries into `bin/`:
+This builds two binaries into `bin/`:
 
 - `bin/doubletake` dynamically links GStreamer and owns the video pipeline
   in-process. This is the default and supports live quality adaptation.
-- `bin/doubletake-static` is the portable fallback. It launches
-  `gst-launch-1.0` for video and cannot adjust quality while streaming.
 - `bin/doubletake-ctl` is always static and has no GStreamer dependency.
-
-The word "static" describes doubletake itself, not the media stack:
-`doubletake-static` still requires `gst-launch-1.0` and the appropriate runtime
-plugins. It prints a startup warning that adaptive stream quality is unavailable.
 
 For developer testing, build the diagnostic receiver explicitly:
 
@@ -121,16 +115,14 @@ installation, and release artifacts. Its manual is available at
 
 ### In-process GStreamer backend
 
-Build either streaming variant directly with:
+Build the streaming binary directly with:
 
 ```sh
 make doubletake
-make doubletake-static
 ```
 
 The default build requires the GStreamer core, app, and video development
-packages plus a C compiler. It uses the same capture, scaling, encoder, parser,
-and timestamp graph as the static fallback, while adding live target-bitrate,
+packages plus a C compiler. It supports live target-bitrate,
 frame-rate, and force-key-frame controls. Release builds target GStreamer 1.16
 and are linked on Ubuntu 20.04 so their glibc baseline remains compatible with
 that distribution and newer Linux systems.
@@ -146,8 +138,7 @@ bandwidth is allocated to video, with a 1 Mbit/s floor and doubletake's
 resolution/FPS budget as the ceiling. Frame rate moves through 10/20/30/60 fps
 tiers after five seconds of stable telemetry. Recovery is deliberately gradual.
 Supplying a nonzero `-bitrate` keeps a fixed target and disables these automatic
-changes. The static fallback always selects the automatic budget only once at
-startup.
+changes.
 
 The same control adapter covers x264, x265, OpenH264, NVENC, VA, Vulkan/NVENC,
 and V4L2 encoders selected by doubletake. V4L2 updates its `video_bitrate`
@@ -381,7 +372,7 @@ doubletake-ctl disconnect
 | `-pair` | false | Force new pairing |
 | `-fps` | 30 | Frames per second |
 | `-resolution`, `-s` | `max` | Target canvas: `max` or `WIDTHxHEIGHT[@REFRESH]`; `@REFRESH` overrides `-fps` |
-| `-bitrate` | 0 | Video bitrate in kbps (`0` = adaptive budget in `doubletake`; startup-only automatic budget in `doubletake-static`) |
+| `-bitrate` | 0 | Video bitrate in kbps (`0` = automatic adaptive budget) |
 | `-target-latency-ms` | 0 | Joint audio/video playout latency override in milliseconds (`0` = connection-aware foreground defaults; shared 250 ms in daemon mode) |
 | `-hwaccel` | auto | Encoder preference: `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, `none` |
 | `-video-codec` | auto | Screen codec: highest usable `auto`, forced `h264`, or forced `hevc` |
@@ -395,10 +386,6 @@ doubletake-ctl disconnect
 | `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock`, or `/tmp/doubletake.sock` | Daemon control socket path |
 | `-debug` | false | Verbose debug logging |
 | `-help`, `-h` | | Show command-line help |
-
-The default `doubletake` can adjust an automatic bitrate budget during a
-session. `doubletake-static` selects that budget once when capture starts and
-warns that adaptive stream quality is unavailable.
 
 Only `-hwaccel auto` tries fallback encoders, in the order `vulkanh264enc`,
 `nvh264enc`, `vah264enc`, `v4l2h264enc`, `openh264enc`, then `x264enc`. Explicit selections

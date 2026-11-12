@@ -111,7 +111,7 @@ func main() {
 	resolution := "max"
 	flag.StringVar(&resolution, "resolution", "max", "Target video canvas: max or WIDTHxHEIGHT[@REFRESH] (highest usable receiver mode by default)")
 	flag.StringVar(&resolution, "s", "max", "Alias for -resolution")
-	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic adaptive budget; doubletake-static selects the budget only at startup)")
+	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic adaptive budget)")
 	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon uses shared 250 ms)")
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
@@ -127,7 +127,7 @@ func main() {
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
 	if !airplay.HasInProcessGStreamer() {
-		log.Println("warning: static fallback build uses gst-launch-1.0 for video; adaptive stream quality is unavailable")
+		log.Println("warning: build without in-process GStreamer uses gst-launch-1.0 for video; adaptive stream quality is unavailable")
 	}
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)

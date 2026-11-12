@@ -10,11 +10,8 @@ is an AirPlay screen mirroring sender that streams your Linux desktop to Apple T
 and compatible AirPlay receivers. It supports both Wayland (PipeWire/xdg-desktop-portal)
 and X11 screen capture with H.264 or capability-gated HEVC Main10 encoding.
 .PP
-The default \fBdoubletake\fR binary dynamically links GStreamer and can adjust
-video quality while streaming. \fBdoubletake-static\fR provides the same command
-line as a portable fallback, launches \fBgst-launch-1.0\fR for video, and warns
-that adaptive stream quality is unavailable. \fBdoubletake-static\fR still
-requires the GStreamer tools and runtime plugins.
+The \fBdoubletake\fR binary dynamically links GStreamer and can adjust
+video quality while streaming.
 .SH FEATURES
 .IP \(bu 2
 Full AirPlay mirroring protocol (RTSP/HTTP + encrypted video stream)
@@ -88,7 +85,7 @@ The optional refresh suffix selects the capture frame rate and overrides
 Target bitrate in kbps. Zero selects an automatic resolution/FPS budget. The
 default dynamically linked binary adjusts bitrate and frame rate from transport
 telemetry during the session, using the weakest path when receivers share an
-encoder. \fBdoubletake-static\fR selects the budget once at capture startup. A
+encoder. A
 nonzero value disables runtime adjustment (default: 0)
 .TP
 .B \-target-latency-ms \fIMS\fR
