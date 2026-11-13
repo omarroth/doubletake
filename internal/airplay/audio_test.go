@@ -107,6 +107,9 @@ func TestStreamAudioUsesNegotiatedRecentFrameRedundancy(t *testing.T) {
 				}
 			}
 			assertAudioPacketSequences(t, packets, wantSequences)
+			if got := binary.BigEndian.Uint32(packets[0][4:8]); got != 352 {
+				t.Fatalf("first RTP timestamp = %d, want one 352-sample frame after RECORD's zero origin", got)
+			}
 
 			// Repeated packets and requested retransmissions must retain the exact
 			// encoded/encrypted datagram, including its original sample position.
@@ -844,16 +847,6 @@ func TestStreamAudioAnchorsClockOnlyAfterFirstCapturedFrame(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("StreamAudio did not stop")
-	}
-}
-
-func TestRandomRTPTime(t *testing.T) {
-	got, err := randomRTPTime(bytes.NewReader([]byte{0x12, 0x34, 0x56, 0x78}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != 0x12345678 {
-		t.Fatalf("RTP timestamp = %#x, want 0x12345678", got)
 	}
 }
 

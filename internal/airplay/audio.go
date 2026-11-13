@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -110,14 +109,6 @@ func audioLatencySamplesForCodec(ct byte, override uint32) uint32 {
 	}
 	_ = ct
 	return targetLatencySamples44k1()
-}
-
-func randomRTPTime(reader io.Reader) (uint32, error) {
-	var value [4]byte
-	if _, err := io.ReadFull(reader, value[:]); err != nil {
-		return 0, fmt.Errorf("generate RTP timestamp: %w", err)
-	}
-	return binary.BigEndian.Uint32(value[:]), nil
 }
 
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.
@@ -1465,13 +1456,11 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 
 videoReady:
 
-	// Each audio timeline starts at a random 32-bit RTP epoch. The
-	// latency-adjusted TimeAnnounce value is allowed to wrap below that epoch.
-	// No empty header packet is sent before the first real audio frame.
-	nextRtp, err := randomRTPTime(rand.Reader)
-	if err != nil {
-		return err
-	}
+	// RECORD advertises seq=0;rtptime=0. The first packet has sequence 1,
+	// so advance that origin by exactly one codec frame. Apple's receiver
+	// infers samples/packet from this first delta; a random RTP epoch here
+	// would contradict RECORD and look like an enormous codec frame.
+	nextRtp := uint32(spf)
 	// Update rtpTime so the first sync packet reflects the first media position.
 	audioStream.mu.Lock()
 	audioStream.rtpTime = nextRtp
@@ -1487,6 +1476,7 @@ videoReady:
 	frameBuf := make([]byte, 8192)
 	firstFrameSize := 0
 	var firstFramePosition audioPCMFramePosition
+	var err error
 	catchupFrames := 0
 	for firstFrameSize == 0 {
 		firstFrameSize, firstFramePosition, err = capture.readFramePosition(frameBuf)
