@@ -858,6 +858,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		return nil
 	}
 	skipRecord := false
+	recorded := false
 
 	firstSetup := true
 	sendSetup := func(uri, phase string, request map[string]interface{}) (map[string]interface{}, map[string]string, time.Time, error) {
@@ -918,6 +919,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 				dbg("[SETUP] receiver Audio-Latency telemetry: %d samples (%v)", parsed, receiverLatency)
 			}
 		}
+		recorded = true
 		return nil
 	}
 
@@ -1121,6 +1123,19 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		}
 		if err := prepareVideo(resolvedInfo); err != nil {
 			return nil, err
+		}
+		// Apple's real-time audio SETUP starts packet processing only after
+		// RECORD has prepared the media session. A control-first session can do
+		// that before creating its audio stream. Peers requiring streams first
+		// explicitly reject this state with 455; retain their late-RECORD path.
+		if !cfg.NoAudio && !skipRecord {
+			if err := recordSession(); err != nil {
+				var statusErr *HTTPStatusError
+				if !errors.As(err, &statusErr) || statusErr.StatusCode != 455 {
+					return nil, err
+				}
+				dbg("[SETUP] receiver requires stream SETUP before RECORD; deferring media preparation")
+			}
 		}
 		if skipRecord {
 			dbg("[SETUP] receiver returned skipRecord=true; RECORD will be skipped after stream setup")
@@ -1383,22 +1398,22 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	}
 	receiverVolume = applyInitialVolumeHeuristics(c.info, receiverVolume)
 
-	// The sender activates the session in its second start stage, after every
-	// transport stream has been set up. A receiver may waive that final RECORD
-	// request with skipRecord, but accepting the control SETUP alone does not
-	// make it safe to activate an otherwise incomplete session.
+	// Legacy media-first sessions and peers which rejected early RECORD still
+	// need activation here. A successful early RECORD must not be repeated.
 	if skipRecord {
 		dbg("[SETUP] receiver returned skipRecord=true; session was started by SETUP")
-	} else if err := recordSession(); err != nil {
-		return nil, err
+	} else if !recorded {
+		if err := recordSession(); err != nil {
+			return nil, err
+		}
 	}
 
-	// Apple seeds its sender-side volume state from the advertised/fetched value
-	// instead of unconditionally replacing it with unity gain. A normal value is
-	// already the receiver's state, so doubletake does not need to reapply it.
+	// Preserve the advertised/fetched receiver volume, but apply it to the newly
+	// created stream as well. The saved receiver volume does not establish the
+	// new stream's software gain (notably on macOS receivers).
 	if cfg.NoAudio {
 		dbg("[SETUP] no-audio session: skipping SET_PARAMETER volume")
-	} else if receiverVolume.known && (receiverVolume.adjusted || receiverVolume.muted) {
+	} else if receiverVolume.known {
 		volumeDB := receiverVolume.volumeDB
 		if receiverVolume.muted {
 			volumeDB = airPlayMutedVolumeDB
@@ -1412,8 +1427,6 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		} else {
 			dbg("[SETUP] applied initial receiver volume %.3f dB (source=%s, family=%s, adjustment=%s)", volumeDB, receiverVolume.source, receiverVolume.family, receiverVolume.adjustment)
 		}
-	} else if receiverVolume.known {
-		dbg("[SETUP] preserving initial receiver volume %.3f dB (source=%s, family=%s)", receiverVolume.volumeDB, receiverVolume.source, receiverVolume.family)
 	} else {
 		dbg("[SETUP] initial receiver volume unavailable; leaving it untouched")
 	}
