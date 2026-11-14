@@ -100,6 +100,13 @@ func parseVideoTarget(value string) (videoTarget, error) {
 }
 
 func main() {
+	if handled, err := airplay.RunAudioOutputGuard(os.Args[1:]); handled {
+		if err != nil {
+			log.Printf("[AUDIO] output guard: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	target := flag.String("target", "", "AirPlay receiver IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
 	code := flag.String("code", "", "Pairing code shown on the receiver; prefer $DOUBLETAKE_CODE")

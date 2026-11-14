@@ -45,13 +45,15 @@ func runPulseCommand(ctx context.Context, args ...string) ([]byte, error) {
 type audioOutputManager struct {
 	mu         sync.Mutex
 	run        pulseCommand
+	guard      func(context.Context, string, string) (string, func(), error)
+	stopGuard  func()
 	name       string
 	module     string
 	generation string
 	users      int
 }
 
-var sharedAudioOutput = audioOutputManager{run: runPulseCommand}
+var sharedAudioOutput = audioOutputManager{run: runPulseCommand, guard: startAudioOutputGuard}
 
 func (m *audioOutputManager) acquire(ctx context.Context) (string, func(), error) {
 	m.mu.Lock()
@@ -94,7 +96,12 @@ func (m *audioOutputManager) acquire(ctx context.Context) (string, func(), error
 			defer m.mu.Unlock()
 			m.users--
 			if m.users == 0 {
-				m.remove(m.name, m.module, m.generation)
+				if m.stopGuard != nil {
+					m.stopGuard()
+					m.stopGuard = nil
+				} else {
+					m.remove(m.name, m.module, m.generation)
+				}
 				m.name, m.module, m.generation = "", "", ""
 			}
 		})
@@ -103,6 +110,13 @@ func (m *audioOutputManager) acquire(ctx context.Context) (string, func(), error
 }
 
 func (m *audioOutputManager) create(ctx context.Context, name, generation string) (string, error) {
+	if m.guard != nil {
+		module, stop, err := m.guard(ctx, name, generation)
+		if err == nil {
+			m.stopGuard = stop
+		}
+		return module, err
+	}
 	// module-null-sink is implemented by both PulseAudio and pipewire-pulse.
 	// The PipeWire property enables sink volume/mute on its monitor ports;
 	// PulseAudio's software null sink already applies these to the mix.
@@ -137,13 +151,13 @@ func (m *audioOutputManager) outputExists(ctx context.Context, name string) bool
 	return false
 }
 
-func (m *audioOutputManager) remove(name, module, generation string) {
+func (m *audioOutputManager) remove(name, module, generation string) error {
 	// The sound server may have restarted and reused a module number. Match its
 	// type, complete sink_name and private generation before unloading anything.
 	out, err := m.run(context.Background(), "list", "short", "modules")
 	if err != nil {
 		log.Printf("[AUDIO] could not check output cleanup: %v", err)
-		return
+		return err
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
@@ -156,9 +170,11 @@ func (m *audioOutputManager) remove(name, module, generation string) {
 		}
 		if _, err := m.run(context.Background(), "unload-module", fields[0]); err != nil {
 			log.Printf("[AUDIO] could not remove output %s: %v", name, err)
+			return err
 		}
-		return
+		return nil
 	}
+	return nil
 }
 
 func pulseModuleLineHasArgument(fields []string, want string) bool {
