@@ -1456,16 +1456,6 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 
 videoReady:
 
-	// RECORD advertises seq=0;rtptime=0. The first packet has sequence 1,
-	// so advance that origin by exactly one codec frame. Apple's receiver
-	// infers samples/packet from this first delta; a random RTP epoch here
-	// would contradict RECORD and look like an enormous codec frame.
-	nextRtp := uint32(spf)
-	// Update rtpTime so the first sync packet reflects the first media position.
-	audioStream.mu.Lock()
-	audioStream.rtpTime = nextRtp
-	audioStream.mu.Unlock()
-
 	// Discard any partial unframed pipe backlog between the final prewarm read and
 	// the video-ready signal, then wait until one complete, fresh audio frame is in hand.
 	// The RTP/network-clock mapping must be established at this point, not when
@@ -1510,8 +1500,14 @@ videoReady:
 		// Transparent raw fallback: preserve the historical read-time anchor.
 		firstFramePosition.PTS = mediaNow()
 	}
-	rtpClock := newAudioRTPClock(nextRtp)
+	// Keep one sample timeline for data and TimeAnnounce. Our RECORD origin is
+	// seq=0;rtptime=0, so sequence 1 starts one codec frame later. This is a
+	// sender timeline choice, not an Apple-specific initial timestamp value.
+	rtpClock := newAudioRTPClock(uint32(spf))
 	firstFrameRTP, _ := rtpClock.mapFramePosition(firstFramePosition, spf)
+	audioStream.mu.Lock()
+	audioStream.rtpTime = firstFrameRTP
+	audioStream.mu.Unlock()
 	var announceMu sync.Mutex
 
 	// Establish the initial mapping at the first sample's source PTS. The reset

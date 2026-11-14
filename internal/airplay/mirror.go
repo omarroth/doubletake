@@ -48,6 +48,10 @@ const (
 	initialVolumeAdjustmentInvalid initialVolumeAdjustment = 1 << iota
 	initialVolumeAdjustmentQuiet
 	initialVolumeAdjustmentLoud
+	// endpointdelegate_getInitialVolumeDBAndIsMuted also returns this flag
+	// for its generic receiver policy. Apple resends volume on engagement even
+	// when the reported value needs no numerical correction.
+	initialVolumeResendOnStart initialVolumeAdjustment = 1 << 4
 )
 
 func (a initialVolumeAdjustment) String() string {
@@ -66,13 +70,18 @@ func (a initialVolumeAdjustment) String() string {
 }
 
 type receiverVolumeState struct {
-	volumeDB   float64
-	muted      bool
-	known      bool
-	adjusted   bool
-	source     string
-	family     string
-	adjustment initialVolumeAdjustment
+	volumeDB      float64
+	muted         bool
+	known         bool
+	adjusted      bool
+	source        string
+	family        string
+	adjustment    initialVolumeAdjustment
+	resendOnStart bool
+}
+
+func (s receiverVolumeState) needsInitialSend() bool {
+	return s.known && (s.adjusted || s.muted || s.resendOnStart)
 }
 
 func receiverVolumeFromInfo(info *ReceiverInfo) receiverVolumeState {
@@ -113,13 +122,14 @@ func initialVolumeAdjustmentPolicy(info *ReceiverInfo) (string, initialVolumeAdj
 	case info != nil && info.isThirdPartyReceiver() && info.HasFeature(featureThirdPartyTVFamily):
 		return "third-party TV", initialVolumeAdjustmentInvalid
 	default:
-		return "unclassified receiver", initialVolumeAdjustmentInvalid | initialVolumeAdjustmentQuiet | initialVolumeAdjustmentLoud
+		return "unclassified receiver", initialVolumeAdjustmentInvalid | initialVolumeAdjustmentQuiet | initialVolumeAdjustmentLoud | initialVolumeResendOnStart
 	}
 }
 
 func applyInitialVolumeHeuristics(info *ReceiverInfo, state receiverVolumeState) receiverVolumeState {
 	family, supported := initialVolumeAdjustmentPolicy(info)
 	state.family = family
+	state.resendOnStart = supported&initialVolumeResendOnStart != 0
 
 	adjustment := initialVolumeAdjustment(0)
 	targetDB := state.volumeDB
@@ -857,8 +867,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 			before.video, latencies.video, before.audio, latencies.audio)
 		return nil
 	}
-	skipRecord := false
-	recorded := false
+	recordPending := true
 
 	firstSetup := true
 	sendSetup := func(uri, phase string, request map[string]interface{}) (map[string]interface{}, map[string]string, time.Time, error) {
@@ -901,6 +910,9 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	}
 
 	recordSession := func() error {
+		if !recordPending {
+			return nil
+		}
 		recordHeaders := map[string]string{
 			"Session":  sessionUUID,
 			"Range":    "npt=0-",
@@ -919,7 +931,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 				dbg("[SETUP] receiver Audio-Latency telemetry: %d samples (%v)", parsed, receiverLatency)
 			}
 		}
-		recorded = true
+		recordPending = false
 		return nil
 	}
 
@@ -1106,7 +1118,8 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		// explicitly supply a usable display; a nonzero pre-session display can be
 		// provisional too.
 		startReceiverTimingProbes(controlResp)
-		skipRecord, _ = controlResp["skipRecord"].(bool)
+		skipRecord, _ := controlResp["skipRecord"].(bool)
+		recordPending = !skipRecord
 		observeEventPort(controlResp)
 		if err := connectEvent(); err != nil {
 			return nil, err
@@ -1128,7 +1141,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		// RECORD has prepared the media session. A control-first session can do
 		// that before creating its audio stream. Peers requiring streams first
 		// explicitly reject this state with 455; retain their late-RECORD path.
-		if !cfg.NoAudio && !skipRecord {
+		if !cfg.NoAudio {
 			if err := recordSession(); err != nil {
 				var statusErr *HTTPStatusError
 				if !errors.As(err, &statusErr) || statusErr.StatusCode != 455 {
@@ -1138,7 +1151,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 			}
 		}
 		if skipRecord {
-			dbg("[SETUP] receiver returned skipRecord=true; RECORD will be skipped after stream setup")
+			dbg("[SETUP] receiver returned skipRecord=true; skipping RECORD")
 		}
 	}
 	// Create the audio stream after the control-first probe, or make it the first
@@ -1248,7 +1261,8 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		return nil, err
 	}
 	if !sessionFirstSetup {
-		skipRecord, _ = audioResp["skipRecord"].(bool)
+		skipRecord, _ := audioResp["skipRecord"].(bool)
+		recordPending = !skipRecord
 		if err := configurePTPClock(audioResp, audioRespHeaders, audioRespReceivedAt); err != nil {
 			return nil, err
 		}
@@ -1400,20 +1414,17 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 
 	// Legacy media-first sessions and peers which rejected early RECORD still
 	// need activation here. A successful early RECORD must not be repeated.
-	if skipRecord {
-		dbg("[SETUP] receiver returned skipRecord=true; session was started by SETUP")
-	} else if !recorded {
-		if err := recordSession(); err != nil {
-			return nil, err
-		}
+	if err := recordSession(); err != nil {
+		return nil, err
 	}
 
-	// Preserve the advertised/fetched receiver volume, but apply it to the newly
-	// created stream as well. The saved receiver volume does not establish the
-	// new stream's software gain (notably on macOS receivers).
+	// Apply Apple's initial correction/mute policy and generic receiver volume
+	// resync. The latter initializes the new stream's gain without overwriting
+	// the receiver's reported value. Known unchanged values on other families
+	// need no SET_PARAMETER.
 	if cfg.NoAudio {
 		dbg("[SETUP] no-audio session: skipping SET_PARAMETER volume")
-	} else if receiverVolume.known {
+	} else if receiverVolume.needsInitialSend() {
 		volumeDB := receiverVolume.volumeDB
 		if receiverVolume.muted {
 			volumeDB = airPlayMutedVolumeDB
@@ -1427,6 +1438,8 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		} else {
 			dbg("[SETUP] applied initial receiver volume %.3f dB (source=%s, family=%s, adjustment=%s)", volumeDB, receiverVolume.source, receiverVolume.family, receiverVolume.adjustment)
 		}
+	} else if receiverVolume.known {
+		dbg("[SETUP] preserving initial receiver volume %.3f dB (source=%s, family=%s)", receiverVolume.volumeDB, receiverVolume.source, receiverVolume.family)
 	} else {
 		dbg("[SETUP] initial receiver volume unavailable; leaving it untouched")
 	}

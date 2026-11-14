@@ -1161,7 +1161,7 @@ func TestSetupMirrorNoAudioStillNegotiatesAudioSession(t *testing.T) {
 	}
 }
 
-// Preserve the receiver's advertised volume while initializing the new stream.
+// Apple TV needs no resend when its advertised volume is already correct.
 func TestSetupMirrorWithAudioPreservesReceiverVolume(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -1174,7 +1174,6 @@ func TestSetupMirrorWithAudioPreservesReceiverVolume(t *testing.T) {
 			testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
 				skipRecord:    test.skipRecord,
 				initialVolume: testFloat64(0),
-				wantSetVolume: testFloat64(0),
 				model:         "AppleTV14,1",
 			})
 		})
@@ -1200,8 +1199,38 @@ func TestSetupMirrorWithAudioPreservesThirdPartyTVZero(t *testing.T) {
 	testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
 		features:      uint64(1<<26 | 1<<featureThirdPartyTVFamily),
 		initialVolume: testFloat64(0),
-		wantSetVolume: testFloat64(0),
 	})
+}
+
+func TestSetupMirrorWithAudioResendsGenericReceiverVolume(t *testing.T) {
+	for _, skipRecord := range []bool{false, true} {
+		t.Run(fmt.Sprintf("skipRecord=%t", skipRecord), func(t *testing.T) {
+			testSetupMirrorAudioSessionNegotiation(t, audioSessionCase{
+				controlFirst: true, skipRecord: skipRecord, model: "Mac17,2",
+				initialVolume: testFloat64(-20), wantSetVolume: testFloat64(-20),
+			})
+		})
+	}
+}
+
+func TestInitialVolumeSendPolicyPreservesMuteAndCorrections(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		info ReceiverInfo
+		want bool
+	}{
+		{name: "Apple TV normal", info: ReceiverInfo{Model: "AppleTV14,1", InitialVolumeKnown: true, InitialVolume: -20}},
+		{name: "Apple TV muted", info: ReceiverInfo{Model: "AppleTV14,1", InitialVolumeKnown: true, InitialVolume: -20, InitialMutedKnown: true, InitialMuted: true}, want: true},
+		{name: "Apple TV corrected", info: ReceiverInfo{Model: "AppleTV14,1", InitialVolumeKnown: true, InitialVolume: -31}, want: true},
+		{name: "generic receiver unchanged", info: ReceiverInfo{InitialVolumeKnown: true, InitialVolume: -20}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			volume := applyInitialVolumeHeuristics(&test.info, receiverVolumeFromInfo(&test.info))
+			if got := volume.needsInitialSend(); got != test.want {
+				t.Fatalf("initial volume %+v: needsInitialSend() = %t, want %t", volume, got, test.want)
+			}
+		})
+	}
 }
 
 func TestSetupMirrorWithAudioFetchesOmittedReceiverVolume(t *testing.T) {
