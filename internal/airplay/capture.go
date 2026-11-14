@@ -42,6 +42,10 @@ type CaptureConfig struct {
 	X11WindowName string
 
 	ShowCursor bool // show the mouse cursor in the captured video (Wayland and X11)
+	// VirtualDisplay asks the Wayland ScreenCast portal for a new virtual
+	// monitor instead of an existing screen, so the receiver acts as an
+	// extended display. Virtual sessions are never persisted or restored.
+	VirtualDisplay bool
 
 	RestoreToken     string
 	SaveRestoreToken func(string) error
@@ -223,7 +227,13 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := ValidateHWAccel(cfg.HWAccel); err != nil {
 		return nil, err
 	}
+	if cfg.VirtualDisplay && (cfg.X11WindowID != 0 || cfg.X11WindowName != "") {
+		return nil, fmt.Errorf("virtual display cannot be combined with X11 window capture")
+	}
 	kind := capturePreparationX11
+	if cfg.VirtualDisplay && os.Getenv("WAYLAND_DISPLAY") == "" {
+		return nil, fmt.Errorf("virtual display requires a Wayland session with a ScreenCast portal")
+	}
 	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
 		kind = capturePreparationX11
 	} else if os.Getenv("WAYLAND_DISPLAY") != "" {
@@ -278,7 +288,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := probeWaylandDisplay(ctx, os.Getenv("WAYLAND_DISPLAY")); err != nil {
 		return nil, err
 	}
-	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, &preparation.streamSize)
+	nodeID, pwFd, portal, restoreToken, err := requestScreencast(ctx, cfg.RestoreToken, cfg.ShowCursor, cfg.VirtualDisplay, &preparation.streamSize)
 	if err != nil {
 		return nil, fmt.Errorf("screencast portal: %w", err)
 	}
@@ -2436,7 +2446,7 @@ func normalizeContext(ctx context.Context) context.Context {
 // permission and returns a PipeWire node ID, an fd for the portal's PipeWire remote,
 // the retained portal session (which must stay open for capture and retries), and a
 // fresh restore token when the portal grants persistence.
-func requestScreencast(ctx context.Context, restoreToken string, showCursor bool, dimensions *[2]int) (uint32, *os.File, pipeWirePortalSession, string, error) {
+func requestScreencast(ctx context.Context, restoreToken string, showCursor, virtualDisplay bool, dimensions *[2]int) (uint32, *os.File, pipeWirePortalSession, string, error) {
 	ctx = normalizeContext(ctx)
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
@@ -2451,6 +2461,12 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 
 	portalObject := conn.Object(portalBusName, portalObjectPath)
 	portalVersion := screenCastPortalVersion(ctx, portalObject)
+	if virtualDisplay {
+		available := screenCastAvailableSourceTypes(ctx, portalObject)
+		if available&portalSourceTypeVirtual == 0 {
+			return 0, nil, nil, "", fmt.Errorf("the ScreenCast portal does not offer virtual monitors (AvailableSourceTypes=%d); it needs e.g. KDE Plasma 6 or a recent GNOME", available)
+		}
+	}
 	baseToken, err := newPortalHandleToken()
 	if err != nil {
 		return 0, nil, nil, "", err
@@ -2516,18 +2532,12 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	if err != nil {
 		return 0, nil, nil, "", err
 	}
-	selectOpts := map[string]dbus.Variant{
-		"handle_token": dbus.MakeVariant(selectToken),
-		"types":        dbus.MakeVariant(uint32(1)), // MONITOR=1, WINDOW=2
-		"multiple":     dbus.MakeVariant(false),
-		"cursor_mode":  dbus.MakeVariant(cursorMode),
+	selectOpts := screenCastSelectOptions(selectToken, cursorMode, portalVersion, restoreToken, virtualDisplay)
+	if _, ok := selectOpts["restore_token"]; ok {
+		dbg("[CAPTURE] requesting screencast restore with saved token")
 	}
-	if portalVersion >= 4 {
-		selectOpts["persist_mode"] = dbus.MakeVariant(uint32(2))
-		if restoreToken != "" {
-			selectOpts["restore_token"] = dbus.MakeVariant(restoreToken)
-			dbg("[CAPTURE] requesting screencast restore with saved token")
-		}
+	if virtualDisplay {
+		dbg("[CAPTURE] requesting a new virtual monitor from the ScreenCast portal")
 	}
 
 	selectCtx, cancelSelect := context.WithTimeout(ctx, portalControlPhaseTimeout)
@@ -2579,7 +2589,8 @@ func requestScreencast(ctx context.Context, restoreToken string, showCursor bool
 	}
 
 	newRestoreToken := ""
-	if variant, ok := startResult["restore_token"]; ok {
+	// A virtual monitor's token must not replace the saved token for the real screen.
+	if variant, ok := startResult["restore_token"]; ok && !virtualDisplay {
 		value, ok := variant.Value().(string)
 		if !ok {
 			return 0, nil, nil, "", fmt.Errorf("unexpected restore token type: %T", variant.Value())
@@ -2814,6 +2825,54 @@ func newPortalHandleToken() (string, error) {
 		return "", fmt.Errorf("generate portal handle token: %w", err)
 	}
 	return "doubletake_" + hex.EncodeToString(random[:]), nil
+}
+
+// ScreenCast portal source types (org.freedesktop.portal.ScreenCast).
+const (
+	portalSourceTypeMonitor = uint32(1)
+	portalSourceTypeWindow  = uint32(2)
+	portalSourceTypeVirtual = uint32(4)
+)
+
+// screenCastSelectOptions builds the SelectSources options. A virtual display
+// asks for a new virtual monitor and is never persisted or restored, so the
+// saved token for the user's real screen stays valid.
+func screenCastSelectOptions(handleToken string, cursorMode, portalVersion uint32, restoreToken string, virtualDisplay bool) map[string]dbus.Variant {
+	sourceTypes := portalSourceTypeMonitor
+	if virtualDisplay {
+		sourceTypes = portalSourceTypeVirtual
+	}
+	opts := map[string]dbus.Variant{
+		"handle_token": dbus.MakeVariant(handleToken),
+		"types":        dbus.MakeVariant(sourceTypes),
+		"multiple":     dbus.MakeVariant(false),
+		"cursor_mode":  dbus.MakeVariant(cursorMode),
+	}
+	if portalVersion >= 4 && !virtualDisplay {
+		opts["persist_mode"] = dbus.MakeVariant(uint32(2))
+		if restoreToken != "" {
+			opts["restore_token"] = dbus.MakeVariant(restoreToken)
+		}
+	}
+	return opts
+}
+
+func screenCastAvailableSourceTypes(ctx context.Context, portal dbus.BusObject) uint32 {
+	callCtx, cancel := context.WithTimeout(normalizeContext(ctx), portalMethodTimeout)
+	defer cancel()
+	call := portal.CallWithContext(callCtx, "org.freedesktop.DBus.Properties.Get", 0,
+		portalScreenCastInterface, "AvailableSourceTypes")
+	var variant dbus.Variant
+	if err := call.Store(&variant); err != nil {
+		dbg("[CAPTURE] unable to read ScreenCast AvailableSourceTypes: %v", err)
+		return 0
+	}
+	types, ok := variant.Value().(uint32)
+	if !ok {
+		dbg("[CAPTURE] unexpected AvailableSourceTypes type: %T", variant.Value())
+		return 0
+	}
+	return types
 }
 
 func screenCastPortalVersion(ctx context.Context, portal dbus.BusObject) uint32 {

@@ -1615,3 +1615,58 @@ func TestH264TestCaptureStartupProbePreservesRealGStreamerOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestScreenCastSelectOptionsMonitorPersistsAndRestores(t *testing.T) {
+	opts := screenCastSelectOptions("tok", 2, 5, "saved-token", false)
+	if got := opts["types"].Value(); got != portalSourceTypeMonitor {
+		t.Fatalf("types = %v, want monitor (%d)", got, portalSourceTypeMonitor)
+	}
+	if got := opts["persist_mode"].Value(); got != uint32(2) {
+		t.Fatalf("persist_mode = %v, want 2", got)
+	}
+	if got := opts["restore_token"].Value(); got != "saved-token" {
+		t.Fatalf("restore_token = %v, want saved-token", got)
+	}
+	if got := opts["cursor_mode"].Value(); got != uint32(2) {
+		t.Fatalf("cursor_mode = %v, want 2", got)
+	}
+}
+
+func TestScreenCastSelectOptionsOldPortalSkipsPersistence(t *testing.T) {
+	opts := screenCastSelectOptions("tok", 1, 3, "saved-token", false)
+	if _, ok := opts["persist_mode"]; ok {
+		t.Fatal("persist_mode must not be sent to portal version < 4")
+	}
+	if _, ok := opts["restore_token"]; ok {
+		t.Fatal("restore_token must not be sent to portal version < 4")
+	}
+}
+
+func TestScreenCastSelectOptionsVirtualDisplay(t *testing.T) {
+	opts := screenCastSelectOptions("tok", 2, 5, "saved-token", true)
+	if got := opts["types"].Value(); got != portalSourceTypeVirtual {
+		t.Fatalf("types = %v, want virtual (%d)", got, portalSourceTypeVirtual)
+	}
+	if _, ok := opts["persist_mode"]; ok {
+		t.Fatal("virtual display sessions must not be persisted")
+	}
+	if _, ok := opts["restore_token"]; ok {
+		t.Fatal("virtual display must not restore the saved monitor token")
+	}
+}
+
+func TestPrepareCaptureRejectsVirtualDisplayWithX11Window(t *testing.T) {
+	_, err := PrepareCapture(context.Background(), CaptureConfig{VirtualDisplay: true, X11WindowName: "xterm"})
+	if err == nil || !strings.Contains(err.Error(), "virtual display cannot be combined") {
+		t.Fatalf("err = %v, want virtual display/X11 conflict", err)
+	}
+}
+
+func TestPrepareCaptureRejectsVirtualDisplayWithoutWayland(t *testing.T) {
+	t.Setenv("WAYLAND_DISPLAY", "")
+	t.Setenv("DISPLAY", ":0")
+	_, err := PrepareCapture(context.Background(), CaptureConfig{VirtualDisplay: true})
+	if err == nil || !strings.Contains(err.Error(), "requires a Wayland session") {
+		t.Fatalf("err = %v, want Wayland requirement", err)
+	}
+}

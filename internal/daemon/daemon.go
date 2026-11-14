@@ -101,7 +101,9 @@ type Config struct {
 	DirectKey   bool
 	NoAudio     bool
 	ShowCursor  bool
-	Code        string // default pairing/Digest credential; request Pin overrides it
+	// VirtualDisplay streams a new virtual monitor (extended desktop) on Wayland.
+	VirtualDisplay bool
+	Code           string // default pairing/Digest credential; request Pin overrides it
 }
 
 func (d *Daemon) mirrorStreamConfig() airplay.StreamConfig {
@@ -1324,12 +1326,13 @@ func (d *Daemon) prepareVideoCapture(ctx context.Context, restoreToken, deviceID
 		codec = codecs[0]
 	}
 	cfg := airplay.CaptureConfig{
-		FPS:          d.cfg.FPS,
-		Bitrate:      d.cfg.Bitrate,
-		HWAccel:      d.cfg.HWAccel,
-		VideoCodec:   codec,
-		ShowCursor:   d.cfg.ShowCursor,
-		RestoreToken: restoreToken,
+		FPS:            d.cfg.FPS,
+		Bitrate:        d.cfg.Bitrate,
+		HWAccel:        d.cfg.HWAccel,
+		VideoCodec:     codec,
+		ShowCursor:     d.cfg.ShowCursor,
+		VirtualDisplay: d.cfg.VirtualDisplay,
+		RestoreToken:   restoreToken,
 	}
 	if deviceID != "" {
 		cfg.SaveRestoreToken = func(token string) error {
@@ -1485,14 +1488,15 @@ func (d *Daemon) getOrStartCaptureGroup(entry *activeStream, restoreToken, devic
 	d.mu.Unlock()
 
 	capCfg := airplay.CaptureConfig{
-		FPS:          d.cfg.FPS,
-		Bitrate:      d.cfg.Bitrate,
-		HWAccel:      d.cfg.HWAccel,
-		VideoCodec:   codec,
-		MaxWidth:     key.maxWidth,
-		MaxHeight:    key.maxHeight,
-		ShowCursor:   d.cfg.ShowCursor,
-		RestoreToken: restoreToken,
+		FPS:            d.cfg.FPS,
+		Bitrate:        d.cfg.Bitrate,
+		HWAccel:        d.cfg.HWAccel,
+		VideoCodec:     codec,
+		MaxWidth:       key.maxWidth,
+		MaxHeight:      key.maxHeight,
+		ShowCursor:     d.cfg.ShowCursor,
+		VirtualDisplay: d.cfg.VirtualDisplay,
+		RestoreToken:   restoreToken,
 	}
 	if deviceID != "" {
 		capCfg.SaveRestoreToken = func(token string) error {
