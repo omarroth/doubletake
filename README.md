@@ -278,6 +278,7 @@ doubletake-ctl disconnect
 | `-direct-key` | false | Use `shk`/`shiv` directly without SHA-512 derivation |
 | `-no-audio` | false | Disable audio streaming |
 | `-test` | false | Use synthetic video source |
+| `-virtual-display` | false | Wayland: create a new virtual monitor and stream it, so the receiver extends the desktop instead of mirroring a screen (needs a portal with virtual source support, e.g. KDE Plasma 6) |
 | `-daemonize` | false | Run as background daemon with Unix socket control interface |
 | `-socket` | `$XDG_RUNTIME_DIR/doubletake.sock` | Daemon control socket path |
 | `-debug` | false | Verbose debug logging |

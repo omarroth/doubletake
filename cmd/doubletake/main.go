@@ -80,6 +80,7 @@ func main() {
 	x11WindowID := flag.String("x11-window-id", "", "X11 window id to capture, decimal or 0xhex")
 	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
+	virtualDisplay := flag.Bool("virtual-display", false, "Wayland: create a new virtual monitor and stream it, so the receiver extends the desktop instead of mirroring a screen")
 	flag.Parse()
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)
@@ -104,22 +105,23 @@ func main() {
 
 	if *daemonize {
 		runDaemon(daemon.Config{
-			SocketPath:  *socketPath,
-			CredFile:    *credFile,
-			CredBackend: *credBackend,
-			FPS:         *fps,
-			Bitrate:     *bitrate,
-			PortMin:     portMin,
-			PortMax:     portMax,
-			HWAccel:     *hwaccel,
-			VideoCodec:  airplay.VideoCodec(*videoCodec),
-			Debug:       *debug,
-			TestMode:    *testMode,
-			NoEncrypt:   *noEncrypt,
-			DirectKey:   *directKey,
-			NoAudio:     *noAudio,
-			ShowCursor:  !*noCursor,
-			Code:        credential,
+			SocketPath:     *socketPath,
+			CredFile:       *credFile,
+			CredBackend:    *credBackend,
+			FPS:            *fps,
+			Bitrate:        *bitrate,
+			PortMin:        portMin,
+			PortMax:        portMax,
+			HWAccel:        *hwaccel,
+			VideoCodec:     airplay.VideoCodec(*videoCodec),
+			Debug:          *debug,
+			TestMode:       *testMode,
+			NoEncrypt:      *noEncrypt,
+			DirectKey:      *directKey,
+			NoAudio:        *noAudio,
+			ShowCursor:     !*noCursor,
+			VirtualDisplay: *virtualDisplay,
+			Code:           credential,
 		})
 		return
 	}
@@ -339,13 +341,14 @@ func main() {
 	// information. Some current receivers omit displays before that session
 	// exists; committing the pipeline earlier silently selects the 720p fallback.
 	captureCfg := airplay.CaptureConfig{
-		FPS:           *fps,
-		Bitrate:       *bitrate,
-		HWAccel:       *hwaccel,
-		VideoCodec:    airplay.VideoCodec(*videoCodec),
-		X11WindowID:   xid,
-		X11WindowName: *x11WindowName,
-		ShowCursor:    !*noCursor,
+		FPS:            *fps,
+		Bitrate:        *bitrate,
+		HWAccel:        *hwaccel,
+		VideoCodec:     airplay.VideoCodec(*videoCodec),
+		X11WindowID:    xid,
+		X11WindowName:  *x11WindowName,
+		ShowCursor:     !*noCursor,
+		VirtualDisplay: *virtualDisplay,
 	}
 	if *testMode {
 		if *noAudio {

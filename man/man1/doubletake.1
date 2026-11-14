@@ -93,6 +93,13 @@ forced \fBhevc\fR. Automatic mode uses H.264 at the receiver's nominal canvas.
 Forced HEVC uses the receiver's maximum canvas and may also use x265.
 Main10 output does not fabricate HDR metadata for an SDR capture source.
 .TP
+.B \-virtual\-display
+On Wayland, ask the ScreenCast portal for a new virtual monitor and stream
+it, so the receiver extends the desktop instead of mirroring an existing
+screen. Requires a portal that offers virtual sources (for example KDE
+Plasma 6). The virtual monitor is removed when streaming stops; its session
+is never persisted, so the saved restore token for the real screen is kept.
+.TP
 .B \-debug
 Enable verbose protocol logging
 .TP
@@ -112,6 +119,9 @@ Pair with a PIN (saves credentials for reuse):
 .TP
 Connect to a receiver with "Require Password" enabled:
 .B DOUBLETAKE_CODE=... doubletake \-target 192.168.1.77
+.TP
+Use the receiver as an extended display (Wayland):
+.B doubletake \-target 192.168.1.77 \-virtual\-display
 .TP
 Stream with a custom frame rate and bitrate:
 .B doubletake \-target 192.168.1.77 \-fps 30 \-bitrate 4500
