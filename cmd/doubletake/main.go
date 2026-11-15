@@ -19,6 +19,7 @@ import (
 
 	"doubletake/internal/airplay"
 	"doubletake/internal/daemon"
+	"doubletake/internal/version"
 )
 
 func parseXID(s string) (uint64, error) {
@@ -107,6 +108,7 @@ func main() {
 		}
 		return
 	}
+	showVersion := flag.Bool("version", false, "Show version and exit")
 	target := flag.String("target", "", "AirPlay receiver IP address or hostname (skip discovery)")
 	port := flag.Int("port", 7000, "AirPlay port")
 	code := flag.String("code", "", "Pairing code shown on the receiver; prefer $DOUBLETAKE_CODE")
@@ -133,6 +135,10 @@ func main() {
 	x11WindowName := flag.String("x11-window-name", "", "X11 window name to capture; prefer -x11-window-id")
 	noCursor := flag.Bool("no-cursor", false, "Don't show the mouse cursor in the captured video")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("doubletake %s\n", version.String())
+		return
+	}
 	if !airplay.HasInProcessGStreamer() {
 		log.Println("warning: build without in-process GStreamer uses gst-launch-1.0 for video; adaptive stream quality is unavailable")
 	}

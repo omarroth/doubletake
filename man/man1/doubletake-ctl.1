@@ -1,9 +1,9 @@
-.TH doubletake-ctl 1 "May 2026" "doubletake" "User Commands"
+.TH doubletake-ctl 1 "November 2026" "doubletake" "User Commands"
 .SH NAME
 doubletake-ctl \- Control doubletake daemon
 .SH SYNOPSIS
 .B doubletake-ctl
-\fICOMMAND\fR [\fIARGUMENTS\fR]
+[\fIOPTIONS\fR] \fICOMMAND\fR [\fIARGUMENTS\fR]
 .SH DESCRIPTION
 .B doubletake-ctl
 is a command-line interface for controlling the
@@ -14,6 +14,12 @@ and manage multiple simultaneous mirroring sessions.
 .TP
 .B status
 Query the status of the running doubletake daemon and list active connections
+.TP
+.B discover
+Refresh receiver discovery.
+.TP
+.B devices
+List cached discovered receivers.
 .TP
 .B connect [\fITARGET\fR] [\fIPIN-OR-PASSWORD\fR]
 Connect to an Apple TV, optionally supplying pairing credentials. If no target
@@ -29,6 +35,23 @@ to select one explicitly.
 .TP
 .B disconnect [\fITARGET\fR]
 Disconnect from an Apple TV. If no target is specified, disconnects all active connections
+.TP
+.B mute [\fITARGET\fR]
+Mute mirrored audio for one receiver, or all receivers if no target is supplied.
+.TP
+.B unmute [\fITARGET\fR]
+Unmute mirrored audio for one receiver, or all receivers if no target is supplied.
+.SH OPTIONS
+.TP
+.B \-socket \fIPATH\fR
+Override the daemon control socket (default: $XDG_RUNTIME_DIR/doubletake.sock,
+or /tmp/doubletake.sock when XDG_RUNTIME_DIR is unset).
+.TP
+.B \-version
+Show the version and source commit, then exit.
+.TP
+.B \-help, \-h
+Show command-line help and exit.
 .SH EXAMPLES
 .TP
 Check daemon status:

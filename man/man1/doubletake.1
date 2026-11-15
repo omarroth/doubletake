@@ -157,6 +157,9 @@ is unset.
 .TP
 .B \-help, \-h
 Show command-line help and exit.
+.TP
+.B \-version
+Show the version and source commit, then exit.
 .SH EXAMPLES
 .TP
 Discover and connect to an AirPlay receiver on the network:
@@ -226,9 +229,11 @@ Daemon mode shares the configured range among its streams. Reserve at least
 three available ports for every simultaneous receiver.
 .SH REQUIREMENTS
 .IP \(bu 2
-Go 1.23 or later
+Go 1.25 or later, a C compiler, pkg-config, and GStreamer development headers (source builds)
 .IP \(bu 2
-GStreamer 1.0 (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
+GStreamer 1.16 or later (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
+.IP \(bu 2
+pactl and PulseAudio or pipewire-pulse for the selectable audio output
 .IP \(bu 2
 The \fBopenh264\fR method requires the GStreamer \fBopenh264enc\fR element
 .IP \(bu 2

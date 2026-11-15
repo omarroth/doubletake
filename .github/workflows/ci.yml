@@ -2,26 +2,41 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}
 
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
+        go: ['1.25.x', stable]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
-      - run: make test
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go.sum
+      - run: make test-go
+      - run: go vet ./...
 
   build-gstreamer:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -32,51 +47,76 @@ jobs:
     container: ubuntu:20.04
     needs: test
     steps:
-      - name: Install Ubuntu 20.04 GStreamer build and runtime dependencies
+      - name: Install Ubuntu 20.04 build and runtime dependencies
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
             ca-certificates git build-essential pkg-config binutils \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfdk-aac-dev \
             gstreamer1.0-tools gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-ugly gstreamer1.0-libav \
-            gstreamer1.0-pulseaudio pulseaudio-utils
+            gstreamer1.0-pulseaudio pulseaudio pulseaudio-utils
 
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
+          cache-dependency-path: go.sum
 
-      - name: Test linked GStreamer backend
-        run: make test-gstreamer
+      - name: Verify minimum plugin availability
+        run: |
+          gst-inspect-1.0 x264enc >/dev/null
+          gst-inspect-1.0 rtponviftimestamp >/dev/null
+          gst-inspect-1.0 pulsesrc >/dev/null
+
+      - name: Test default and optional AAC-ELD builds
+        run: |
+          make test
+          make test BUILD_TAGS='gstreamer_cgo fdk_aac'
+          CGO_ENABLED=1 go vet -tags gstreamer_cgo ./...
+
+      - name: Race checks
+        if: matrix.suffix == ''
+        run: CGO_ENABLED=1 go test -race -tags gstreamer_cgo ./...
+
+      - name: Check for reachable Go vulnerabilities
+        if: matrix.suffix == ''
+        run: CGO_ENABLED=1 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -tags gstreamer_cgo ./...
+
+      - name: Test audio output lifetime and volume on a private server
+        run: scripts/test-audio-output.sh
 
       - name: Build dynamically linked doubletake
         run: make doubletake-release
 
-      - name: Verify minimum-runtime compatibility
+      - name: Verify minimum-runtime compatibility and version
         run: |
-          gst-inspect-1.0 x264enc >/dev/null
-          gst-inspect-1.0 rtponviftimestamp >/dev/null
           ldd ./doubletake | grep -F libgstreamer-1.0.so.0
-          ./doubletake -help >/dev/null
-          if readelf --version-info ./doubletake | grep -Eq 'Name: GLIBC_2\.(3[2-9]|[4-9][0-9])'; then
-            echo "doubletake requires a glibc newer than Ubuntu 20.04" >&2
+          if ldd ./doubletake | grep -E 'not found|libfdk'; then
+            echo 'Release must resolve all libraries without requiring FDK-AAC' >&2
             exit 1
           fi
+          ./doubletake -help >/dev/null
+          ./doubletake -version | grep -F "$VERSION"
+          required_glibc=$(readelf --version-info ./doubletake | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -1)
+          test -n "$required_glibc"
+          dpkg --compare-versions "$required_glibc" le 2.31
 
       - name: Add architecture suffix
         if: matrix.suffix != ''
         run: mv doubletake "doubletake${{ matrix.suffix }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-assets-gstreamer${{ matrix.suffix }}
           path: doubletake${{ matrix.suffix }}
+          if-no-files-found: error
 
   build-ctl:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -86,17 +126,18 @@ jobs:
     runs-on: ${{ matrix.runner }}
     needs: test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
+          cache-dependency-path: go.sum
 
-      - name: Build static doubletake-ctl
-        run: make doubletake-ctl-release
-
-      - name: Verify static control binary
+      - name: Build and verify static doubletake-ctl
         run: |
+          make doubletake-ctl-release
           file ./doubletake-ctl | grep -F 'statically linked'
+          ./doubletake-ctl -help >/dev/null
+          ./doubletake-ctl -version | grep -F "$VERSION"
 
       - name: Bundle manpages
         if: matrix.suffix == ''
@@ -104,55 +145,72 @@ jobs:
 
       - name: Add architecture suffix
         if: matrix.suffix != ''
-        run: |
-          mv doubletake-ctl "doubletake-ctl${{ matrix.suffix }}"
+        run: mv doubletake-ctl "doubletake-ctl${{ matrix.suffix }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-assets-ctl${{ matrix.suffix }}
           path: |
             doubletake-ctl${{ matrix.suffix }}
             doubletake-manpages.tar.gz
+          if-no-files-found: error
+
+  package:
+    runs-on: ubuntu-latest
+    needs: [build-gstreamer, build-ctl]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-assets-*
+          path: release
+          merge-multiple: true
+      - name: Validate assets and create checksums
+        run: |
+          cp LICENSE COPYING.GPL release/
+          cd release
+          for asset in doubletake doubletake-ctl doubletake-arm64 doubletake-ctl-arm64 doubletake-manpages.tar.gz LICENSE COPYING.GPL; do
+            test -s "$asset"
+          done
+          tar -tzf doubletake-manpages.tar.gz
+          sha256sum doubletake doubletake-ctl doubletake-arm64 doubletake-ctl-arm64 doubletake-manpages.tar.gz LICENSE COPYING.GPL > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle
+          path: release/*
+          if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [build-gstreamer, build-ctl]
+    needs: package
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          fetch-tags: true
-
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
-          pattern: release-assets-*
-          merge-multiple: true
-
-      - name: Extract release notes from tag
-        id: notes
-        run: |
-          # Re-fetch the tag to ensure the annotated tag object is present
-          git fetch origin tag "${GITHUB_REF_NAME}" --force --no-tags
-          NOTES=$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}")
-          if [ -z "$NOTES" ]; then
-            NOTES=$(git log -1 --format='%B' "${GITHUB_REF_NAME}")
-          fi
-          {
-            echo 'RELEASE_NOTES<<EOF'
-            echo "$NOTES"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
+          name: release-bundle
+          path: release
+      - name: Extract release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: scripts/release-notes.sh "$RELEASE_TAG" > release-notes.md
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          body: ${{ steps.notes.outputs.RELEASE_NOTES }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            doubletake
-            doubletake-ctl
-            doubletake-arm64
-            doubletake-ctl-arm64
-            doubletake-manpages.tar.gz
+            release/doubletake
+            release/doubletake-ctl
+            release/doubletake-arm64
+            release/doubletake-ctl-arm64
+            release/doubletake-manpages.tar.gz
+            release/LICENSE
+            release/COPYING.GPL
+            release/SHA256SUMS
