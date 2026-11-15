@@ -13,9 +13,8 @@ A Plasma 6 system tray widget for controlling AirPlay screen mirroring via the d
 ```sh
 # Build the daemon and ctl binaries
 cd /path/to/doubletake
-go build -o doubletake ./cmd/doubletake
-go build -o doubletake-ctl ./cmd/doubletake-ctl
-sudo install -m755 doubletake doubletake-ctl /usr/local/bin/
+make
+sudo make install
 
 # Install the plasmoid
 kpackagetool6 -t Plasma/Applet -i plasmoid/
