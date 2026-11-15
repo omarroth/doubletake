@@ -29,6 +29,32 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 		}
 		return strings.TrimSpace(string(out))
 	}
+	defaultSink := func() string {
+		t.Helper()
+		name, err := defaultPulseSink(ctx, runPulseCommand)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+	sinkVolume := func(name string) string {
+		t.Helper()
+		currentName := ""
+		for _, line := range strings.Split(run("list", "sinks"), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "Sink #") {
+				currentName = ""
+			}
+			if value, ok := strings.CutPrefix(line, "Name:"); ok {
+				currentName = strings.TrimSpace(value)
+			}
+			if currentName == name && strings.HasPrefix(line, "Volume:") {
+				return line
+			}
+		}
+		t.Fatalf("output %s has no volume information", name)
+		return ""
+	}
 	localModule := run("load-module", "module-null-sink", "sink_name=local_test_output")
 	defer runPulseCommand(context.Background(), "unload-module", localModule)
 	run("set-default-sink", "local_test_output")
@@ -44,7 +70,7 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 	}
 	defer second.Stop()
 	name := sharedAudioOutput.name
-	if got := run("get-default-sink"); got != "local_test_output" {
+	if got := defaultSink(); got != "local_test_output" {
 		t.Fatalf("creation changed default output to %s", got)
 	}
 	if !strings.Contains(run("list", "short", "sinks"), name) {
@@ -157,7 +183,7 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 	if strings.Contains(run("list", "short", "sinks"), name) {
 		t.Fatal("last capture leaked its output")
 	}
-	if got := run("get-default-sink"); got != "local_test_output" {
+	if got := defaultSink(); got != "local_test_output" {
 		t.Fatalf("cleanup changed default output: %s", got)
 	}
 	if !aacELDEncoderAvailable {
@@ -178,7 +204,7 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restart.Stop()
-	if restored := run("get-sink-volume", sharedAudioOutput.name); !strings.Contains(restored, "37%") {
+	if restored := sinkVolume(sharedAudioOutput.name); !strings.Contains(restored, "37%") {
 		t.Fatalf("recreated output did not restore its volume: %s", restored)
 	}
 	run("set-sink-volume", sharedAudioOutput.name, "100%")

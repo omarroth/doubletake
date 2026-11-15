@@ -2184,28 +2184,14 @@ func selectGstEncoderWithProbe(cfg CaptureConfig, hasElement func(string) bool, 
 
 	vbvBuf := vbvBufferKbit(bitrate, fps)
 	maxrate := bitrate + bitrate/4 // allow 25% overshoot on peaks
+	// Prefer the established hardware backends before Vulkan. Some Vulkan
+	// encoder/driver combinations fail during in-process pipeline shutdown.
 	candidates := []struct {
 		method  string
 		element string
 		label   string
 		result  encoderResult
 	}{
-		{
-			method:  "nvenc",
-			element: "vulkanh264enc",
-			label:   "NVENC hardware encoding (vulkanh264enc)",
-			result: encoderResult{
-				parts: []string{
-					"vulkanh264enc",
-					"b-frames=0",
-					fmt.Sprintf("idr-period=%d", keyframeInterval),
-					"rate-control=cbr",
-					fmt.Sprintf("bitrate=%d", bitrate),
-				},
-				needsVulkan: true,
-				rawFormat:   "NV12", codec: VideoCodecH264,
-			},
-		},
 		{
 			method:  "nvenc",
 			element: "nvh264enc",
@@ -2246,6 +2232,22 @@ func selectGstEncoderWithProbe(cfg CaptureConfig, hasElement func(string) bool, 
 				// bcm2835 fails STREAMON unless negotiation fixes the level.
 				// This caps field changes signaling, not the encoded bitstream.
 				afterEncoder: gstStage{"video/x-h264,level=(string)4"},
+			},
+		},
+		{
+			method:  "nvenc",
+			element: "vulkanh264enc",
+			label:   "NVENC hardware encoding (vulkanh264enc)",
+			result: encoderResult{
+				parts: []string{
+					"vulkanh264enc",
+					"b-frames=0",
+					fmt.Sprintf("idr-period=%d", keyframeInterval),
+					"rate-control=cbr",
+					fmt.Sprintf("bitrate=%d", bitrate),
+				},
+				needsVulkan: true,
+				rawFormat:   "NV12", codec: VideoCodecH264,
 			},
 		},
 		{

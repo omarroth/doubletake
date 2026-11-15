@@ -199,3 +199,29 @@ func TestAudioOutputCanceledAcquireDoesNotCreateSink(t *testing.T) {
 		t.Fatal("canceled capture created an output")
 	}
 }
+
+func TestDefaultPulseSinkWorksWithLegacyInfo(t *testing.T) {
+	for _, test := range []struct {
+		info string
+		want string
+	}{
+		{info: "Server Name: pulseaudio\nDefault Sink: alsa_output.pci.stereo\nDefault Source: microphone\n", want: "alsa_output.pci.stereo"},
+		{info: "Server Name: PulseAudio (on PipeWire)\nDefault Sink: doubletake\n", want: "doubletake"},
+		{info: "Default Sink: \n"},
+		{info: "Default Sink: @DEFAULT_SINK@\n"},
+		{info: "Default Sink: (null)\n"},
+		{info: "Server Name: pulseaudio\n"},
+	} {
+		t.Run(test.info, func(t *testing.T) {
+			got, err := defaultPulseSink(t.Context(), func(_ context.Context, args ...string) ([]byte, error) {
+				if len(args) != 1 || args[0] != "info" {
+					t.Fatalf("used a newer pactl command: %v", args)
+				}
+				return []byte(test.info), nil
+			})
+			if got != test.want || (err != nil) != (test.want == "") {
+				t.Fatalf("default output = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}

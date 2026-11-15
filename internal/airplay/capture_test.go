@@ -884,7 +884,7 @@ func TestDetectGstEncoderRejectsMissingExplicitOpenH264(t *testing.T) {
 }
 
 func TestDetectGstEncoderSelectionContract(t *testing.T) {
-	allProbes := []string{"vulkanh264enc", "nvh264enc", "vah264enc", "v4l2h264enc", "openh264enc", "x264enc"}
+	allProbes := []string{"nvh264enc", "vah264enc", "v4l2h264enc", "vulkanh264enc", "openh264enc", "x264enc"}
 	tests := []struct {
 		name        string
 		method      string
@@ -894,6 +894,28 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 		wantProbes  []string
 		wantError   string
 	}{
+		{
+			name:        "auto prefers NVENC over Vulkan",
+			method:      "auto",
+			available:   map[string]bool{"nvh264enc": true, "vulkanh264enc": true},
+			wantEncoder: "nvh264enc",
+			wantProbes:  allProbes[:1],
+		},
+		{
+			name:        "auto prefers VA over Vulkan",
+			method:      "auto",
+			available:   map[string]bool{"vah264enc": true, "vulkanh264enc": true},
+			wantEncoder: "vah264enc",
+			wantMemory:  encoderInputVAMemory,
+			wantProbes:  allProbes[:2],
+		},
+		{
+			name:        "nvenc retains Vulkan fallback",
+			method:      "nvenc",
+			available:   map[string]bool{"vulkanh264enc": true},
+			wantEncoder: "vulkanh264enc",
+			wantProbes:  []string{"nvh264enc", "vulkanh264enc"},
+		},
 		{
 			name:        "auto falls through to OpenH264",
 			method:      "auto",
@@ -906,7 +928,7 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			method:      "auto",
 			available:   map[string]bool{"v4l2h264enc": true, "openh264enc": true},
 			wantEncoder: "v4l2h264enc",
-			wantProbes:  allProbes[:4],
+			wantProbes:  allProbes[:3],
 		},
 		{
 			name:        "empty aliases auto and reaches x264",
@@ -925,13 +947,13 @@ func TestDetectGstEncoderSelectionContract(t *testing.T) {
 			method:      "nvenc",
 			available:   map[string]bool{"nvh264enc": true, "openh264enc": true},
 			wantEncoder: "nvh264enc",
-			wantProbes:  []string{"vulkanh264enc", "nvh264enc"},
+			wantProbes:  []string{"nvh264enc"},
 		},
 		{
 			name:       "missing nvenc does not cross fallback",
 			method:     "nvenc",
 			available:  map[string]bool{"vah264enc": true, "openh264enc": true, "x264enc": true},
-			wantProbes: []string{"vulkanh264enc", "nvh264enc"},
+			wantProbes: []string{"nvh264enc", "vulkanh264enc"},
 			wantError:  "-hwaccel nvenc",
 		},
 		{
@@ -1671,7 +1693,7 @@ func TestWaylandCapturePlansRetainSelectedEncoderBackend(t *testing.T) {
 		wantElements []string
 		wantModes    []waylandPipelineMode
 	}{
-		{method: "auto", wantElements: []string{"vulkanh264enc", "vulkanh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},
+		{method: "auto", wantElements: []string{"nvh264enc", "nvh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},
 		{method: "vaapi", wantElements: []string{"vah264enc", "vah264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAMemory, waylandPipelineSystemMemory}},
 		{method: "none", wantElements: []string{"x264enc", "x264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},
 		{method: "openh264", wantElements: []string{"openh264enc", "openh264enc"}, wantModes: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},

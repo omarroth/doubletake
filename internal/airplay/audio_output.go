@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -33,11 +34,31 @@ type pulseCommand func(context.Context, ...string) ([]byte, error)
 func runPulseCommand(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "pactl", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "pactl", args...)
+	// pactl info is available on older PulseAudio releases too. Its labels
+	// must remain stable when parsing the default sink below.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("pactl %s: %w: %s", args[0], err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+func defaultPulseSink(ctx context.Context, run pulseCommand) (string, error) {
+	out, err := run(ctx, "info")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "Default Sink:"); ok {
+			name = strings.TrimSpace(name)
+			if name != "" && name != "@DEFAULT_SINK@" && name != "(null)" {
+				return name, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("sound server has no default output")
 }
 
 // All receivers in this process consume the same selectable output, including

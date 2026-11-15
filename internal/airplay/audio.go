@@ -292,7 +292,7 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 				return nil, err
 			}
 		} else if hasPulseSource {
-			monitor = detectPulseMonitor()
+			monitor = detectPulseMonitor(captureCtx)
 		}
 		var backend string
 		srcArgs, backend = selectAudioMonitorSource(hasPulseSource, monitor, hasPipeWireSource, codec)
@@ -693,14 +693,10 @@ func (w *bitWriter) flush() int {
 }
 
 // detectPulseMonitor finds the default PulseAudio sink's monitor source name.
-func detectPulseMonitor() string {
-	out, err := exec.Command("pactl", "get-default-sink").Output()
+func detectPulseMonitor(ctx context.Context) string {
+	sinkName, err := defaultPulseSink(ctx, runPulseCommand)
 	if err != nil {
-		dbg("[AUDIO] pactl get-default-sink failed: %v", err)
-		return ""
-	}
-	sinkName := strings.TrimSpace(string(out))
-	if sinkName == "" {
+		dbg("[AUDIO] default output lookup failed: %v", err)
 		return ""
 	}
 	return sinkName + ".monitor"
