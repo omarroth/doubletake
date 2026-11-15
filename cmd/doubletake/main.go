@@ -569,7 +569,7 @@ func readCredential(reader *bufio.Reader, prompt string) string {
 }
 
 func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
-	fmt.Println("searching for Apple TVs...")
+	fmt.Println("searching for screen mirroring AirPlay devices...")
 	discoverCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -578,7 +578,7 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 		return nil, err
 	}
 	if len(devices) == 0 {
-		return nil, fmt.Errorf("no Apple TVs found")
+		return nil, fmt.Errorf("no screen mirroring AirPlay devices found")
 	}
 
 	sort.Slice(devices, func(i, j int) bool {
