@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
     tags: ["v*"]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
 
 permissions:
   contents: read
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
-  VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('git-{0}', github.sha) }}
 
 jobs:
   test:
@@ -27,6 +27,15 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require release tags to reference main
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo 'Release tags must point to a commit on main' >&2
+            exit 1
+          fi
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}

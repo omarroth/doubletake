@@ -7,8 +7,8 @@ Mirror a Linux desktop and audio to Apple TV, macOS, and compatible AirPlay rece
 - A selectable audio output, with volume and mute controls.
 - Multiple receivers through the daemon and [KDE Plasma widget](plasmoid/).
 
-See the [changelog](CHANGELOG.md) for changes since 0.5.0 and
-[compatibility notes](docs/compatibility.md) for tested receivers and capture requirements.
+See the [compatibility notes](docs/compatibility.md) for tested receivers,
+capture requirements, and troubleshooting.
 
 ## Install
 

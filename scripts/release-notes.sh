@@ -11,26 +11,4 @@ if [ "$(git cat-file -t "$ref")" = tag ]; then
     fi
 fi
 
-# Prefer a versioned entry; Unreleased also supports local release candidates.
-extract() {
-    awk -v wanted="$1" '
-        /^## / {
-            if (found) exit
-            heading = $2
-            gsub(/[\[\]]/, "", heading)
-            sub(/^v/, "", heading)
-            found = heading == wanted
-            next
-        }
-        found && (printed || /[^[:space:]]/) { print; printed = 1 }
-    ' CHANGELOG.md
-}
-notes=$(extract "${tag#v}")
-if [ -z "$notes" ]; then
-    notes=$(extract Unreleased)
-fi
-if [ -z "$notes" ]; then
-    printf 'No release notes for %s in CHANGELOG.md\n' "$tag" >&2
-    exit 1
-fi
-printf '%s\n' "$notes"
+git log -1 --format='%B' "$ref"

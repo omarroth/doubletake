@@ -42,8 +42,7 @@ shared codec or ALAC when possible. Default and release builds require no FDK-AA
 
 ## Prepare a release
 
-Keep the next release's highlights in [CHANGELOG.md](../CHANGELOG.md). Before
-tagging, name its Unreleased section with the chosen version and run:
+Before tagging a release on `main`, run:
 
 ```sh
 make test
@@ -61,9 +60,10 @@ Check both x86-64 and ARM64 builds. The controller must remain static.
 
 CI tests Go 1.25 and the current stable toolchain on both architectures, and
 builds releases with stable Go on Ubuntu 20.04.
-Tag builds publish the four binaries, manpages, licenses, and a SHA-256 manifest.
-Annotated tag messages supply release notes; lightweight tags use the matching
-changelog section. No tag or release is created by the local build targets.
+Version tags publish the four binaries, manpages, licenses, and a SHA-256 manifest
+only when the tagged commit is on `main`. Put release notes in an annotated tag
+message; lightweight tags fall back to the commit message. No tag or release is
+created by the local build targets.
 
 Headless tests cover protocol, capture, audio lifetime, and multi-target daemon
 behavior. Release candidates should also be checked on real Wayland/X11 desktops
