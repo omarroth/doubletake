@@ -6,9 +6,9 @@ import "fmt"
 
 const aacELDEncoderAvailable = false
 
-// eldEncoder is present in every build so codec negotiation remains portable.
-// The actual encoder is deliberately opt-in: libfdk-aac is not available on
-// every supported distribution and doubletake's release binaries are static.
+// eldEncoder keeps codec negotiation available in builds without fdk_aac.
+// Default sender builds include the encoder bridge; pure Go builds, including
+// the static controller, use this stub.
 type eldEncoder struct{}
 
 func newELDEncoder() (*eldEncoder, error) {

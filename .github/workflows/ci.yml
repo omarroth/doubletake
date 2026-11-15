@@ -80,22 +80,24 @@ jobs:
           gst-inspect-1.0 rtponviftimestamp >/dev/null
           gst-inspect-1.0 pulsesrc >/dev/null
 
-      - name: Test default and optional AAC-ELD builds
+      - name: Test default AAC-ELD and ALAC-only builds
         run: |
           make test
-          make test BUILD_TAGS='gstreamer_cgo fdk_aac'
-          CGO_ENABLED=1 go vet -tags gstreamer_cgo ./...
+          make test BUILD_TAGS=gstreamer_cgo
+          CGO_ENABLED=1 go vet -tags 'gstreamer_cgo fdk_aac' ./...
 
       - name: Race checks
         if: matrix.suffix == ''
-        run: CGO_ENABLED=1 go test -race -tags gstreamer_cgo ./...
+        run: CGO_ENABLED=1 go test -race -tags 'gstreamer_cgo fdk_aac' ./...
 
       - name: Check for reachable Go vulnerabilities
         if: matrix.suffix == ''
-        run: CGO_ENABLED=1 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -tags gstreamer_cgo ./...
+        run: CGO_ENABLED=1 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -tags 'gstreamer_cgo fdk_aac' ./...
 
       - name: Test audio output lifetime and volume on a private server
-        run: scripts/test-audio-output.sh
+        run: |
+          scripts/test-audio-output.sh
+          BUILD_TAGS=gstreamer_cgo scripts/test-audio-output.sh
 
       - name: Build dynamically linked doubletake
         run: make doubletake-release
@@ -104,7 +106,7 @@ jobs:
         run: |
           ldd ./doubletake | grep -F libgstreamer-1.0.so.0
           if ldd ./doubletake | grep -E 'not found|libfdk'; then
-            echo 'Release must resolve all libraries without requiring FDK-AAC' >&2
+            echo 'Release must resolve required libraries and load FDK-AAC at runtime' >&2
             exit 1
           fi
           ./doubletake -help >/dev/null

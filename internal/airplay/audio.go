@@ -74,8 +74,8 @@ const (
 	audioTestToneVolume = "0.01"
 )
 
-// ErrAACELDUnavailable means this build does not contain the optional FDK-AAC
-// encoder. Video remains usable on receivers which require AAC-ELD audio.
+// ErrAACELDUnavailable means the FDK-AAC encoder was omitted at build time, or
+// its runtime library is missing or lacks AAC-ELD. Video remains usable without audio.
 var ErrAACELDUnavailable = errors.New("AAC-ELD encoder is unavailable")
 
 func newAudioChaCha64AEAD(key []byte) (cipher.AEAD, error) {

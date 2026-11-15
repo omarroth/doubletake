@@ -3,7 +3,7 @@
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
 SYSTEMDUSERDIR ?= $(PREFIX)/lib/systemd/user
-BUILD_TAGS ?= gstreamer_cgo
+BUILD_TAGS ?= gstreamer_cgo fdk_aac
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf devel)
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 VERSION_FLAGS = -X doubletake/internal/version.Version=$(VERSION) -X doubletake/internal/version.Commit=$(COMMIT)

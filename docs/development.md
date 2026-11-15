@@ -3,8 +3,8 @@
 ## Build and test
 
 `make` builds the dynamically linked sender and static controller in `bin/`.
-Go 1.25+, a C compiler, `pkg-config`, and GStreamer 1.16+ development headers
-are required. Runtime packages are listed in the [README](../README.md).
+Go 1.25+, a C compiler, `pkg-config`, and development headers for GStreamer 1.16+
+and FDK-AAC are required. Runtime packages are listed in the [README](../README.md).
 
 ```sh
 make test             # test the default linked GStreamer backend
@@ -27,18 +27,33 @@ volume on that server. Ordinary tests do not modify the desktop sound server.
 With `pulseaudio` installed, `scripts/test-audio-output.sh` starts and removes a
 private server automatically to exercise those tests.
 
-## Optional AAC-ELD
+## Audio codecs
 
-Install the headers, library, and `fdk-aac` pkg-config file for `libfdk-aac`, then:
+Default builds include ALAC and the external FDK-AAC encoder bridge for AAC-ELD.
+Install the FDK-AAC development headers to build it. On Linux, doubletake loads
+`libfdk-aac.so.2` or `libfdk-aac.so.1` at startup and checks for AAC-ELD support.
+The library is supplied by the distribution and is not bundled. If neither
+library supports AAC-ELD, doubletake uses ALAC when the receiver offers it;
+AAC-ELD-only receivers need the library installed or `-no-audio`.
+
+Linux builds with headers outside the compiler's search path can set
+`CGO_CPPFLAGS=-I/path/to/include`. Other platforms use the `fdk-aac` pkg-config
+file and link the library directly.
+
+The foreground sender prefers AAC-ELD when the receiver advertises it. The
+daemon prefers an existing shared codec or ALAC when possible. Receivers still
+select only formats they advertise.
+
+To build without FDK-AAC, retaining GStreamer and ALAC:
 
 ```sh
-make BUILD_TAGS='gstreamer_cgo fdk_aac'
-make test BUILD_TAGS='gstreamer_cgo fdk_aac'
+make BUILD_TAGS=gstreamer_cgo
+make test BUILD_TAGS=gstreamer_cgo
 ```
 
-This retains the default GStreamer backend and adds AAC-ELD encoding. The
-foreground sender prefers AAC-ELD when offered; the daemon prefers an existing
-shared codec or ALAC when possible. Default and release builds require no FDK-AAC.
+This build cannot send audio to receivers requiring AAC-ELD without ALAC;
+`-no-audio` remains available. `doubletake-ctl` is always built with cgo disabled
+and requires no GStreamer or FDK-AAC runtime libraries.
 
 ## Prepare a release
 
@@ -47,8 +62,8 @@ Before tagging a release on `main`, run:
 ```sh
 make test
 make test-go
-CGO_ENABLED=1 go test -race -tags gstreamer_cgo ./...
-CGO_ENABLED=1 go vet -tags gstreamer_cgo ./...
+CGO_ENABLED=1 go test -race -tags 'gstreamer_cgo fdk_aac' ./...
+CGO_ENABLED=1 go vet -tags 'gstreamer_cgo fdk_aac' ./...
 make release VERSION=vX.Y.Z
 sha256sum -c SHA256SUMS
 ```

@@ -78,8 +78,9 @@ The selectable output requires `pactl`, PulseAudio or `pipewire-pulse`, and
 GStreamer's `pulsesrc`. Its volume and mute affect the captured audio; default
 routing and existing application routes are not changed automatically.
 
-ALAC is built in. AAC-ELD support is optional and only required for receivers
-which offer it without ALAC. See the [build instructions](development.md#optional-aac-eld).
+ALAC is built in. Default builds also support AAC-ELD when the external FDK-AAC
+library is installed. Without it, audio requires a receiver offering ALAC.
+See [audio codec build options](development.md#audio-codecs).
 
 Daemon mode shares one timestamped PCM source and one encoder per audio codec.
 Video streams share an encoder when their resolved codec and canvas match.

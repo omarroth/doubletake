@@ -114,12 +114,12 @@ descriptor is rejected once and the alternate
 form is accepted. It also verifies sender-initiated NTP through the returned
 timing port and plaintext root-level FairPlay keys. The profile name
 .B airtame
-is accepted as an alias. The sender's AAC-ELD encoder is optional; install the
+is accepted as an alias. Default sender builds support AAC-ELD; install the
 .B libfdk-aac
 development files and build it with
-.B CGO_ENABLED=1 go build \-tags fdk_aac \-o bin/doubletake ./cmd/doubletake
-when testing audio with this profile. A normal build can exercise its video and
-control path with
+.B make
+when testing audio with this profile. An ALAC-only build can exercise its video
+and control path with
 .BR \-no-audio .
 .SH AUTHENTICATION
 All authenticated modes use the single value supplied by

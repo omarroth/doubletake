@@ -5,9 +5,34 @@ package airplay
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"testing"
 )
+
+func TestFDKUnavailableKeepsALAC(t *testing.T) {
+	available := aacELDEncoderAvailable
+	aacELDEncoderAvailable = false
+	defer func() { aacELDEncoderAvailable = available }()
+
+	info := &ReceiverInfo{SupportedFormats: StreamFormats{
+		ScreenStream: FormatMask(screenAudioFormatALAC | screenAudioFormatAACELD44100Stereo),
+	}}
+	policy, err := compatibilityForReceiver(info, false, true)
+	if err != nil || policy.audioCodec != AudioCodecALAC {
+		t.Fatalf("negotiation without FDK = %v, %v, want ALAC", policy.audioCodec, err)
+	}
+	info.SupportedFormats.ScreenStream = FormatMask(screenAudioFormatAACELD44100Stereo)
+	if _, err := compatibilityForReceiver(info, false, true); !errors.Is(err, ErrAACELDUnavailable) {
+		t.Fatalf("AAC-ELD-only negotiation error = %v, want ErrAACELDUnavailable", err)
+	}
+	if _, err := compatibilityForReceiver(info, false, false); err != nil {
+		t.Fatalf("video-only negotiation without FDK: %v", err)
+	}
+	if _, err := newELDEncoder(); !errors.Is(err, ErrAACELDUnavailable) {
+		t.Fatalf("newELDEncoder error = %v, want ErrAACELDUnavailable", err)
+	}
+}
 
 func TestFDKAACELDEncodesRawFrame(t *testing.T) {
 	if !aacELDEncoderAvailable {

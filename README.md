@@ -24,9 +24,10 @@ sha256sum --ignore-missing -c SHA256SUMS
 For ARM64, rename the verified downloads to `doubletake` and `doubletake-ctl`.
 Run `chmod +x doubletake doubletake-ctl` before installing or launching them.
 
-`doubletake` requires GStreamer 1.16+ and its runtime plugins. `doubletake-ctl`
-is static and does not require GStreamer. Release binaries target Ubuntu 20.04
-and newer Linux systems.
+`doubletake` requires GStreamer 1.16+ and its runtime plugins. Install FDK-AAC
+to enable AAC-ELD audio; otherwise doubletake uses ALAC when supported by the
+receiver. `doubletake-ctl` is static and requires neither library. Release
+binaries target Ubuntu 20.04 and newer Linux systems.
 
 On Ubuntu/Debian:
 
@@ -36,11 +37,14 @@ sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio pulseaudio-utils
 ```
 
+For AAC-ELD, also install `libfdk-aac2` (`libfdk-aac1` on Ubuntu 20.04).
+FDK-AAC may require enabling additional package repositories.
+
 On Arch Linux:
 
 ```sh
 sudo pacman -S --needed gstreamer gst-plugins-base gst-plugins-good \
-  gst-plugins-bad gst-plugins-ugly gst-libav gst-plugin-pipewire libpulse
+  gst-plugins-bad gst-plugins-ugly gst-libav gst-plugin-pipewire libpulse fdk-aac
 ```
 
 Wayland also requires PipeWire and a working desktop screencast portal.
@@ -55,12 +59,12 @@ Arch users can also use the AUR packages
 
 ## Build from source
 
-Requires Go 1.25+, a C compiler, `pkg-config`, and GStreamer development headers.
+Requires Go 1.25+, a C compiler, `pkg-config`, and GStreamer/FDK-AAC development headers.
 On Ubuntu/Debian, install these in addition to the runtime packages:
 
 ```sh
 sudo apt install build-essential pkg-config \
-  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfdk-aac-dev
 ```
 
 ```sh
@@ -76,7 +80,7 @@ make install PREFIX="$HOME/.local" SYSTEMDUSERDIR="$HOME/.local/share/systemd/us
 ```
 
 Use `make uninstall` with the same prefix to remove an installation.
-[Developer notes](docs/development.md) cover optional AAC-ELD support,
+[Developer notes](docs/development.md) cover codec build options,
 the diagnostic receiver, tests, and release builds.
 
 ## Usage
@@ -158,9 +162,8 @@ systemctl --user enable --now doubletake.service
   port forwarding is needed.
 - **Capture or encoder errors:** check the [compatibility notes](docs/compatibility.md).
   `-hwaccel none` selects software encoding for comparison.
-- **Audio:** route the desired applications to the doubletake output. ALAC works
-  without FDK-AAC; receivers requiring AAC-ELD need an
-  [optional build](docs/development.md#optional-aac-eld).
+- **Audio:** route the desired applications to the doubletake output. Receivers
+  requiring AAC-ELD need FDK-AAC installed; see [audio codecs](docs/development.md#audio-codecs).
 
 ## Disclaimer and license
 

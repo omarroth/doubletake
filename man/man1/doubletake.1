@@ -12,6 +12,10 @@ and X11 screen capture with H.264 or capability-gated HEVC Main10 encoding.
 .PP
 The \fBdoubletake\fR binary dynamically links GStreamer and can adjust
 video quality while streaming.
+.PP
+Default builds support ALAC audio and AAC-ELD through the external FDK-AAC
+library. On Linux, the library is loaded when installed; otherwise ALAC is
+used when offered. The selected codec must be advertised by the receiver.
 .SH FEATURES
 .IP \(bu 2
 Full AirPlay mirroring protocol (RTSP/HTTP + encrypted video stream)
@@ -229,9 +233,11 @@ Daemon mode shares the configured range among its streams. Reserve at least
 three available ports for every simultaneous receiver.
 .SH REQUIREMENTS
 .IP \(bu 2
-Go 1.25 or later, a C compiler, pkg-config, and GStreamer development headers (source builds)
+Go 1.25 or later, a C compiler, pkg-config, and GStreamer/FDK-AAC development headers (source builds)
 .IP \(bu 2
 GStreamer 1.16 or later (with plugins-base, plugins-good, plugins-bad, plugins-ugly, libav)
+.IP \(bu 2
+libfdk-aac.so.2 or libfdk-aac.so.1 to enable AAC-ELD audio
 .IP \(bu 2
 pactl and PulseAudio or pipewire-pulse for the selectable audio output
 .IP \(bu 2
