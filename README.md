@@ -167,9 +167,9 @@ systemctl --user enable --now doubletake.service
 
 ## Disclaimer and license
 
-Most of this project was written by LLMs and reviewed by its author. Do not use
-it in production or security-sensitive environments. It builds on public AirPlay
-research and projects including [UxPlay](https://github.com/FDH2/UxPlay).
+The majority of code for this project was written by LLMs. I've read through the code to make sure there's nothing obviously stupid, but if you're in a production or security-sensitive environment and need to use AirPlay (for whatever reason), do not use this project.
+
+Since I assume most of the code for this project was trained from [UxPlay](https://github.com/FDH2/UxPlay) and similar projects, I've provided this project under a similar license. Most of the reverse engineering work has already been done by many other people and this project would not be possible without them.
 
 Licensed under [LGPL-3.0-or-later](LICENSE); see [COPYING.GPL](COPYING.GPL) for
 the incorporated GPLv3 terms. Releases v0.3.2 and earlier used GPL-3.0-or-later.
