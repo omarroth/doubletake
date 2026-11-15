@@ -69,6 +69,13 @@ jobs:
             gstreamer1.0-pulseaudio pulseaudio pulseaudio-utils
 
       - uses: actions/checkout@v7
+
+      - name: Allow Git access from container build steps
+        # Checkout configures a temporary HOME; later steps need their own trust entry.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git rev-parse --verify HEAD
+
       - uses: actions/setup-go@v7
         with:
           go-version: stable
@@ -111,6 +118,8 @@ jobs:
           fi
           ./doubletake -help >/dev/null
           ./doubletake -version | grep -F "$VERSION"
+          expected_commit=$(git rev-parse --short=12 HEAD)
+          ./doubletake -version | grep -F "$expected_commit"
           required_glibc=$(readelf --version-info ./doubletake | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -1)
           test -n "$required_glibc"
           dpkg --compare-versions "$required_glibc" le 2.31
