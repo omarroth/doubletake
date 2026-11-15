@@ -75,7 +75,8 @@ func (f *FeatureSet) UnmarshalPlist(unmarshal func(interface{}) error) error {
 	return nil
 }
 
-// DiscoverAirPlayDevices browses the local network for AirPlay receivers.
+// DiscoverAirPlayDevices browses the local network for AirPlay receivers that
+// support screen mirroring.
 func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
 	ifaces, traffic, err := airPlayMDNSInterfaces()
 	if err != nil {
@@ -101,7 +102,9 @@ func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
 		defer close(done)
 		for entry := range entries {
 			dev := parseServiceEntry(entry)
-			if dev != nil {
+			// Audio-only receivers also advertise _airplay._tcp, but they
+			// cannot accept a screen stream, so we must leave them out.
+			if dev != nil && dev.SupportsScreen() {
 				devices = append(devices, *dev)
 			}
 		}
@@ -364,6 +367,12 @@ const (
 
 func (d *AirPlayDevice) SupportsScreen() bool {
 	return d.HasFeature(7)
+}
+
+// SupportsScreen reports whether the receiver accepts screen mirroring
+// (feature 7).
+func (i *ReceiverInfo) SupportsScreen() bool {
+	return i.HasFeature(7)
 }
 
 // HasFeature reports whether a legacy or extended advertised feature is set.
