@@ -306,6 +306,20 @@ func TestSupportsScreenUsesMirroringFeatureNotRotation(t *testing.T) {
 	}
 }
 
+func TestReceiverInfoSupportsScreen(t *testing.T) {
+	if !(&ReceiverInfo{Features: FeatureScreen}).SupportsScreen() {
+		t.Fatal("screen-mirroring feature was not recognized")
+	}
+	// /info features of a Yamaha TSR-5810 (AirTunes/211.1), an audio-only
+	// receiver.
+	if (&ReceiverInfo{Features: 0x444f8a00}).SupportsScreen() {
+		t.Fatal("audio-only receiver was reported as supporting screen mirroring")
+	}
+	if (*ReceiverInfo)(nil).SupportsScreen() {
+		t.Fatal("nil ReceiverInfo reported screen mirroring support")
+	}
+}
+
 func TestSupportsTransientPairingUsesModernFeatureBits(t *testing.T) {
 	for _, bit := range []uint64{FeatureSystemPairing, FeatureTransientPairing} {
 		if !(&ReceiverInfo{Features: bit}).SupportsTransientPairing() {

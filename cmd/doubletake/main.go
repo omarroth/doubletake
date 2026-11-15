@@ -186,6 +186,11 @@ func main() {
 		log.Fatalf("get info failed: %v", err)
 	}
 	log.Printf("connected to: %s (model: %s, initialVolume: %.1f)", info.Name, info.Model, info.InitialVolume)
+	// doubletake only mirrors the screen, so we must reject a receiver that
+	// does not support screen mirroring.
+	if !info.SupportsScreen() {
+		log.Fatalf("%s (model: %s) does not support AirPlay screen mirroring", info.Name, info.Model)
+	}
 	if credential == "" && info.RequiresPassword() {
 		credential = readCredential(bufio.NewReader(os.Stdin), "Enter the receiver's configured password: ")
 		if credential == "" {
