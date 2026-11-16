@@ -65,17 +65,62 @@ make test-go
 CGO_ENABLED=1 go test -race -tags 'gstreamer_cgo fdk_aac' ./...
 CGO_ENABLED=1 go vet -tags 'gstreamer_cgo fdk_aac' ./...
 make release VERSION=vX.Y.Z
-sha256sum -c SHA256SUMS
+(cd dist && sha256sum -c SHA256SUMS)
 ```
 
-Release targets write stripped, versioned binaries, manpages, and checksums in
-the repository root. Build on Ubuntu 20.04 to retain the supported glibc and
-GStreamer baseline; a binary built on a newer system can require newer libraries.
-Check both x86-64 and ARM64 builds. The controller must remain static.
+`make release` builds stripped binaries in `bin/release/TARGET/` and writes
+`dist/doubletake-VERSION-TARGET.tar.gz` and `dist/SHA256SUMS`. `TARGET` defaults
+to `linux-x86_64` or `linux-arm64` according to the Go target architecture.
+Build on Ubuntu 20.04 to retain the supported glibc and GStreamer baseline;
+a binary built on a newer system can require newer libraries. The sender links
+GStreamer, and the controller remains static.
+
+The archive is a relative installation tree, with no enclosing version folder:
+
+```text
+usr/bin/doubletake
+usr/bin/doubletake-ctl
+usr/lib/systemd/user/doubletake.service
+usr/share/bash-completion/completions/doubletake
+usr/share/bash-completion/completions/doubletake-ctl -> doubletake
+usr/share/licenses/doubletake/LICENSE
+usr/share/licenses/doubletake/COPYING.GPL
+usr/share/man/man1/doubletake.1
+usr/share/man/man1/doubletake-ctl.1
+```
+
+Debian/Ubuntu and Arch packagers can extract this tree into the package staging
+directory and supply their distribution's dependency and package metadata.
+The tarball includes no runtime libraries, credentials, or service-enabling
+hooks. Runtime dependencies are listed in the [README](../README.md).
+
+For a source package, build first and install into `DESTDIR`:
+
+```sh
+make
+make install-prebuilt PREFIX=/usr DESTDIR="$pkgdir"
+```
+
+`install-prebuilt` installs the files without invoking Go. `MANDIR`,
+`SYSTEMDUSERDIR`, `BASHCOMPDIR`, and `LICENSEDIR` can be overridden for distribution
+policy. The default source-install prefix remains `/usr/local`.
+
+To package existing binaries, set `RELEASE_DIR` to a directory containing
+`doubletake` and `doubletake-ctl`:
+
+```sh
+make package-release VERSION=vX.Y.Z TARGET=linux-arm64 RELEASE_DIR=/path/to/binaries
+```
+
+Packaging rejects a mismatched binary architecture. Archive ownership,
+timestamps, file ordering, and gzip headers are normalized; `SOURCE_DATE_EPOCH`
+defaults to the source commit's timestamp. CI checks staged installation,
+uninstallation, reproducible repacking, and completion against actual command
+help, including Ubuntu 20.04's bash-completion version.
 
 CI tests Go 1.25 and the current stable toolchain on both architectures, and
 builds releases with stable Go on Ubuntu 20.04.
-Version tags publish the four binaries, manpages, licenses, and a SHA-256 manifest
+Version tags publish the two complete architecture archives and a SHA-256 manifest
 only when the tagged commit is on `main`. Put release notes in an annotated tag
 message; lightweight tags fall back to the commit message. No tag or release is
 created by the local build targets.

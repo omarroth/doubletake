@@ -12,17 +12,19 @@ capture requirements, and troubleshooting.
 
 ## Install
 
-Download `doubletake` and `doubletake-ctl` for your architecture from
-[Releases](https://github.com/omarroth/doubletake/releases). Files without an
-architecture suffix are for x86-64; `-arm64` files are for ARM64. Verify downloads
-with the supplied `SHA256SUMS` file:
+Download `doubletake-VERSION-linux-x86_64.tar.gz` or
+`doubletake-VERSION-linux-arm64.tar.gz` from
+[Releases](https://github.com/omarroth/doubletake/releases), along with
+`SHA256SUMS`. Verify the download, then extract it into the filesystem root
+(replace `vX.Y.Z` with the downloaded version):
 
 ```sh
 sha256sum --ignore-missing -c SHA256SUMS
+sudo tar -xzf doubletake-vX.Y.Z-linux-x86_64.tar.gz -C /
 ```
 
-For ARM64, rename the verified downloads to `doubletake` and `doubletake-ctl`.
-Run `chmod +x doubletake doubletake-ctl` before installing or launching them.
+Each archive includes both commands in `/usr/bin`, manuals, bash completion,
+licenses, and a systemd user service. Enable the service separately if desired.
 
 `doubletake` requires GStreamer 1.16+ and its runtime plugins. Install FDK-AAC
 to enable AAC-ELD audio; otherwise doubletake uses ALAC when supported by the
@@ -34,7 +36,8 @@ On Ubuntu/Debian:
 ```sh
 sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-  gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio pulseaudio-utils
+  gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio pulseaudio-utils \
+  bash-completion
 ```
 
 For AAC-ELD, also install `libfdk-aac2` (`libfdk-aac1` on Ubuntu 20.04).
@@ -44,7 +47,8 @@ On Arch Linux:
 
 ```sh
 sudo pacman -S --needed gstreamer gst-plugins-base gst-plugins-good \
-  gst-plugins-bad gst-plugins-ugly gst-libav gst-plugin-pipewire libpulse fdk-aac
+  gst-plugins-bad gst-plugins-ugly gst-libav gst-plugin-pipewire libpulse fdk-aac \
+  bash-completion
 ```
 
 Wayland also requires PipeWire and a working desktop screencast portal.
@@ -70,7 +74,7 @@ sudo apt install build-essential pkg-config \
 ```sh
 make                 # bin/doubletake and bin/doubletake-ctl
 make test
-sudo make install    # binaries, manpages, and systemd user service
+sudo make install    # binaries, manuals, completion, licenses, and user service
 ```
 
 For a user installation:
@@ -81,7 +85,10 @@ make install PREFIX="$HOME/.local" SYSTEMDUSERDIR="$HOME/.local/share/systemd/us
 
 Use `make uninstall` with the same prefix to remove an installation.
 [Developer notes](docs/development.md) cover codec build options,
-the diagnostic receiver, tests, and release builds.
+the diagnostic receiver, tests, and distribution packaging.
+
+Bash completion covers both commands, their options, enum values, and file
+paths. With `bash-completion` installed, open a new shell after installation.
 
 ## Usage
 
