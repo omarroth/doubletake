@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -117,6 +118,69 @@ func BrowseAirPlayDevices(ctx context.Context, onDevice func(AirPlayDevice)) err
 	}
 
 	return consumeAirPlayEntries(ctx, entries, onDevice)
+}
+
+// DiscoverAirPlayDevicesViaAvahi returns receivers known to the local avahi
+// daemon, read through avahi-browse. The in-process browse misses receivers
+// which relocate their service and answer mDNS queries unreliably (some Samsung
+// signage displays only announce); the avahi daemon listens continuously and
+// keeps their latest announcements. A missing avahi-browse is not an error.
+func DiscoverAirPlayDevicesViaAvahi(ctx context.Context) ([]AirPlayDevice, error) {
+	output, err := exec.CommandContext(ctx, "avahi-browse", "-prt", "_airplay._tcp").Output()
+	if err != nil {
+		var execErr *exec.Error
+		if errors.As(err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
+			return nil, nil
+		}
+		if len(output) == 0 {
+			return nil, err
+		}
+	}
+	return parseAvahiBrowseOutput(string(output)), nil
+}
+
+// parseAvahiBrowseOutput converts avahi-browse -prt lines into device records.
+// Only IPv4 records are read; the in-process browse still covers IPv6-only
+// networks, and daemon targets are keyed by IPv4 address.
+func parseAvahiBrowseOutput(output string) []AirPlayDevice {
+	var devices []AirPlayDevice
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, "=") {
+			continue
+		}
+		fields := strings.Split(line, ";")
+		// "=;iface;proto;name;_airplay._tcp;local;host;address;port;\"txt\""
+		if len(fields) < 9 || fields[2] != "IPv4" {
+			continue
+		}
+		port, err := strconv.Atoi(fields[8])
+		if err != nil || port <= 0 || fields[7] == "" {
+			continue
+		}
+		dev := AirPlayDevice{
+			Name: unescapeDNSName(fields[3]),
+			IP:   fields[7],
+			Port: port,
+		}
+		if len(fields) >= 10 {
+			populateDeviceFromTXT(&dev, parseAvahiTXT(fields[9]))
+		}
+		devices = append(devices, dev)
+	}
+	return devices
+}
+
+// parseAvahiTXT converts avahi-browse's quoted TXT field into the key/value
+// records parseTXT expects.
+func parseAvahiTXT(field string) map[string]string {
+	var records []string
+	split := func(r rune) bool { return r == '"' || r == ' ' || r == '\t' }
+	for _, record := range strings.FieldsFunc(field, split) {
+		if strings.Contains(record, "=") {
+			records = append(records, record)
+		}
+	}
+	return parseTXT(records)
 }
 
 func consumeAirPlayEntries(ctx context.Context, entries <-chan *zeroconf.ServiceEntry, onDevice func(AirPlayDevice)) error {
