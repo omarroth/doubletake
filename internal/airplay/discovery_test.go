@@ -211,6 +211,48 @@ func TestMDNSTrafficMatchesEligibleInterfaceAddressFamilies(t *testing.T) {
 	}
 }
 
+func TestParseAvahiBrowseOutputReadsIPv4Records(t *testing.T) {
+	const output = `+;wlp99s0;IPv4;ignored announcement;_airplay._tcp;local
+=;wlp99s0;IPv6;Emanuele\226\128\153s\032MacBook\032Pro;_airplay._tcp;local;Emanueles-MacBook-Pro.local;192.168.1.62;7000;"srcvers=920.10.1"
+=;wlp99s0;IPv4;55" Interactive Signage Flip;_airplay._tcp;local;Samsung.local;192.168.1.18;35021;"pk=19cb" "model=WMB_S" "srcvers=377.40.00" "deviceid=B0:F2:F6:3E:0A:86" "features=0x7F8AD0,0xBCF46"
+=;wlp99s0;IPv4;MacBook\032Pro\032di\032Giammarco;_airplay._tcp;local;MacBook-Pro-di-Giammarco.local;192.168.1.70;7000;"srcvers=870.14.1" "model=Mac16,1"
+=;wlp99s0;IPv4;broken port;_airplay._tcp;local;host.local;192.168.1.99;not-a-port
+=;wlp99s0;IPv4;missing address;_airplay._tcp;local;host.local;;7000
+`
+	devices := parseAvahiBrowseOutput(output)
+	if len(devices) != 2 {
+		t.Fatalf("parsed %d devices, want 2: %+v", len(devices), devices)
+	}
+
+	signage := devices[0]
+	if signage.Name != `55" Interactive Signage Flip` {
+		t.Fatalf("signage name = %q", signage.Name)
+	}
+	if signage.IP != "192.168.1.18" || signage.Port != 35021 {
+		t.Fatalf("signage address = %s:%d, want 192.168.1.18:35021", signage.IP, signage.Port)
+	}
+	if signage.Model != "WMB_S" || signage.DeviceID != "B0:F2:F6:3E:0A:86" {
+		t.Fatalf("signage identity = %+v", signage)
+	}
+	if signage.SourceVersion != "377.40.00" {
+		t.Fatalf("signage source version = %q, want 377.40.00", signage.SourceVersion)
+	}
+	if signage.Features != 0xBCF46007F8AD0 {
+		t.Fatalf("signage features = %#x, want 0xbcf46007f8ad0", signage.Features)
+	}
+	if signage.PK != "19cb" {
+		t.Fatalf("signage pk = %q, want 19cb", signage.PK)
+	}
+
+	mac := devices[1]
+	if mac.Name != "MacBook Pro di Giammarco" {
+		t.Fatalf("mac name = %q, want escaped spaces unescaped", mac.Name)
+	}
+	if mac.IP != "192.168.1.70" || mac.Port != 7000 {
+		t.Fatalf("mac address = %s:%d, want 192.168.1.70:7000", mac.IP, mac.Port)
+	}
+}
+
 func TestUnescapeDNSName(t *testing.T) {
 	tests := []struct {
 		name string

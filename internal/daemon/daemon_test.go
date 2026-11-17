@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"doubletake/internal/airplay"
@@ -159,6 +163,28 @@ func TestValidatePortRange(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), test.wantErrSub) {
 				t.Fatalf("validatePortRange(%d, %d) error = %v, want substring %q", test.portMin, test.portMax, err, test.wantErrSub)
+			}
+		})
+	}
+}
+
+func TestRetryableConnectError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "no error"},
+		{name: "dial refused", err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, want: true},
+		{name: "reset during handshake", err: errors.New("read response header: read tcp 192.0.2.10:1->192.0.2.20:7000: read: connection reset by peer"), want: true},
+		{name: "unexpected EOF", err: fmt.Errorf("read frame length: %w", io.ErrUnexpectedEOF), want: true},
+		{name: "aborted context", err: fmt.Errorf("read response: %w", context.DeadlineExceeded)},
+		{name: "pairing rejection", err: errors.New("pin pairing: pair-setup M4 error: 2")},
+		{name: "protocol rejection", err: errors.New("SETUP: HTTP 400 (body: SETUP omitted root FairPlay ekey/eiv)")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryableConnectError(test.err); got != test.want {
+				t.Fatalf("retryableConnectError(%v) = %t, want %t", test.err, got, test.want)
 			}
 		})
 	}

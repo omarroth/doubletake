@@ -9,8 +9,10 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -521,6 +523,16 @@ func (d *Daemon) backgroundDiscover(ctx context.Context) {
 			return
 		}
 
+		// The in-process browse misses receivers which answer mDNS queries
+		// unreliably (some Samsung signage displays only announce). The avahi
+		// daemon listens continuously, so merge its records as a supplement.
+		avahiCtx, avahiCancel := context.WithTimeout(ctx, 2*time.Second)
+		avahiDevices, avahiErr := airplay.DiscoverAirPlayDevicesViaAvahi(avahiCtx)
+		avahiCancel()
+		if avahiErr != nil {
+			log.Printf("[daemon] mDNS browse via avahi failed: %v", avahiErr)
+		}
+
 		now := time.Now()
 		d.mu.Lock()
 		if err == nil {
@@ -531,9 +543,21 @@ func (d *Daemon) backgroundDiscover(ctx context.Context) {
 			}
 
 			// Update last-seen timestamps and merge new devices
+			seenThisScan := make(map[string]bool, len(found))
 			for _, dev := range found {
 				d.deviceLastSeen[dev.IP] = now
 				known[dev.IP] = dev // add or update
+				seenThisScan[dev.IP] = true
+			}
+
+			// Keep the freshly confirmed in-process record for any device this
+			// scan saw; only avahi-only receivers are added from its cache.
+			for _, dev := range avahiDevices {
+				if dev.IP == "" || seenThisScan[dev.IP] {
+					continue
+				}
+				known[dev.IP] = dev
+				d.deviceLastSeen[dev.IP] = now
 			}
 
 			// Rebuild device list, dropping anything older than TTL
@@ -910,6 +934,123 @@ func (d *Daemon) pickFreeDeviceLocked(preferredPort int) (string, int) {
 	return "", 0
 }
 
+// receiverRelocatesControlPort reports receivers which restart their AirPlay
+// service on a fresh ephemeral control port after each session teardown. Their
+// cached discovery port goes stale the moment a stream stops, so an immediate
+// reconnect must wait for the new advertisement instead of dialing the old
+// port. Call without d.mu held.
+func (d *Daemon) receiverRelocatesControlPort(target string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, device := range d.devices {
+		if device.IP == target {
+			return strings.EqualFold(strings.TrimSpace(device.Model), "WMB_S")
+		}
+	}
+	return false
+}
+
+// retryableConnectError reports transport-level failures which a fresh
+// discovery lookup can plausibly resolve. Protocol, authentication, and
+// deliberately aborted contexts are not retried.
+func retryableConnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	message := err.Error()
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForDiscoveredPortChange blocks until background discovery publishes a
+// control port for target other than current, or the timeout expires. When the
+// in-process browse does not report the receiver it also asks the system avahi
+// daemon, which caches announcements from receivers that answer mDNS queries
+// unreliably. It returns zero when no new port appeared. Call without d.mu held.
+func (d *Daemon) waitForDiscoveredPortChange(ctx context.Context, target string, current int, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	var avahiProbed time.Time
+	for {
+		d.mu.Lock()
+		port := 0
+		for _, device := range d.devices {
+			if device.IP == target {
+				port = device.Port
+				break
+			}
+		}
+		d.mu.Unlock()
+		if port != 0 && port != current {
+			return port
+		}
+		if time.Since(avahiProbed) >= 1500*time.Millisecond {
+			avahiProbed = time.Now()
+			if candidate := avahiLookupPort(ctx, target); candidate != 0 && candidate != current {
+				return candidate
+			}
+		}
+		if time.Now().After(deadline) {
+			return 0
+		}
+		timer.Reset(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-timer.C:
+		}
+	}
+}
+
+// avahiLookupPort asks the system avahi daemon for the currently advertised
+// AirPlay control port of target. Some receivers (notably Samsung signage
+// displays) relocate their service on every teardown and answer mDNS queries
+// unreliably, but the avahi daemon is always listening and caches their
+// announcements. Returns zero when avahi is unavailable or target is absent.
+func avahiLookupPort(ctx context.Context, target string) int {
+	browseCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(browseCtx, "avahi-browse", "-prt", "_airplay._tcp").Output()
+	if err != nil && len(output) == 0 {
+		return 0
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if !strings.HasPrefix(line, "=") {
+			continue
+		}
+		fields := strings.Split(line, ";")
+		if len(fields) < 9 || fields[7] != target {
+			continue
+		}
+		port, err := strconv.Atoi(fields[8])
+		if err == nil && port > 0 {
+			return port
+		}
+	}
+	return 0
+}
+
 func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, target string, port int, suppliedCredential, expectedDeviceID string) {
 	// removeStream cleans up this stream's entry and tears down its capture group
 	// if no other streams use that group.
@@ -992,6 +1133,25 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	}
 
 	client, info, err := connectClient()
+	if err != nil && retryableConnectError(err) {
+		// A transport-level failure usually means the receiver restarted its
+		// AirPlay service on a fresh control port since discovery last looked
+		// (some Samsung signage receivers do this on every session teardown).
+		// Re-check the current advertisement before failing the connection:
+		// wait for a re-announcement when the receiver is known to relocate,
+		// otherwise accept an avahi record naming a newer port immediately.
+		refreshed := 0
+		if d.receiverRelocatesControlPort(target) {
+			refreshed = d.waitForDiscoveredPortChange(ctx, target, port, 8*time.Second)
+		} else if candidate := avahiLookupPort(ctx, target); candidate != 0 && candidate != port {
+			refreshed = candidate
+		}
+		if refreshed != 0 {
+			log.Printf("[daemon] %s: receiver moved to control port %d after teardown (was %d); retrying", target, refreshed, port)
+			port = refreshed
+			client, info, err = connectClient()
+		}
+	}
 	if err != nil {
 		removeStream(fmt.Sprintf("connect to %s:%d failed: %v", target, port, err))
 		return
