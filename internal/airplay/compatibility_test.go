@@ -169,6 +169,34 @@ func TestPTPRequiresCapabilityVersionAndEncryption(t *testing.T) {
 	}
 }
 
+func TestReceiverRequiresNTPOverridesAdvertisedPTP(t *testing.T) {
+	ptp := receiverWithFeatures(featurePTP)
+	ptp.SourceVersion = "377.40.0"
+	signage := ptp
+	signage.Model = "WMB_S"
+	padded := signage
+	padded.Model = " wmb_s "
+	other := ptp
+	other.Model = "TU8300"
+
+	for _, test := range []struct {
+		name string
+		info ReceiverInfo
+		want string
+	}{
+		{name: "signage model", info: signage, want: timingProtocolNTP},
+		{name: "matching trims and folds case", info: padded, want: timingProtocolNTP},
+		{name: "other PTP-capable model keeps PTP", info: other, want: timingProtocolPTP},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mustCompatibility(t, &test.info, true)
+			if got.timing != test.want {
+				t.Fatalf("timing = %q, want %q", got.timing, test.want)
+			}
+		})
+	}
+}
+
 func TestSupportsPTPSourceVersion(t *testing.T) {
 	for _, test := range []struct {
 		version string

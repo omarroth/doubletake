@@ -108,11 +108,25 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 	// meaningful here only after pair-verify actually encrypted the control
 	// channel. Receivers which advertise PTP but decline it during SETUP are
 	// handled from that protocol response rather than by model or version rules.
-	if encrypted && info.HasFeature(featurePTP) && supportsPTPSourceVersion(info.SourceVersion) {
+	//
+	// Exception: some Samsung signage receivers (WMB_S, e.g. the 55" Flip)
+	// advertise PTP but omit timingPeerInfo.ClockID, and after the failed PTP
+	// SETUP they restart the AirPlay service on a fresh ephemeral control port.
+	// The protocol-driven NTP fallback then reconnects to the stale port and is
+	// reset by the receiver, so these models need NTP selected from the start.
+	if encrypted && info.HasFeature(featurePTP) && supportsPTPSourceVersion(info.SourceVersion) && !receiverRequiresNTP(info) {
 		policy.timing = timingProtocolPTP
 	}
 
 	return policy, nil
+}
+
+// receiverRequiresNTP reports receivers which advertise PTP but cannot complete a
+// PTP media clock, and whose AirPlay service relocates its control port once a
+// PTP session is torn down. Selecting NTP up front avoids the unrecoverable
+// protocol-driven fallback for these models.
+func receiverRequiresNTP(info *ReceiverInfo) bool {
+	return strings.EqualFold(strings.TrimSpace(info.Model), "WMB_S")
 }
 
 func screenAudioCodec(info *ReceiverInfo, allowAACELD bool) (AudioCodec, error) {
