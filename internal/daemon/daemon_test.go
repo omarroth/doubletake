@@ -119,7 +119,9 @@ func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 	}}
 
 	want := airplay.StreamConfig{
-		PreferredAudioCodec: airplay.AudioCodecALAC,
+		// An idle daemon passes on its shared capture's preference, which
+		// depends on whether FDK-AAC loaded; the airplay tests cover it.
+		PreferredAudioCodec: new(airplay.SharedAudioCapture).PreferredCodec(),
 		FPS:                 60,
 		TargetWidth:         2560,
 		TargetHeight:        1440,

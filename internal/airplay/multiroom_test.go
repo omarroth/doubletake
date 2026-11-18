@@ -175,3 +175,32 @@ func TestSharedAudioCodecPreferenceRetainsELDOnlyReceivers(t *testing.T) {
 		t.Fatal("unadvertised ALAC forced onto an ELD-only receiver")
 	}
 }
+
+func TestIdleSharedAudioPreferenceNegotiatesForegroundCodec(t *testing.T) {
+	want := AudioCodecALAC
+	if aacELDEncoderAvailable {
+		want = AudioCodecAACELD
+	}
+	// Both profiles offer ALAC and AAC-ELD; Roku omits supportedFormats, so its
+	// formats come from feature bits.
+	for _, profile := range []ReceiverProfile{ReceiverProfileModern, ReceiverProfileRoku} {
+		t.Run(string(profile), func(t *testing.T) {
+			_, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: profile})
+			if err := client.Pair(ctx, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.FairPlaySetup(ctx); err != nil && !errors.Is(err, ErrFairPlayUnsupported) {
+				t.Fatal(err)
+			}
+			preferred := new(SharedAudioCapture).PreferredCodec()
+			session, err := client.SetupMirror(ctx, StreamConfig{PlayoutLatency: 250 * time.Millisecond, PreferredAudioCodec: preferred})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			if session.AudioCodec() != want {
+				t.Fatalf("first shared receiver negotiated codec %d, want %d", session.AudioCodec(), want)
+			}
+		})
+	}
+}
