@@ -908,6 +908,7 @@ const (
 	waylandPipelineSystemMemory waylandPipelineMode = iota
 	waylandPipelineVAMemory
 	waylandPipelineVAPostprocPlainRaw
+	waylandPipelineGLDMABuf
 )
 
 type waylandCapturePlan struct {
@@ -925,6 +926,8 @@ func (p waylandCapturePlan) String() string {
 		return encoder + " with native VA frame import"
 	case waylandPipelineVAPostprocPlainRaw:
 		return encoder + " with VA scaling to plain raw video"
+	case waylandPipelineGLDMABuf:
+		return encoder + " with GL DMA-BUF import and GPU scaling"
 	default:
 		return encoder + " with system-memory frame staging"
 	}
@@ -1172,6 +1175,35 @@ func vaPostprocSystemFormat(encoderFormat string) (string, bool) {
 	}
 }
 
+// glWaylandCaptureElements are the stock gst-plugins-base OpenGL elements used
+// by the GPU conversion plan.
+var glWaylandCaptureElements = []string{"glupload", "glcolorconvert", "glvideoflip", "glcolorscale", "gldownload"}
+
+// glWaylandCaptureDisabled lets DOUBLETAKE_WAYLAND_GL=0 turn the OpenGL plan
+// off without rebuilding, for example while diagnosing a GPU driver.
+func glWaylandCaptureDisabled() bool {
+	enabled, err := strconv.ParseBool(os.Getenv("DOUBLETAKE_WAYLAND_GL"))
+	return err == nil && !enabled
+}
+
+// canBuildGLWaylandVideoPipeline reports whether portal DMA-BUFs can be
+// converted and fitted by OpenGL before a single download to an encoder that
+// takes ordinary 8-bit 4:2:0 video.
+func canBuildGLWaylandVideoPipeline(encoder encoderResult, hasElement func(string) bool) bool {
+	if encoder.inputMemory != encoderInputSystemMemory || hasElement == nil || glWaylandCaptureDisabled() {
+		return false
+	}
+	if encoder.rawFormat != "I420" && encoder.rawFormat != "NV12" {
+		return false
+	}
+	for _, element := range glWaylandCaptureElements {
+		if !hasElement(element) {
+			return false
+		}
+	}
+	return true
+}
+
 func waylandCapturePlans(encoder encoderResult, hasElement func(string) bool) []waylandCapturePlan {
 	plans := make([]waylandCapturePlan, 0, 2)
 	if canBuildVAWaylandVideoPipeline(encoder, hasElement) {
@@ -1182,6 +1214,14 @@ func waylandCapturePlans(encoder encoderResult, hasElement func(string) bool) []
 		// Vulkan encoder. Runtime validation falls back below when a driver
 		// cannot import the portal's DMA-BUF or map its new output.
 		plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineVAPostprocPlainRaw})
+	} else if canBuildGLWaylandVideoPipeline(encoder, hasElement) {
+		// Without a VA postprocessor, still request DMA-BUFs: for shared memory,
+		// a compositor may read every frame back from the GPU on its render
+		// thread. OpenGL converts and fits the frame, so only a receiver-sized
+		// picture reaches system memory. A portal that offers only shared
+		// memory, or a driver that cannot import its buffers, fails startup
+		// validation and falls back to the system-memory plan below.
+		plans = append(plans, waylandCapturePlan{encoder: encoder, mode: waylandPipelineGLDMABuf})
 	}
 	// vah264enc accepts both VAMemory and ordinary NV12. A failed VA import
 	// can therefore fall back to a CPU-owned frame without changing the selected
@@ -1272,6 +1312,45 @@ func buildVAPostprocPlainRawWaylandVideoPipeline(fd int, nodeID uint32, fps int,
 	return appendGstVideoEncoding(args, encoder, timestampedOutput)
 }
 
+// buildGLWaylandVideoPipeline accepts only DMA-BUF from pipewiresrc, so the
+// compositor renders each frame into a GPU buffer instead of reading it back
+// into shared memory. OpenGL converts, orients, and fits the frame; gldownload
+// then copies only the receiver-sized 4:2:0 picture to system memory, after
+// which padding, live cadence, and encoding match the system-memory plan.
+func buildGLWaylandVideoPipeline(fd int, nodeID uint32, fps int, encoder encoderResult, maxWidth, maxHeight int, timestampedOutput bool) []string {
+	args := append([]string{"--quiet"}, pipeWireVideoSourceStage(fd, nodeID, fps, false)...)
+	// Desktop pixels are square. Requiring DMA-BUF makes pipewiresrc offer the
+	// modifiers glupload can import; a shared-memory-only portal fails here.
+	args = appendGstStage(args, gstStage{"video/x-raw(memory:DMABuf),pixel-aspect-ratio=1/1"})
+	args = appendGstStage(args, gstStage{"glupload"})
+	// The GL filters take RGBA textures. The final YUV conversion always renders
+	// a GL-owned picture, so nothing after gldownload retains a portal buffer.
+	args = appendGstStage(args, gstStage{"glcolorconvert"})
+	args = appendGstStage(args, gstStage{"video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D"})
+	// Apply pipewiresrc's image-orientation tags before fitting the canvas.
+	args = appendGstStage(args, gstStage{"glvideoflip", "video-direction=auto"})
+	if width, height := maxWidth&^1, maxHeight&^1; width > 2 && height > 2 {
+		// GstGLFilter fixates bounded caps like videoscale: the largest size
+		// inside the canvas with the source aspect ratio. A step of two keeps
+		// 4:2:0 dimensions even; videoscale adds the bars after download.
+		args = appendGstStage(args, gstStage{"glcolorscale"})
+		args = appendGstStage(args, gstStage{fmt.Sprintf(
+			"video/x-raw(memory:GLMemory),format=RGBA,width=[2,%d,2],height=[2,%d,2],pixel-aspect-ratio=1/1", width, height)})
+	}
+	args = appendGstStage(args, gstStage{"glcolorconvert"})
+	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw(memory:GLMemory),format=%s", encoder.rawFormat)})
+	args = appendGstStage(args, gstStage{"gldownload"})
+	args = appendGstStage(args, gstStage{fmt.Sprintf("video/x-raw,format=%s", encoder.rawFormat)})
+	for _, stage := range receiverScaleStages(maxWidth, maxHeight) {
+		args = appendGstStage(args, stage)
+	}
+	for _, stage := range waylandLiveCadenceStages(encoder.rawFormat, maxWidth, maxHeight, fps) {
+		args = appendGstStage(args, stage)
+	}
+	args = appendGstStage(args, lowLatencyVideoQueueStage())
+	return appendGstVideoEncoding(args, encoder, timestampedOutput)
+}
+
 // buildWaylandVideoPipeline deliberately ignores portalSize. The ScreenCast
 // portal reports it in compositor coordinates, which may differ from the
 // negotiated pixel dimensions under fractional scaling. Both branches instead
@@ -1292,6 +1371,8 @@ func buildWaylandVideoPipelineForPlan(fd int, nodeID uint32, fps int, plan wayla
 		return buildVAWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	case waylandPipelineVAPostprocPlainRaw:
 		return buildVAPostprocPlainRawWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
+	case waylandPipelineGLDMABuf:
+		return buildGLWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	default:
 		return buildSystemWaylandVideoPipeline(fd, nodeID, fps, plan.encoder, maxWidth, maxHeight, timestampedOutput)
 	}
