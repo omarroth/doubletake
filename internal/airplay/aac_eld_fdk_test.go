@@ -32,6 +32,9 @@ func TestFDKUnavailableKeepsALAC(t *testing.T) {
 	if _, err := newELDEncoder(); !errors.Is(err, ErrAACELDUnavailable) {
 		t.Fatalf("newELDEncoder error = %v, want ErrAACELDUnavailable", err)
 	}
+	if got := new(SharedAudioCapture).PreferredCodec(); got != AudioCodecALAC {
+		t.Fatalf("idle shared preference without FDK = %v, want ALAC", got)
+	}
 }
 
 func TestFDKAACELDEncodesRawFrame(t *testing.T) {

@@ -114,6 +114,25 @@ func TestSharedAudioEncodesOnePayloadForMultipleReceivers(t *testing.T) {
 	}
 }
 
+func TestSharedAudioPreferenceMatchesForegroundSenderWhenIdle(t *testing.T) {
+	idle := AudioCodecALAC
+	if aacELDEncoderAvailable {
+		idle = AudioCodecAACELD
+	}
+	h, _, _ := newSharedAudioTestHub(t)
+	if got := h.PreferredCodec(); got != idle {
+		t.Fatalf("idle shared preference = %d, want %d", got, idle)
+	}
+	c := acquireSharedTestCapture(t, h)
+	if got := h.PreferredCodec(); got != AudioCodecALAC {
+		t.Fatalf("preference with an active ALAC encoder = %d, want ALAC", got)
+	}
+	c.Stop()
+	if got := h.PreferredCodec(); got != idle {
+		t.Fatalf("preference after the last receiver left = %d, want %d", got, idle)
+	}
+}
+
 func TestSharedAudioSlowReceiverCannotStallPeers(t *testing.T) {
 	h, input, _ := newSharedAudioTestHub(t)
 	slow, fast := acquireSharedTestCapture(t, h), acquireSharedTestCapture(t, h)

@@ -210,8 +210,11 @@ func (h *SharedAudioCapture) Stats() SharedAudioStats {
 	return SharedAudioStats{Sources: 1, Encoders: len(h.active.codecs), Receivers: h.active.users}
 }
 
-// PreferredCodec reuses an active encoder when possible. Negotiation must still
-// check the new receiver's format mask; this is a preference, not an override.
+// PreferredCodec reuses an active encoder when possible. Without one, it
+// prefers AAC-ELD when that encoder is available, as the foreground sender
+// does: some receivers accept ALAC screen audio in SETUP but never play it.
+// Negotiation must still check the new receiver's format mask; this is a
+// preference, not an override.
 func (h *SharedAudioCapture) PreferredCodec() AudioCodec {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -222,6 +225,9 @@ func (h *SharedAudioCapture) PreferredCodec() AudioCodec {
 		if h.active.codecs[AudioCodecAACELD] != nil {
 			return AudioCodecAACELD
 		}
+	}
+	if aacELDEncoderAvailable {
+		return AudioCodecAACELD
 	}
 	return AudioCodecALAC
 }

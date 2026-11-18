@@ -41,8 +41,8 @@ Linux builds with headers outside the compiler's search path can set
 file and link the library directly.
 
 The foreground sender prefers AAC-ELD when the receiver advertises it. The
-daemon prefers an existing shared codec or ALAC when possible. Receivers still
-select only formats they advertise.
+daemon prefers an existing shared codec and otherwise chooses like the
+foreground sender. Receivers still select only formats they advertise.
 
 To build without FDK-AAC, retaining GStreamer and ALAC:
 
