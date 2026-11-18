@@ -1328,23 +1328,38 @@ func (c *receiverConnection) configureLegacyVideo(stream map[string]any) error {
 		return err
 	}
 
-	streamKey := plistBytes(stream["shk"])
-	if len(streamKey) != len(masterKey) || !bytes.Equal(streamKey, masterKey) {
-		return fmt.Errorf("legacy video shk does not match the authenticated FairPlay session key")
+	cipherKey, cipherIV, err := receiverLegacyVideoKeys(stream, masterKey, c.legacyFairPlayIV)
+	if err != nil {
+		return err
 	}
-	streamIV := plistBytes(stream["shiv"])
-	if len(streamIV) != 16 || !bytes.Equal(c.legacyFairPlayIV, streamIV) {
-		return fmt.Errorf("legacy video requires stream shiv matching the session FairPlay eiv")
-	}
-	streamConnectionID := plistInt(stream["streamConnectionID"])
-	if streamConnectionID <= 0 {
-		return fmt.Errorf("legacy video omitted streamConnectionID")
-	}
-	cipherKey, cipherIV := deriveVideoKeys(masterKey, int64(streamConnectionID))
 	if err := c.media.configureLegacyVideo(cipherKey, cipherIV); err != nil {
 		return fmt.Errorf("configure legacy video decryptor: %w", err)
 	}
 	return nil
+}
+
+// receiverLegacyVideoKeys derives a legacy receiver's AES-CTR video key from
+// the session key that ekey delivered (masterKey), checking the video stream
+// descriptor against the session FairPlay eiv.
+//
+// Legacy receivers take the control channel in plaintext, so a stream key in
+// the descriptor would be readable by anyone on the network path; together
+// with the streamConnectionID beside it, it is all they need to decrypt the
+// video. Such a SETUP is refused rather than modelled as working.
+func receiverLegacyVideoKeys(stream map[string]any, masterKey, eiv []byte) ([]byte, []byte, error) {
+	if _, ok := stream["shk"]; ok {
+		return nil, nil, fmt.Errorf("legacy video sent its stream key in the clear")
+	}
+	streamIV := plistBytes(stream["shiv"])
+	if len(streamIV) != 16 || !bytes.Equal(eiv, streamIV) {
+		return nil, nil, fmt.Errorf("legacy video requires stream shiv matching the session FairPlay eiv")
+	}
+	streamConnectionID := plistInt(stream["streamConnectionID"])
+	if streamConnectionID <= 0 {
+		return nil, nil, fmt.Errorf("legacy video omitted streamConnectionID")
+	}
+	cipherKey, cipherIV := deriveVideoKeys(masterKey, int64(streamConnectionID))
+	return cipherKey, cipherIV, nil
 }
 
 // receiverLegacyVideoMasterKey deliberately models both negotiated legacy-key
