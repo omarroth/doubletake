@@ -433,6 +433,26 @@ type MirrorSession struct {
 	receiverVolumeDBKnown bool
 }
 
+// sendVideoStreamKey reports whether the video stream descriptor carries the
+// key, shk.
+//
+// On a plaintext control channel, shk and the streamConnectionID beside it are
+// all anyone on the network path needs to derive the AES-CTR video key. A
+// legacy receiver that completed FairPlay does not need it: it derives the same
+// key from ekey, sent at the session root, as legacy audio already does. So
+// shk is left out there.
+//
+// What keeps that key from an observer is the pair-verify secret mixed into it
+// (raw pair-verify always negotiates the mixture), not the FairPlay wrapping of
+// ekey, whose message keys are public. A session with no pair-verify secret is
+// readable either way, and leaving shk out costs it nothing.
+//
+// A plaintext receiver without FairPlay has no other way to learn the key, so
+// it is still sent shk, and its video is readable on the network path.
+func sendVideoStreamKey(encrypted bool, fpKey []byte) bool {
+	return encrypted || fpKey == nil
+}
+
 func selectAudioSecurityMode(encrypted bool) audioSecurityMode {
 	if encrypted {
 		return audioSecurityChaCha
@@ -1325,9 +1345,13 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		},
 	}
 
-	// Encryption keys: shk/shiv go inside the video stream descriptor
+	// Encryption keys: shk/shiv go inside the video stream descriptor; see
+	// sendVideoStreamKey for when shk is left out. shiv equals the eiv sent at
+	// the session root, so it reveals nothing new.
 	if encKey != nil {
-		videoStreamDesc["shk"] = encKey
+		if sendVideoStreamKey(c.encrypted, c.fpKey) {
+			videoStreamDesc["shk"] = encKey
+		}
 		videoStreamDesc["shiv"] = encIV
 	}
 
