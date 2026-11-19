@@ -86,6 +86,9 @@ jobs:
           gst-inspect-1.0 x264enc >/dev/null
           gst-inspect-1.0 rtponviftimestamp >/dev/null
           gst-inspect-1.0 pulsesrc >/dev/null
+          gst-inspect-1.0 avdec_h264 >/dev/null
+          gst-inspect-1.0 avdec_alac >/dev/null
+          gst-inspect-1.0 libde265dec >/dev/null
 
       - name: Test default AAC-ELD and ALAC-only builds
         run: |

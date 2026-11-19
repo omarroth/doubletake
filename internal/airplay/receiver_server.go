@@ -53,8 +53,8 @@ const (
 )
 
 // ReceiverConfig configures the in-repository AirPlay receiver. It is intended
-// for protocol and end-to-end testing: media is validated and drained rather
-// than rendered through a desktop player.
+// for protocol and end-to-end testing. DecodeMedia adds codec validation and
+// timed headless presentation without opening display or audio outputs.
 type ReceiverConfig struct {
 	ListenAddress string
 	Profile       ReceiverProfile
@@ -208,8 +208,8 @@ const (
 
 // ReceiverServer implements enough of an AirPlay mirroring receiver to run the
 // real doubletake sender end to end without hardware. Pairing and encrypted
-// control are protocol-faithful; encoded media is parsed/count-checked and
-// discarded.
+// control are protocol-faithful; media can be independently decoded and
+// presented on a headless clock.
 type ReceiverServer struct {
 	cfg         ReceiverConfig
 	profile     receiverProfileSpec

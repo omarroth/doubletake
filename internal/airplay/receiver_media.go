@@ -154,7 +154,8 @@ type receiverMediaCounters struct {
 }
 
 // receiverMediaSession owns the media listeners used by one receiver session.
-// It validates and accounts for traffic without decoding or rendering it.
+// It validates and accounts for traffic, optionally decoding it for headless
+// presentation checks.
 // Configured video cryptors independently check legacy AES access units or
 // modern ChaCha authentication rather than counting opaque ciphertext as valid.
 type receiverMediaSession struct {
