@@ -164,14 +164,13 @@ func sharedSecret(keys *PairKeys) []byte {
 // deriveStreamMasterKey returns the key the receiver will decrypt the stream
 // with, given the raw FairPlay key that ekey wraps.
 //
-// A HAP-paired receiver mixes the pair-verify secret in:
+// When pair-verify requests key mixing, the master key is:
 //
 //	SHA-512(fairplay_decrypt(ekey) || ecdh_secret)[:16]
 //
-// The PairKeys flag records the pair-verify mode which actually completed. HAP
-// always selects the mixture; raw pair-verify selects it by sending
-// X-Apple-PD. That keeps FairPlay derivation tied to negotiated protocol state
-// instead of a receiver name or model.
+// The PairKeys flag records whether the completed pair-verify exchange sent
+// X-Apple-PD: 1 to request this mixture. That keeps FairPlay derivation tied to
+// negotiated protocol state instead of a receiver name or model.
 func deriveStreamMasterKey(rawKey, secret []byte, mixPairVerifySecret bool) []byte {
 	if !mixPairVerifySecret || len(secret) == 0 {
 		return rawKey

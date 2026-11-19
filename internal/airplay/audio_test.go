@@ -755,7 +755,7 @@ func TestStreamAudioAnchorsClockOnlyAfterFirstCapturedFrame(t *testing.T) {
 		spf:             352,
 		ct:              byte(AudioCodecALAC),
 		latencySamples:  targetLatencySamples44k1(),
-		securityMode:    audioSecurityLegacyAES,
+		securityMode:    mediaSecurityLegacyAES,
 		chachaNonceMode: defaultAudioChaChaNonceMode(),
 		chachaAADMode:   defaultAudioChaChaAADMode(),
 	}

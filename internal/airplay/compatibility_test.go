@@ -36,8 +36,8 @@ func TestReceiverCompatibilityUsesIndependentCapabilities(t *testing.T) {
 	if got.timing != timingProtocolPTP {
 		t.Fatalf("PTP policy timing = %q, want PTP", got.timing)
 	}
-	if got.audioSecurity != audioSecurityChaCha || got.audioConnections != audioLayoutStreamConnections {
-		t.Fatalf("audio policy = security %d/layout %d, want ChaCha/streamConnections", got.audioSecurity, got.audioConnections)
+	if got.mediaSecurity != mediaSecurityChaCha || got.audioConnections != audioLayoutStreamConnections {
+		t.Fatalf("audio policy = security %d/layout %d, want ChaCha/streamConnections", got.mediaSecurity, got.audioConnections)
 	}
 	if got.audioCodec != AudioCodecALAC {
 		t.Fatalf("audio codec = %d, want ALAC", got.audioCodec)
@@ -50,6 +50,8 @@ func TestReceiverCompatibilityUsesIndependentCapabilities(t *testing.T) {
 func TestFeature59OnlyControlsInitialAudioDescriptorLayout(t *testing.T) {
 	withFeature := receiverWithFeatures(featureAudioStreamConnectionSetup)
 	withoutFeature := receiverWithFeatures()
+	coreUtilsWithFeature := receiverWithFeatures(43, featureAudioStreamConnectionSetup)
+	coreUtilsWithoutFeature := receiverWithFeatures(43)
 
 	for _, test := range []struct {
 		name       string
@@ -61,7 +63,7 @@ func TestFeature59OnlyControlsInitialAudioDescriptorLayout(t *testing.T) {
 		{
 			name: "encrypted feature 59",
 			info: &withFeature, encrypted: true,
-			wantLayout: audioLayoutStreamConnections, wantRoots: fairPlayDescriptorOnly,
+			wantLayout: audioLayoutStreamConnections, wantRoots: fairPlaySessionRoot,
 		},
 		{
 			name:       "plaintext feature 59",
@@ -71,6 +73,16 @@ func TestFeature59OnlyControlsInitialAudioDescriptorLayout(t *testing.T) {
 		{
 			name: "encrypted without feature 59",
 			info: &withoutFeature, encrypted: true,
+			wantLayout: audioLayoutControlPort, wantRoots: fairPlaySessionRoot,
+		},
+		{
+			name: "CoreUtils with feature 59",
+			info: &coreUtilsWithFeature, encrypted: true,
+			wantLayout: audioLayoutStreamConnections, wantRoots: fairPlayDescriptorOnly,
+		},
+		{
+			name: "CoreUtils without feature 59",
+			info: &coreUtilsWithoutFeature, encrypted: true,
 			wantLayout: audioLayoutControlPort, wantRoots: fairPlayDescriptorOnly,
 		},
 		{
@@ -334,13 +346,24 @@ func TestUnsupportedScreenAudioFormatDoesNotBlockVideoOnlySession(t *testing.T) 
 	}
 }
 
-func TestAudioSecurityUsesNegotiatedEncryption(t *testing.T) {
-	legacyFeature := receiverWithFeatures()
-	if got := mustCompatibility(t, &legacyFeature, false).audioSecurity; got != audioSecurityLegacyAES {
-		t.Fatalf("plaintext audio security = %d, want legacy AES", got)
+func TestMediaSecurityRequiresCoreUtilsCapability(t *testing.T) {
+	legacy := receiverWithFeatures(27)
+	for _, encrypted := range []bool{false, true} {
+		if got := mustCompatibility(t, nil, encrypted); got.mediaSecurity != mediaSecurityLegacyAES || got.fairPlayRoots != fairPlaySessionRoot || got.recordBeforeMediaSetup != !encrypted {
+			t.Fatalf("unknown receiver with encrypted=%t selected media policy %+v", encrypted, got)
+		}
+		if got := mustCompatibility(t, &legacy, encrypted); got.mediaSecurity != mediaSecurityLegacyAES || got.fairPlayRoots != fairPlaySessionRoot || got.recordBeforeMediaSetup != !encrypted {
+			t.Fatalf("legacy receiver with encrypted=%t selected media policy %+v", encrypted, got)
+		}
 	}
-	if got := mustCompatibility(t, &legacyFeature, true).audioSecurity; got != audioSecurityChaCha {
-		t.Fatalf("encrypted audio security = %d, want ChaCha", got)
+	for _, bit := range []uint{38, 43, 46, 48} {
+		info := receiverWithFeatures(bit)
+		if got := mustCompatibility(t, &info, false); got.mediaSecurity != mediaSecurityLegacyAES || got.fairPlayRoots != fairPlaySessionRoot || !got.recordBeforeMediaSetup {
+			t.Fatalf("plaintext capability %d selected media policy %+v", bit, got)
+		}
+		if got := mustCompatibility(t, &info, true); got.mediaSecurity != mediaSecurityChaCha || got.fairPlayRoots != fairPlayDescriptorOnly || !got.recordBeforeMediaSetup {
+			t.Fatalf("encrypted capability %d selected media policy %+v", bit, got)
+		}
 	}
 }
 

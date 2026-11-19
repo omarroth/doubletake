@@ -21,13 +21,14 @@ const (
 )
 
 type receiverCompatibility struct {
-	timing                string
-	audioSecurity         audioSecurityMode
-	audioConnections      audioConnectionLayout
-	audioCodec            AudioCodec
-	audioRFC2198          bool
-	audioMediaDataControl bool
-	fairPlayRoots         fairPlayRootPlacement
+	timing                 string
+	mediaSecurity          mediaSecurityMode
+	recordBeforeMediaSetup bool
+	audioConnections       audioConnectionLayout
+	audioCodec             AudioCodec
+	audioRFC2198           bool
+	audioMediaDataControl  bool
+	fairPlayRoots          fairPlayRootPlacement
 }
 
 const (
@@ -71,17 +72,24 @@ func compatibilityForReceiver(info *ReceiverInfo, encrypted, audioEnabled bool) 
 		// rejecting a usable video path for an audio mask it will never consume.
 		audioCodec = AudioCodecALAC
 	}
+	// Apple's apsession_createKeyHolder selects media security from the
+	// SupportsCoreUtilsPairingAndEncryption capability. Legacy HKP type 3 can
+	// encrypt its control connection while still requiring FairPlay/AES media.
+	coreUtilsMedia := encrypted && info.supportsCoreUtilsPairing()
 	policy := receiverCompatibility{
 		timing:           timingProtocolNTP,
-		audioSecurity:    selectAudioSecurityMode(encrypted),
+		mediaSecurity:    mediaSecurityLegacyAES,
 		audioConnections: audioLayoutControlPort,
 		audioCodec:       audioCodec,
 		fairPlayRoots:    fairPlaySessionRoot,
 	}
-	if encrypted {
-		// An encrypted HAP pair-verify session has a CoreUtils key holder. Stream
-		// descriptors carry the key references; legacy root ekey/eiv fields are
-		// neither needed nor part of that setup form.
+	// A legacy AES video stream over HAP must receive its keys before RECORD
+	// starts the decoder. Other sessions retain their early audio preparation.
+	policy.recordBeforeMediaSetup = !encrypted || coreUtilsMedia
+	if coreUtilsMedia {
+		policy.mediaSecurity = mediaSecurityChaCha
+		// CoreUtils media carries its keys in stream descriptors. A legacy key
+		// holder shares ekey/eiv at the session root even with encrypted control.
 		policy.fairPlayRoots = fairPlayDescriptorOnly
 	}
 

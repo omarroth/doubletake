@@ -22,7 +22,7 @@ import (
 // AudioCodec identifies the codec used for audio streaming.
 type AudioCodec int
 
-type audioSecurityMode int
+type mediaSecurityMode int
 type audioChaChaNonceMode int
 type audioChaChaAADMode int
 
@@ -30,8 +30,8 @@ const (
 	AudioCodecALAC   AudioCodec = 2 // ct=2, spf=352, audioFormat=0x40000
 	AudioCodecAACELD AudioCodec = 8 // ct=8, spf=480, audioFormat=0x1000000
 
-	audioSecurityLegacyAES audioSecurityMode = iota
-	audioSecurityChaCha
+	mediaSecurityLegacyAES mediaSecurityMode = iota
+	mediaSecurityChaCha
 
 	audioChaChaNonceCounter audioChaChaNonceMode = iota
 	audioChaChaNonceSeq
@@ -719,7 +719,7 @@ type AudioStream struct {
 	cipher             cipher.Block // AES-128 for audio encryption (nil = no encryption)
 	aesIV              []byte       // 16-byte IV for AES-CBC
 	chachaCipher       cipher.AEAD  // ChaCha20-Poly1305 for modern Apple receivers
-	securityMode       audioSecurityMode
+	securityMode       mediaSecurityMode
 	chachaNonce        uint64
 	chachaNonceMode    audioChaChaNonceMode
 	chachaAADMode      audioChaChaAADMode
@@ -756,7 +756,7 @@ func (s *MirrorSession) AudioCodec() AudioCodec {
 // Real AirPlay senders use two separate UDP sockets for audio:
 //   - ctrlConn: the declared controlPort socket → sends sync/control to receiver's controlPort
 //   - dataConn: a separate socket at controlPort+1 → sends audio data to receiver's dataPort
-func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode audioSecurityMode, ct byte, latencyOverride uint32, rfc2198 bool, latencyTiers []uint32, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
+func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesIV, chachaKey []byte, securityMode mediaSecurityMode, ct byte, latencyOverride uint32, rfc2198 bool, latencyTiers []uint32, ctrlConn, dataConn net.PacketConn) (*AudioStream, error) {
 	remoteAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(s.client.sessionPeerHost(), fmt.Sprintf("%d", dataPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve audio remote: %w", err)
@@ -780,7 +780,7 @@ func (s *MirrorSession) setupAudioStream(dataPort, controlPort int, aesKey, aesI
 	}
 
 	var aead cipher.AEAD
-	if securityMode == audioSecurityChaCha {
+	if securityMode == mediaSecurityChaCha {
 		aead, err = newAudioChaCha64AEAD(chachaKey)
 		if err != nil {
 			dataConn.Close()

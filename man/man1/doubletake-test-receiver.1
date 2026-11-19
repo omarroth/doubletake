@@ -33,8 +33,9 @@ its absence selects
 .BR controlPort .
 An explicit descriptor rejection permits one alternate-shape retry.
 .PP
-Encrypted HAP sessions use descriptor-only FairPlay keys. Plaintext/raw sessions
-use available root FairPlay keys on control and media SETUP. NTP and PTP use the
+CoreUtils media sessions use descriptor-only FairPlay keys. Legacy AES sessions
+use available root FairPlay keys on control and media SETUP, including when
+HAP encrypts the control connection. NTP and PTP use the
 same presentation-latency policy; only their network-clock representation
 differs.
 A nonzero screen-audio mask advertising neither ALAC nor AAC-ELD is rejected
@@ -90,18 +91,19 @@ fallback assumes the receiver uses the sender's numeric boot-clock phase; it is
 not equivalent to participating in a PTP clock domain.
 .TP
 .B appletv3
-Advertise raw pairing with feature 27, FPSAP, ALAC, and no PTP or feature 59. It
+Advertise legacy HKP type-3 HAP pairing with feature 27, FPSAP, and no PTP or
+feature 59. It
 rejects the initial control SETUP and verifies the one media-first transition,
-receiver-initiated NTP, the original raw FairPlay derivation, and plaintext
-root-level FairPlay keys.
+receiver-initiated NTP, the original unmixed FairPlay derivation, root-level
+FairPlay keys over encrypted control, and legacy AES media.
 .TP
 .B uxplay
 Advertise raw pairing without feature 27, which verifies
 .B X-Apple-PD
-FairPlay-secret mixing, media-first NTP, ALAC, and an omitted optional
+FairPlay-secret mixing, control-first NTP, ALAC, and an omitted optional
 .B eventPort
-in every SETUP response. It rejects the initial control SETUP to exercise the
-one media-first transition and validates plaintext root FairPlay keys.
+in every SETUP response. It accepts the initial control SETUP and validates
+plaintext root FairPlay keys.
 .TP
 .B airserver
 Advertise CoreUtils-like pairing capabilities but reject the HAP probe, which

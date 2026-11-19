@@ -433,13 +433,6 @@ type MirrorSession struct {
 	receiverVolumeDBKnown bool
 }
 
-func selectAudioSecurityMode(encrypted bool) audioSecurityMode {
-	if encrypted {
-		return audioSecurityChaCha
-	}
-	return audioSecurityLegacyAES
-}
-
 type mirrorSetupRequest struct {
 	deviceID          string
 	sessionUUID       string
@@ -818,9 +811,9 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	// SET_PARAMETER share the audio URI; video uses a separate URI with its own
 	// streamConnectionID.
 	audioURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, audioStreamConnectionID)
-	audioMode := policy.audioSecurity
+	audioMode := policy.mediaSecurity
 	var audioKey, audioIV, audioChaChaKey []byte
-	if audioMode == audioSecurityChaCha {
+	if audioMode == mediaSecurityChaCha {
 		var err error
 		audioChaChaKey, err = generateAudioChaChaKey(rand.Reader)
 		if err != nil {
@@ -828,11 +821,11 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		}
 		dbg("[SETUP] audio encryption: ChaCha20-Poly1305 direct stream key (streamConnectionID=%d, shk=%d bytes)", audioStreamConnectionID, len(audioChaChaKey))
 	}
-	if audioMode == audioSecurityLegacyAES && c.fpKey != nil && c.fpIV != nil {
+	if audioMode == mediaSecurityLegacyAES && c.fpKey != nil && c.fpIV != nil {
 		audioKey = c.fpKey
 		audioIV = c.fpIV
 		dbg("[SETUP] audio encryption: AES-128-CBC (fpKey/hashed %d bytes)", len(audioKey))
-	} else if audioMode == audioSecurityLegacyAES {
+	} else if audioMode == mediaSecurityLegacyAES {
 		dbg("[SETUP] audio encryption: disabled (no FairPlay key available)")
 	}
 
@@ -1139,9 +1132,11 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		}
 		// Apple's real-time audio SETUP starts packet processing only after
 		// RECORD has prepared the media session. A control-first session can do
-		// that before creating its audio stream. Peers requiring streams first
-		// explicitly reject this state with 455; retain their late-RECORD path.
-		if !cfg.NoAudio {
+		// that before creating its audio stream. With HAP control and legacy AES
+		// media, video must receive its stream keys before RECORD starts the
+		// decoder, even if the receiver accepts an earlier RECORD. Other peers
+		// can explicitly reject early RECORD with 455 and use the same late path.
+		if !cfg.NoAudio && policy.recordBeforeMediaSetup {
 			if err := recordSession(); err != nil {
 				var statusErr *HTTPStatusError
 				if !errors.As(err, &statusErr) || statusErr.StatusCode != 455 {
@@ -1211,7 +1206,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		// session and therefore carries the session's FairPlay root material. Once
 		// a session exists, later stream SETUPs contain only their descriptors.
 		if !sessionFirstSetup && policy.fairPlayOnSessionRoot() {
-			if !addFairPlayRootFields(request, c.FpEkey, c.fpIV, true) && audioMode == audioSecurityLegacyAES {
+			if !addFairPlayRootFields(request, c.FpEkey, c.fpIV, true) && audioMode == mediaSecurityLegacyAES {
 				dbg("[SETUP] WARNING: no FairPlay ekey/eiv — audio will likely not work")
 			}
 		}
@@ -1470,9 +1465,9 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		mediaClock:            clock,
 	}
 
-	// Set up the video cipher. Encrypted pair-verify uses ChaCha20-Poly1305 with
-	// an HKDF-derived key; plaintext pair-verify uses AES-CTR.
-	if c.encrypted && ((c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0) || c.fpAesKey != nil) {
+	// Video and audio use the same negotiated media key holder, independently
+	// of control-channel encryption: CoreUtils uses ChaCha, legacy uses AES.
+	if policy.mediaSecurity == mediaSecurityChaCha && ((c.PairKeys != nil && len(c.PairKeys.SharedSecret) > 0) || c.fpAesKey != nil) {
 		// ChaCha20-Poly1305 path: HKDF-SHA512 key derivation with the pair-verify
 		// X25519 ECDH shared secret as IKM.
 		ikm := c.fpAesKey

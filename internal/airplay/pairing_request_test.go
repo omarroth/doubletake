@@ -65,15 +65,37 @@ func TestPairVerifyHeadersAdvertisePairedDevice(t *testing.T) {
 	}
 }
 
-func TestLegacyPairVerifyHeadersMatchOriginalProtocol(t *testing.T) {
-	client := &AirPlayClient{
-		PairingID: "12345678-1234-4234-8234-123456789abc",
-		pairType:  pairingTypeLegacy,
-	}
-	headers := client.pairVerifyHeaders()
-
-	if len(headers) != 1 || headers["X-Apple-HKP"] != "3" {
-		t.Fatalf("legacy pair-verify headers = %#v, want only X-Apple-HKP: 3", headers)
+func TestLegacyHAPPairVerifyKeyMixingFollowsCapabilities(t *testing.T) {
+	legacy := receiverWithFeatures(27)
+	coreUtils38 := receiverWithFeatures(27, 38)
+	coreUtils43 := receiverWithFeatures(27, 43)
+	coreUtils46 := receiverWithFeatures(27, 46)
+	coreUtils48 := receiverWithFeatures(27, 48)
+	emulator := receiverWithFeatures()
+	for _, test := range []struct {
+		name   string
+		info   *ReceiverInfo
+		wantPD string
+	}{
+		{name: "unknown capabilities", wantPD: "1"},
+		{name: "original legacy pairing", info: &legacy},
+		{name: "CoreUtils bit 38 and legacy pairing", info: &coreUtils38, wantPD: "1"},
+		{name: "CoreUtils bit 43 and legacy pairing", info: &coreUtils43, wantPD: "1"},
+		{name: "CoreUtils bit 46 and legacy pairing", info: &coreUtils46, wantPD: "1"},
+		{name: "CoreUtils bit 48 and legacy pairing", info: &coreUtils48, wantPD: "1"},
+		{name: "emulated legacy protocol", info: &emulator, wantPD: "1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &AirPlayClient{
+				PairingID: "12345678-1234-4234-8234-123456789abc",
+				pairType:  pairingTypeLegacy,
+				info:      test.info,
+			}
+			headers := client.pairVerifyHeaders()
+			if headers["X-Apple-HKP"] != "3" || headers["X-Apple-PD"] != test.wantPD {
+				t.Fatalf("legacy HAP pair-verify headers = %#v, want HKP 3 and PD %q", headers, test.wantPD)
+			}
+		})
 	}
 }
 

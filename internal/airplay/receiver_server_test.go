@@ -33,7 +33,7 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 		{name: "modern Apple HAP accepts control-first PTP", profile: ReceiverProfileModern, wantEncrypted: true, wantSetups: 3, wantFairPlay: 2, wantEvents: 1},
 		{name: "Roku raw negotiates media-first receiver-initiated NTP", profile: ReceiverProfileRoku, wantSetups: 3, wantTiming: 3, wantEvents: 1},
 		{name: "LG HAP falls back from unanchored PTP to media-first NTP", profile: ReceiverProfileLG, wantEncrypted: true, wantSetups: 5, wantTiming: 3, wantEvents: 1, wantTeardowns: 2, allowExtraEvents: true},
-		{name: "AppleTV3 raw negotiates media-first receiver-initiated NTP", profile: ReceiverProfileAppleTV3, wantSetups: 3, wantFairPlay: 2, wantTiming: 3, wantEvents: 1},
+		{name: "AppleTV3 HAP negotiates legacy media-first receiver-initiated NTP", profile: ReceiverProfileAppleTV3, wantEncrypted: true, wantSetups: 3, wantFairPlay: 2, wantTiming: 3, wantEvents: 1},
 		{name: "UxPlay legacy accepts control-first without eventPort", profile: ReceiverProfileUxPlay, wantSetups: 3, wantFairPlay: 2, wantTiming: 3},
 		{name: "AirServer raw control-first with descriptor retry", profile: ReceiverProfileAirServer, wantSetups: 4, wantFairPlay: 2, wantTiming: 3, wantEvents: 1},
 	} {
@@ -59,6 +59,9 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 			}
 			if client.encrypted != test.wantEncrypted {
 				t.Fatalf("encrypted control = %t, want %t", client.encrypted, test.wantEncrypted)
+			}
+			if test.profile == ReceiverProfileModern && (client.PairKeys == nil || !client.PairKeys.MixFairPlayKey) {
+				t.Fatal("modern HAP pairing did not retain its requested FairPlay key mixing")
 			}
 			if client.info.SupportsFairPlaySAP() {
 				if err := client.FairPlaySetup(ctx); err != nil {
@@ -156,9 +159,24 @@ func TestReceiverServerFallsBackWhenPTPClockIdentityIsMissing(t *testing.T) {
 }
 
 func TestReceiverServerDecryptsLegacyFairPlayVideo(t *testing.T) {
-	for _, profile := range []ReceiverProfile{ReceiverProfileAppleTV3, ReceiverProfileUxPlay} {
-		t.Run(string(profile), func(t *testing.T) {
-			server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: profile})
+	for _, test := range []struct {
+		name     string
+		profile  ReceiverProfile
+		features uint64
+	}{
+		{name: "AppleTV3 HAP", profile: ReceiverProfileAppleTV3},
+		{name: "UxPlay raw", profile: ReceiverProfileUxPlay},
+		// RPiPlay's raw-only implementation advertises the same feature mask
+		// as the Apple TV, yet always mixes its pair-verify secret into AES.
+		{name: "raw-only legacy capabilities", profile: ReceiverProfileUxPlay, features: 0x1e5a7ffff7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: test.profile}, func(server *ReceiverServer) {
+				if test.features != 0 {
+					server.profile.features = test.features
+					server.profile.pairing = receiverPairingRawOnly
+				}
+			})
 			if err := client.Pair(ctx, ""); err != nil {
 				t.Fatalf("pair: %v", err)
 			}
@@ -192,6 +210,110 @@ func TestReceiverServerDecryptsLegacyFairPlayVideo(t *testing.T) {
 				t.Fatalf("close mirror session: %v", err)
 			}
 		})
+	}
+}
+
+func TestReceiverServerDecryptsLegacyMediaWithHAPControl(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		mixed bool
+	}{
+		{name: "original legacy key"},
+		{name: "paired-device derivation", mixed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{
+				Profile: ReceiverProfileAppleTV3,
+				Name:    "Independent legacy media receiver",
+				Model:   "UnrelatedModel1,2",
+			}, func(server *ReceiverServer) {
+				server.profile.pairing = receiverPairingLegacyHAP
+				server.profile.setupOrder = receiverSetupSessionFirst
+				if test.mixed {
+					server.profile.features &^= FeatureLegacyPairing
+					server.profile.legacyVideoKey = receiverLegacyVideoMixed
+				}
+			})
+			if err := client.Pair(ctx, ""); err != nil {
+				t.Fatalf("pair: %v", err)
+			}
+			if !client.encrypted {
+				t.Fatal("pairing did not establish encrypted HAP control")
+			}
+			if got := client.PairKeys.MixFairPlayKey; got != test.mixed {
+				t.Fatalf("HAP key mixing = %t, want %t", got, test.mixed)
+			}
+			if err := client.FairPlaySetup(ctx); err != nil {
+				t.Fatalf("FairPlay setup: %v", err)
+			}
+			mode := receiverLegacyVideoRaw
+			if test.mixed {
+				mode = receiverLegacyVideoMixed
+			}
+			wantKey, err := receiverLegacyVideoMasterKey(mode, client.fpAesKey, client.PairKeys.SharedSecret)
+			if err != nil || !bytes.Equal(client.fpKey, wantKey) {
+				t.Fatal("FairPlay master key did not match the independently configured receiver")
+			}
+			session, err := client.SetupMirror(ctx, StreamConfig{})
+			if err != nil {
+				t.Fatalf("setup mirror: %v", err)
+			}
+			defer session.Close()
+			// Do not rely on the receiver rejecting early activation: real legacy
+			// HAP receivers may accept it and then fail to initialize video keys.
+			if got := server.Stats().RecordRequests; got != 1 {
+				t.Fatalf("RECORD requests = %d, want one activation after media SETUP", got)
+			}
+			if session.streamCipher == nil || session.chachaCipher != nil {
+				t.Fatal("legacy media did not select AES independently of encrypted control")
+			}
+			if audio := session.AudioStream(); audio == nil || audio.cipher == nil || audio.chachaCipher != nil {
+				t.Fatal("legacy audio did not select AES independently of encrypted control")
+			}
+			frame := session.streamCipher(receiverTestAVCC([]byte{0x65, 0x80}))
+			timestamp, timeline := session.frameTimeNow()
+			if err := session.sendFrame(frame, true, timestamp, timeline); err != nil {
+				t.Fatalf("send encrypted legacy picture: %v", err)
+			}
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				stats := server.Stats()
+				if stats.VideoCryptoErrors != 0 {
+					t.Fatalf("receiver could not decrypt legacy media: %+v", stats)
+				}
+				if stats.VideoDecrypted == 1 {
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+			t.Fatalf("receiver did not decrypt the picture: %+v", server.Stats())
+		})
+	}
+}
+
+func TestReceiverServerCoreUtilsHAPRetainsEarlyRecord(t *testing.T) {
+	server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: ReceiverProfileModern})
+	if err := client.Pair(ctx, ""); err != nil {
+		t.Fatalf("pair: %v", err)
+	}
+	if err := client.FairPlaySetup(ctx); err != nil {
+		t.Fatalf("FairPlay setup: %v", err)
+	}
+	session, err := client.SetupMirror(ctx, StreamConfig{})
+	if err != nil {
+		t.Fatalf("setup mirror: %v", err)
+	}
+	defer session.Close()
+	if session.chachaCipher == nil {
+		t.Fatal("CoreUtils HAP did not configure its data-stream cipher")
+	}
+	if audio := session.AudioStream(); audio == nil || audio.cipher != nil || audio.chachaCipher == nil {
+		t.Fatal("CoreUtils HAP did not configure its audio cipher")
+	}
+	// This fixture explicitly rejects early activation. CoreUtils still needs
+	// the early preparation attempt, followed by the existing bounded retry.
+	if got := server.Stats().RecordRequests; got != 2 {
+		t.Fatalf("RECORD requests = %d, want early preparation and the late retry", got)
 	}
 }
 
@@ -231,7 +353,7 @@ func TestReceiverProfilePresets(t *testing.T) {
 		{ReceiverProfileLG, "75UP75009LC", "377.25.06", 0x038bcb46007f8ad0, receiverPairingLegacyHAP,
 			receiverSetupMediaFirst, timingProtocolPTP, receiverNTPNone, true, true, false, false, false,
 			AudioCodecALAC, 0x40000, true, false, receiverLegacyVideoNone, false, 1920, 1080, 0, 0, false},
-		{ReceiverProfileAppleTV3, "AppleTV3,2", "220.68", 0x1e5a7ffff7, receiverPairingLegacy,
+		{ReceiverProfileAppleTV3, "AppleTV3,2", "220.68", 0x1e5a7ffff7, receiverPairingLegacyHAP,
 			receiverSetupMediaFirst, timingProtocolNTP, receiverNTPReceiver, false, false, false, false, false,
 			AudioCodecAACELD, 0x1440800, false, true, receiverLegacyVideoRaw, false, 0, 0, 0, 0, false},
 		{ReceiverProfileUxPlay, "AppleTV3,2", "220.68", 0x527ffee6, receiverPairingLegacy,
@@ -1248,13 +1370,16 @@ func TestReceiverServerConfigValidation(t *testing.T) {
 	}
 }
 
-func newReceiverServerTestPair(t *testing.T, cfg ReceiverConfig) (*ReceiverServer, *AirPlayClient, context.Context) {
+func newReceiverServerTestPair(t *testing.T, cfg ReceiverConfig, configure ...func(*ReceiverServer)) (*ReceiverServer, *AirPlayClient, context.Context) {
 	t.Helper()
 	cfg.ListenAddress = "127.0.0.1:0"
 	cfg.Logger = log.New(io.Discard, "", 0)
 	server, err := NewReceiverServer(cfg)
 	if err != nil {
 		t.Fatalf("new receiver server: %v", err)
+	}
+	for _, customize := range configure {
+		customize(server)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	done := make(chan error, 1)

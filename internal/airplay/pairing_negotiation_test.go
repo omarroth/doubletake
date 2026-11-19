@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -109,67 +111,151 @@ func TestTransientPairingFallsBackFromUnsupportedHAPToRawByProtocol(t *testing.T
 	}
 }
 
-func TestRawLegacyPairingRequestsPDIndependentlyOfFeature27(t *testing.T) {
-	state := newReceiverPairingTestState(t, "", newReceiverControllerStore())
-	clientConn, serverConn := newPairingNegotiationPipe(t)
-	defer clientConn.Close()
-	defer serverConn.Close()
-
-	client := &AirPlayClient{
-		conn:      clientConn,
-		PairingID: "12345678-1234-4234-8234-123456789abc",
-		info: &ReceiverInfo{
-			Name:     "Identity Does Not Select Pairing",
-			Model:    "Arbitrary1,2",
-			Features: FeatureLegacyPairing,
-		},
+func TestLegacyTransientPairingFallsBackOnlyOnFormatRejection(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   []byte
+		raw    bool
+	}{
+		{name: "unsupported media type", status: 415, raw: true},
+		{name: "bad request", status: 400, raw: true},
+		{name: "empty success from raw-only peer", status: 200, raw: true},
+		{name: "unauthorized", status: 401},
+		{name: "authentication required", status: 470},
+		{name: "rate limited", status: 429},
+		{name: "TLV authentication", status: 200, body: receiverPairingTLVError(2)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newReceiverPairingTestState(t, "", newReceiverControllerStore())
+			clientConn, serverConn := newPairingNegotiationPipe(t)
+			defer clientConn.Close()
+			defer serverConn.Close()
+			client := &AirPlayClient{
+				conn: clientConn,
+				info: &ReceiverInfo{Features: FeatureLegacyPairing},
+			}
+			serverDone := make(chan error, 1)
+			go func() {
+				reader := bufio.NewReader(serverConn)
+				request, err := readRTSPTestRequest(reader)
+				if err == nil {
+					err = requireTransientHAPM1ForType(request, "3")
+				}
+				if err == nil {
+					err = writeRTSPTestResponse(serverConn, test.status, nil, test.body)
+				}
+				if err == nil {
+					if test.raw {
+						err = serveRawPairing(reader, serverConn, state, 1, true)
+					} else {
+						err = requireNoPairingFallback(reader, serverConn)
+					}
+				}
+				serverDone <- err
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := client.Pair(ctx, "")
+			if (err == nil) != test.raw {
+				t.Fatalf("Pair error = %v, want raw success=%t", err, test.raw)
+			}
+			waitPairingTestServer(t, serverDone)
+			if test.raw && (client.encrypted || client.pairingProtocol != pairingProtocolRaw || !client.PairKeys.MixFairPlayKey) {
+				t.Fatal("raw fallback did not retain plaintext control and mixed media keys")
+			}
+		})
 	}
-	serverDone := make(chan error, 1)
-	go func() {
-		reader := bufio.NewReader(serverConn)
-		for requestIndex := 0; requestIndex < 3; requestIndex++ {
-			request, err := readRTSPTestRequest(reader)
-			if err != nil {
-				serverDone <- err
-				return
-			}
-			wantPD := ""
-			if request.uri == "/pair-verify" {
-				wantPD = "1"
-			}
-			if got := request.headers["x-apple-pd"]; got != wantPD {
-				serverDone <- fmt.Errorf("request %d X-Apple-PD = %q, want %q", requestIndex+1, got, wantPD)
-				return
-			}
-			var response []byte
-			switch request.uri {
-			case "/pair-setup":
-				response, err = state.pairSetup(request.body)
-			case "/pair-verify":
-				response, err = state.pairVerify(request.body)
-			default:
-				err = fmt.Errorf("request %d path = %q", requestIndex+1, request.uri)
-			}
-			if err != nil {
-				serverDone <- err
-				return
-			}
-			if err := writeRTSPTestResponse(serverConn, 200, nil, response); err != nil {
-				serverDone <- err
-				return
-			}
-		}
-		serverDone <- nil
-	}()
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := client.Pair(ctx, ""); err != nil {
-		t.Fatalf("Pair: %v", err)
-	}
-	waitPairingTestServer(t, serverDone)
-	if client.PairKeys == nil || !client.PairKeys.MixFairPlayKey {
-		t.Fatal("raw pairing did not record the requested FairPlay key mixing")
+func TestRawPairVerifyRequestsKeyDerivationRegardlessOfCapabilities(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		features uint64
+		wantMix  bool
+	}{
+		{name: "original legacy pairing", features: FeatureLegacyPairing, wantMix: true},
+		{name: "raw protocol emulator", wantMix: true},
+		{name: "CoreUtils with legacy pairing", features: FeatureLegacyPairing | 1<<43, wantMix: true},
+		{name: "CoreUtils bit 38 with legacy pairing", features: FeatureLegacyPairing | 1<<38, wantMix: true},
+		{name: "CoreUtils bit 46 with legacy pairing", features: FeatureLegacyPairing | 1<<46, wantMix: true},
+		{name: "CoreUtils bit 48 with legacy pairing", features: FeatureLegacyPairing | 1<<48, wantMix: true},
+		{name: "third party CoreUtils with legacy pairing", features: FeatureLegacyPairing | 1<<38 | 1<<51, wantMix: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newReceiverPairingTestState(t, "", newReceiverControllerStore())
+			publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clientConn, serverConn := newPairingNegotiationPipe(t)
+			defer clientConn.Close()
+			defer serverConn.Close()
+
+			client := &AirPlayClient{
+				conn:      clientConn,
+				PairingID: "12345678-1234-4234-8234-123456789abc",
+				PairKeys:  &PairKeys{Ed25519Public: publicKey, Ed25519Private: privateKey},
+				info: &ReceiverInfo{
+					Name:     "Identity Does Not Select Pairing",
+					Model:    "Arbitrary1,2",
+					Features: test.features,
+				},
+			}
+			serverDone := make(chan error, 1)
+			go func() {
+				reader := bufio.NewReader(serverConn)
+				for requestIndex := 0; requestIndex < 3; requestIndex++ {
+					request, err := readRTSPTestRequest(reader)
+					if err != nil {
+						serverDone <- err
+						return
+					}
+					wantPD := ""
+					if request.uri == "/pair-verify" && test.wantMix {
+						wantPD = "1"
+					}
+					if got := request.headers["x-apple-pd"]; got != wantPD {
+						serverDone <- fmt.Errorf("request %d X-Apple-PD = %q, want %q", requestIndex+1, got, wantPD)
+						return
+					}
+					var response []byte
+					switch request.uri {
+					case "/pair-setup":
+						response, err = state.pairSetup(request.body)
+					case "/pair-verify":
+						response, err = state.pairVerify(request.body)
+					default:
+						err = fmt.Errorf("request %d path = %q", requestIndex+1, request.uri)
+					}
+					if err != nil {
+						serverDone <- err
+						return
+					}
+					if err := writeRTSPTestResponse(serverConn, 200, nil, response); err != nil {
+						serverDone <- err
+						return
+					}
+				}
+				serverDone <- nil
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := client.performLegacySetupAndVerify(ctx); err != nil {
+				t.Fatalf("legacy pairing: %v", err)
+			}
+			waitPairingTestServer(t, serverDone)
+			if client.encrypted || client.pairingProtocol != pairingProtocolRaw {
+				t.Fatal("raw verification did not retain plaintext control framing")
+			}
+			if client.PairKeys == nil {
+				t.Fatal("raw pairing did not retain its keys")
+			}
+			if got := client.PairKeys.MixFairPlayKey; got != test.wantMix {
+				t.Fatalf("raw pairing key mixing = %t, want %t", got, test.wantMix)
+			}
+		})
 	}
 }
 
@@ -338,8 +424,11 @@ func serveHAPRejectionThenRawPairing(
 	if err := writeRTSPTestResponse(conn, 415, nil, nil); err != nil {
 		return err
 	}
+	return serveRawPairing(reader, conn, state, verifyExchanges, wantPD)
+}
 
-	request, err = readRTSPTestRequest(reader)
+func serveRawPairing(reader *bufio.Reader, conn net.Conn, state *receiverPairingState, verifyExchanges int, wantPD bool) error {
+	request, err := readRTSPTestRequest(reader)
 	if err != nil {
 		return err
 	}
@@ -377,11 +466,15 @@ func serveHAPRejectionThenRawPairing(
 }
 
 func requireTransientHAPM1(request rtspTestRequest) error {
+	return requireTransientHAPM1ForType(request, "4")
+}
+
+func requireTransientHAPM1ForType(request rtspTestRequest, hkp string) error {
 	if request.method != "POST" || request.uri != "/pair-setup" {
 		return fmt.Errorf("request = %s %s, want POST /pair-setup", request.method, request.uri)
 	}
-	if got := request.headers["x-apple-hkp"]; got != "4" {
-		return fmt.Errorf("X-Apple-HKP = %q, want transient type 4", got)
+	if got := request.headers["x-apple-hkp"]; got != hkp {
+		return fmt.Errorf("X-Apple-HKP = %q, want %s", got, hkp)
 	}
 	message := tlv8Decode(request.body)
 	if !bytes.Equal(message[tlvState], []byte{1}) ||

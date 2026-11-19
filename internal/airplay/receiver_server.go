@@ -166,6 +166,7 @@ const (
 	receiverPairingLegacy receiverPairingProfile = iota
 	receiverPairingModern
 	receiverPairingLegacyHAP
+	receiverPairingRawOnly
 )
 
 type receiverSetupOrder uint8
@@ -391,7 +392,7 @@ func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 			model:                  "AppleTV3,2",
 			sourceVersion:          "220.68",
 			features:               uint64(0x1e5a7ffff7),
-			pairing:                receiverPairingLegacy,
+			pairing:                receiverPairingLegacyHAP,
 			setupOrder:             receiverSetupMediaFirst,
 			timingProtocol:         timingProtocolNTP,
 			ntpInitiator:           receiverNTPReceiver,
@@ -556,7 +557,6 @@ type receiverConnection struct {
 	legacyFairPlayKey [16]byte
 	legacyFairPlayIV  []byte
 	legacyFairPlaySet bool
-	legacyPairDerive  bool
 	sessionState      receiverSessionState
 }
 
@@ -763,11 +763,6 @@ func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse
 
 	case request.method == "POST" && path == "/pair-verify":
 		s.stats.pairVerify.Add(1)
-		// Apple's receiver records X-Apple-PD from the request and uses it for
-		// FairPlay key derivation. Profile feature bits do not select this mode.
-		if value, ok := request.headers["x-apple-pd"]; ok {
-			c.legacyPairDerive = value == "1"
-		}
 		body, err := c.pairing.pairVerify(request.body)
 		if err != nil {
 			s.logf("pair-verify rejected: %v", err)
@@ -865,9 +860,12 @@ func (c *receiverConnection) validatePairSetupRequest(request receiverRequest) e
 		if raw || hkp == pairingTypeLegacy {
 			return fmt.Errorf("modern profile requires CoreUtils/HAP pairing")
 		}
-	case receiverPairingLegacy:
+	case receiverPairingLegacy, receiverPairingRawOnly:
 		if hkp != pairingTypeLegacy {
 			return fmt.Errorf("legacy profile requires X-Apple-HKP %d", pairingTypeLegacy)
+		}
+		if c.server.profile.pairing == receiverPairingRawOnly && !raw {
+			return fmt.Errorf("raw-only profile requires binary pair-setup")
 		}
 	case receiverPairingLegacyHAP:
 		if raw || hkp != pairingTypeLegacy {
@@ -1306,13 +1304,9 @@ func (c *receiverConnection) configureLegacyVideo(stream map[string]any) error {
 	if mode == receiverLegacyVideoNone {
 		return nil
 	}
-	mode = receiverLegacyVideoRaw
-	if c.legacyPairDerive {
-		mode = receiverLegacyVideoMixed
-	}
-	if c.hap != nil {
-		return fmt.Errorf("legacy AES video profile unexpectedly uses HAP control")
-	}
+	// Keep the independently configured receiver behavior. In particular, an
+	// old receiver may accept X-Apple-PD without implementing the transformation.
+	// Following the sender's request here would hide a real key mismatch.
 	if c.fairplay == nil {
 		return fmt.Errorf("legacy AES video requires FairPlay SAP")
 	}
