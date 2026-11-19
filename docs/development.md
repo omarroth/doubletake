@@ -32,15 +32,39 @@ feature masks with different pairing protocols; authentication and reconnects;
 and both accepted and rejected early RECORD requests. Legacy video is decrypted
 with an independent continuous CTR stream. Modern video authenticates headers,
 payloads, tags, and nonce order against fixed vectors and real sender packets.
-The linked suite also streams synthetic audio/video to four local receivers
-with mixed codecs and encryption, checking that capture remains shared.
+The linked suite decodes H.264/HEVC video and ALAC/AAC-ELD audio, then simulates
+presentation on the negotiated NTP/PTP clock. It checks decoded image changes,
+PCM sample integrity and levels, timing, duplicates, reordering, RTP wraparound,
+source timestamp gaps, RED recovery, and retransmission. Four simultaneous receivers also verify
+shared capture and matching picture presentation deadlines across clocks.
 
-For a manual loopback test, run the diagnostic receiver on
-`127.0.0.1:7000`, then use `doubletake -test -target 127.0.0.1 -port 7000`
-with a temporary `-creds` path. `-accept-early-record` on the receiver exercises
-successful early preparation instead of a 455 fallback. Receiver statistics
-distinguish received video from decrypted video and crypto failures. These tests
-do not render media; audio packet counts do not establish audible correctness.
+```sh
+CGO_ENABLED=1 go test -tags 'gstreamer_cgo fdk_aac' ./internal/airplay -run '^TestReceiverHeadless' -v
+```
+
+For a manual loopback test:
+
+```sh
+bin/doubletake-test-receiver -profile modern -stats-interval 1s
+# In another terminal, use a temporary credentials file:
+bin/doubletake -test -target 127.0.0.1 -port 7000 -creds /tmp/doubletake-test-creds.json
+```
+
+The diagnostic command enables headless decoding by default; `-decode=false`
+retains protocol-only checks. Decoding uses GStreamer libav, the HEVC decoder
+from plugins-bad, and the FDK-AAC runtime for AAC-ELD. The receiver opens no
+display or audio output. Decode failures, invalid timestamps, queue overruns,
+and unrecovered audio loss give it a nonzero exit status.
+Reported A/V playhead separation includes the video-frame interval; matching
+picture deadlines provide the finer multi-receiver synchronization check.
+
+`-audio-drop-every 12` drops complete audio sequences, including their duplicate
+datagrams, to exercise recovery. `-audio-jitter 50ms` controls the recovery and
+initial reorder window. `-ntp` changes the timing advertisement independently
+of the preset; combine it with `-accept-early-record` for CoreUtils/NTP startup.
+The presets model protocol combinations; they do not emulate hardware decoders,
+Wi-Fi radios, or speaker processing. Software decoder cold-start performance
+depends on the host; presentation tests negotiate extra startup lead in CI.
 
 Sound-server integration tests require `DOUBLETAKE_TEST_PULSE_SERVER` pointing
 to a **private** PulseAudio or pipewire-pulse instance; they change routing and

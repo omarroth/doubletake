@@ -9,11 +9,12 @@ doubletake-test-receiver \- diagnostic AirPlay mirroring receiver
 is a local AirPlay receiver for testing the real
 .B doubletake
 sender without an Apple TV or other receiver. It performs pairing, RTSP session
-setup, timing, event, video, and audio protocol handling, then drains incoming
-media while reporting activity statistics.
+setup, timing, event, video, and audio protocol handling, then decodes incoming
+media and simulates timed playback while reporting activity statistics.
 .PP
-It is a diagnostic sink, not a media player: it does not display video or play
-audio. By default it listens only on the IPv4 loopback address.
+Playback is headless: decoded pictures and PCM samples are checked and scheduled
+on the negotiated media clock. It opens no display or audio output. By default
+it listens only on the IPv4 loopback address.
 .SH PROTOCOL COVERAGE AND LIMITATIONS
 The profiles exercise independent pairing, SETUP-order, timing, FairPlay, and
 audio-layout combinations observed across first- and third-party receivers.
@@ -58,10 +59,27 @@ The AppleTV3 and UxPlay profiles authenticate the FairPlay key, independently
 decrypt legacy AES-CTR video, and validate AVCC/NAL framing. CoreUtils HAP video
 is authenticated with ChaCha20-Poly1305, including the frame header and nonce
 order. Decrypted-frame and crypto-error counters are reported separately from
-received packets. It does not decode or display video or play audio; audio and
-raw sessions without FairPlay validation remain transport-only checks.
-This program is a diagnostic sink, not a media player or a
-receiver-compatibility substitute.
+received packets. With headless decoding enabled, GStreamer decodes H.264/HEVC
+and ALAC; the FDK-AAC runtime decodes the negotiated AAC-ELD format without
+requiring a GStreamer FDK plugin. Raw sessions without FairPlay derive video
+keys from their stream descriptors. Audio decryption, RED history, duplicate
+suppression, sequence/RTP wraparound and resend requests are validated too.
+The receiver checks decoded image changes, sample counts and levels, missing
+audio, late presentation, and A/V timing. It does not reproduce hardware decoder
+quirks, radio behavior, or speaker processing.
+.PP
+Missing source samples are tracked separately from missing network packets;
+contiguous packet sequence numbers do not hide a timestamp gap. A/V playhead
+separation includes the video-frame interval.
+.PP
+Decoding requires a linked build. Build with
+.B make doubletake-test-receiver
+and install the GStreamer libav and plugins-bad decoders. AAC-ELD also requires
+an fdk_aac build and the FDK-AAC runtime. Protocol-only mode remains available
+with
+.BR \-decode=false .
+Decode errors, timestamp errors, queue overruns and unrecovered audio loss
+produce a nonzero exit status in headless mode.
 .SH PROFILES
 .TP
 .B roku
@@ -211,6 +229,23 @@ Accept RECORD before media SETUP to exercise successful early preparation.
 The default rejects early RECORD with status 455. Media readiness still
 requires both audio and video descriptors. The early-record counter allows
 tests to detect premature activation even when the receiver accepts it.
+.TP
+.B \-decode=\fIBOOL\fR
+Decode audio/video and simulate presentation. The default is true. False
+retains protocol/framing checks without starting media decoders.
+.TP
+.B \-audio-drop-every \fIN\fR
+Drop every Nth primary audio sequence, including its duplicate datagrams.
+Retransmission responses are accepted. Zero disables loss injection; otherwise
+N must be at least 2.
+.TP
+.B \-audio-jitter \fIDURATION\fR
+Audio recovery and initial reorder window. The default is 50ms; values from
+zero (the default window) through 1s are accepted.
+.TP
+.B \-ntp
+Advertise and use NTP independently of the selected profile. Pairing and media
+encryption remain as selected by that profile.
 .TP
 .B \-h, \-help
 Show command-line help.

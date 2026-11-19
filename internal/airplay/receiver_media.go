@@ -37,6 +37,7 @@ type receiverMediaConfig struct {
 	EventSharedSecret []byte
 	TimingResponder   bool
 	MaxVideoPayload   uint32
+	Playback          *receiverPlaybackConfig
 }
 
 // receiverMediaEndpoints are the receiver-owned ports returned in SETUP
@@ -83,6 +84,7 @@ type receiverMediaStats struct {
 	TimingProbes  uint64
 	TimingReplies uint64
 	TimingErrors  uint64
+	Playback      ReceiverPlaybackStats
 }
 
 // add accumulates another media snapshot. The receiver server uses this to
@@ -118,6 +120,7 @@ func (s *receiverMediaStats) add(other receiverMediaStats) {
 	s.TimingProbes += other.TimingProbes
 	s.TimingReplies += other.TimingReplies
 	s.TimingErrors += other.TimingErrors
+	s.Playback.add(other.Playback)
 }
 
 type receiverMediaCounters struct {
@@ -173,6 +176,7 @@ type receiverMediaSession struct {
 	legacyVideoIV   [16]byte
 	legacyVideoSet  bool
 	videoAEAD       cipher.AEAD
+	playback        *receiverPlayback
 
 	connectionsMu sync.Mutex
 	connections   map[net.Conn]struct{}
@@ -252,6 +256,7 @@ func newReceiverMediaSession(parent context.Context, cfg receiverMediaConfig) (*
 		cleanup()
 		return nil, fmt.Errorf("listen receiver legacy timing: %w", err)
 	}
+	closeOnError = append(closeOnError, timingConn)
 
 	maxVideoPayload := cfg.MaxVideoPayload
 	if maxVideoPayload == 0 {
@@ -277,6 +282,14 @@ func newReceiverMediaSession(parent context.Context, cfg receiverMediaConfig) (*
 			AudioRTCPPort: audioRTCPConn.LocalAddr().(*net.UDPAddr).Port,
 			TimingPort:    timingConn.LocalAddr().(*net.UDPAddr).Port,
 		},
+	}
+	if cfg.Playback != nil {
+		s.playback, err = newReceiverPlayback(*cfg.Playback)
+		if err != nil {
+			cancel()
+			cleanup()
+			return nil, err
+		}
 	}
 
 	workers := 4
@@ -315,7 +328,7 @@ func (s *receiverMediaSession) Snapshot() receiverMediaStats {
 	audioRTPBytes := c.audioRTPBytes.Load()
 	audioRTCPPackets := c.audioRTCPPackets.Load()
 	audioRTCPBytes := c.audioRTCPBytes.Load()
-	return receiverMediaStats{
+	snapshot := receiverMediaStats{
 		EventConnections:  c.eventConnections.Load(),
 		EventRequests:     c.eventRequests.Load(),
 		EventResponses:    c.eventResponses.Load(),
@@ -343,6 +356,10 @@ func (s *receiverMediaSession) Snapshot() receiverMediaStats {
 		TimingReplies:     c.timingReplies.Load(),
 		TimingErrors:      c.timingErrors.Load(),
 	}
+	if s.playback != nil {
+		snapshot.Playback = s.playback.snapshot()
+	}
+	return snapshot
 }
 
 func (s *receiverMediaSession) acceptEvents() {
@@ -571,7 +588,7 @@ func (s *receiverMediaSession) drainVideo(conn net.Conn) {
 		}
 		var payload []byte
 		if payloadSize > 0 {
-			if (videoCipher != nil || videoAEAD != nil) && header[4] == 0x00 {
+			if s.playback != nil || (videoCipher != nil || videoAEAD != nil) && header[4] == 0x00 {
 				payload = make([]byte, payloadSize)
 				n, err := io.ReadFull(conn, payload)
 				s.counters.videoBytes.Add(uint64(n))
@@ -615,11 +632,13 @@ func (s *receiverMediaSession) drainVideo(conn net.Conn) {
 					return
 				}
 				s.counters.videoDecrypted.Add(1)
+				payload = plain
 			}
 			if videoAEAD != nil {
 				var nonce [12]byte
 				binary.LittleEndian.PutUint64(nonce[4:], videoNonce)
-				if _, err := videoAEAD.Open(payload[:0], nonce[:], payload, header); err != nil {
+				plain, err := videoAEAD.Open(payload[:0], nonce[:], payload, header)
+				if err != nil {
 					s.counters.videoCryptoErrors.Add(1)
 					s.counters.videoMalformed.Add(1)
 					dbg("[RECEIVER-VIDEO] frame authentication failed: %v", err)
@@ -627,9 +646,21 @@ func (s *receiverMediaSession) drainVideo(conn net.Conn) {
 				}
 				videoNonce++
 				s.counters.videoDecrypted.Add(1)
+				payload = plain
+			}
+			if s.playback != nil {
+				if err := s.playback.videoFrame(payload, binary.LittleEndian.Uint64(header[8:16]), binary.LittleEndian.Uint64(header[40:48])); err != nil {
+					s.playback.fail(err)
+					return
+				}
 			}
 		case 0x01:
 			s.counters.videoCodecFrames.Add(1)
+			if s.playback != nil {
+				if err := s.playback.configureVideo(payload); err != nil {
+					return
+				}
+			}
 			width := math.Float32frombits(binary.LittleEndian.Uint32(header[16:20]))
 			height := math.Float32frombits(binary.LittleEndian.Uint32(header[20:24]))
 			if width > 0 && height > 0 && width <= 16384 && height <= 16384 {
@@ -756,6 +787,13 @@ func (s *receiverMediaSession) drainUDP(conn *net.UDPConn, packets, bytes *atomi
 		}
 		packets.Add(1)
 		bytes.Add(uint64(n))
+		if s.playback != nil {
+			if conn == s.audioRTPConn {
+				s.playback.audioPacket(buffer[:n], false)
+			} else {
+				s.playback.audioControl(buffer[:n])
+			}
+		}
 	}
 }
 
@@ -874,6 +912,14 @@ func (s *receiverMediaSession) ProbeLegacyTiming(ctx context.Context, sender *ne
 		if reference := binary.BigEndian.Uint64(reply[8:16]); reference != transmit {
 			return fmt.Errorf("legacy timing reply %d reference is 0x%016x, want 0x%016x", sequence, reference, transmit)
 		}
+		if s.playback != nil && s.playback.cfg.Timing != timingProtocolPTP {
+			// Four-timestamp NTP offset, independent of packet receive jitter.
+			t1 := receiverCompactDuration(transmit - (uint64(secondsFrom1900To1970) << 32))
+			t2 := receiverCompactDuration(binary.BigEndian.Uint64(reply[16:24]) - (uint64(secondsFrom1900To1970) << 32))
+			t3 := receiverCompactDuration(binary.BigEndian.Uint64(reply[24:32]) - (uint64(secondsFrom1900To1970) << 32))
+			t4 := bootRelativeNow()
+			s.playback.ntpOffset.Store(int64(((t2 - t1) + (t3 - t4)) / 2))
+		}
 		s.counters.timingReplies.Add(1)
 	}
 	return nil
@@ -928,6 +974,9 @@ func (s *receiverMediaSession) Close() error {
 		}
 		s.connectionsMu.Unlock()
 		s.wg.Wait()
+		if s.playback != nil {
+			s.playback.Close()
+		}
 	})
 	return nil
 }

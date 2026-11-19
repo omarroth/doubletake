@@ -60,6 +60,13 @@ type ReceiverConfig struct {
 	Profile       ReceiverProfile
 	Auth          ReceiverAuthMode
 	Code          string
+	// DecodeMedia enables independent headless audio/video decoding and timed
+	// presentation. Loss injection is local to the diagnostic receiver.
+	DecodeMedia    bool
+	AudioDropEvery int
+	AudioJitter    time.Duration
+	// ForceNTP exercises CoreUtils media independently of PTP advertisement.
+	ForceNTP bool
 	// HidePasswordStatus keeps configured password/Digest authentication active
 	// while omitting the password-required bit from /info. Some legacy receivers
 	// reveal that requirement only by challenging the first session request.
@@ -117,6 +124,7 @@ type ReceiverStats struct {
 	AudioBytes    uint64
 	TimingProbes  uint64
 	TimingReplies uint64
+	Playback      ReceiverPlaybackStats
 }
 
 type receiverAtomicStats struct {
@@ -233,6 +241,15 @@ type ReceiverServer struct {
 // NewReceiverServer opens the configured control listener. Call Serve to
 // accept clients, and Close (or cancel Serve's context) to stop it.
 func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
+	if cfg.DecodeMedia && !receiverDecoderAvailable() {
+		return nil, fmt.Errorf("headless playback requires make doubletake-test-receiver (gstreamer_cgo)")
+	}
+	if cfg.AudioDropEvery < 0 || cfg.AudioDropEvery == 1 || cfg.AudioJitter < 0 || cfg.AudioJitter > time.Second {
+		return nil, fmt.Errorf("audio drop interval must be 0 or at least 2; jitter must be between 0 and 1s")
+	}
+	if cfg.AudioDropEvery > 0 && !cfg.DecodeMedia {
+		return nil, fmt.Errorf("audio loss injection requires headless decoding")
+	}
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = "127.0.0.1:7000"
 	}
@@ -245,6 +262,13 @@ func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 	profile, err := receiverProfile(cfg.Profile)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.ForceNTP {
+		profile.features &^= uint64(1) << featurePTP
+		profile.timingProtocol = timingProtocolNTP
+		profile.ntpInitiator = receiverNTPReceiver
+		profile.advertisePTPInfo = false
+		profile.providePTPClockHeaders = false
 	}
 	if cfg.OmitPTPClockIdentity {
 		profile.providePTPClockIdentity = false
@@ -443,6 +467,7 @@ func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 			supportedScreenFormats:  0x1000000,
 			audioSHKWithHAP:         true,
 			fairPlayRootKeys:        true,
+			legacyVideoKey:          receiverLegacyVideoMixed,
 		}, nil
 	default:
 		return receiverProfileSpec{}, fmt.Errorf("unknown receiver profile %q", profile)
@@ -1002,6 +1027,11 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 			return receiverError(400, err)
 		}
 	}
+	if kind == receiverSetupAudio && c.media.playback != nil {
+		if err := c.configureAudioPlayback(streams[0]); err != nil {
+			return receiverError(500, err)
+		}
+	}
 	endpoints := c.media.Endpoints()
 	response := receiverSetupResponse(c.server.profile, endpoints)
 	if kind == receiverSetupControl {
@@ -1300,12 +1330,22 @@ func (c *receiverConnection) ensureMedia() error {
 		return nil
 	}
 	keys, _ := c.pairing.sessionKeys()
+	var playback *receiverPlaybackConfig
+	if c.server.cfg.DecodeMedia {
+		now := bootRelativeNow
+		if c.timingProtocol == timingProtocolPTP {
+			now = func() time.Duration { return time.Since(c.server.startedAt) }
+		}
+		playback = &receiverPlaybackConfig{NetworkNow: now, Timing: c.timingProtocol, Timeline: 0x4454424c54414b45,
+			AudioDropEvery: c.server.cfg.AudioDropEvery, AudioJitter: c.server.cfg.AudioJitter}
+	}
 	media, err := newReceiverMediaSession(c.server.ctx, receiverMediaConfig{
 		BindIP:            controlLocalIP(c.conn),
 		EventEncrypted:    c.hap != nil,
 		EventSharedSecret: keys.sharedSecret,
 		TimingResponder:   c.server.profile.ntpInitiator == receiverNTPSender,
 		MaxVideoPayload:   32 * 1024 * 1024,
+		Playback:          playback,
 	})
 	if err != nil {
 		return fmt.Errorf("start receiver media endpoints: %w", err)
@@ -1334,6 +1374,17 @@ func (c *receiverConnection) configureVideoCrypto(stream map[string]any) error {
 				return err
 			}
 			return c.media.configureChaChaVideo(key)
+		}
+		if c.media.playback != nil {
+			key := plistBytes(stream["shk"])
+			id := plistInt(stream["streamConnectionID"])
+			if len(key) != 16 || len(plistBytes(stream["shiv"])) != 16 || id <= 0 {
+				return fmt.Errorf("raw video omitted its AES key, IV or stream ID")
+			}
+			suffix := strconv.FormatUint(uint64(id), 10)
+			k := sha512.Sum512(append([]byte("AirPlayStreamKey"+suffix), key...))
+			iv := sha512.Sum512(append([]byte("AirPlayStreamIV"+suffix), key...))
+			return c.media.configureLegacyVideo(k[:16], iv[:16])
 		}
 		return nil
 	}
@@ -1376,6 +1427,46 @@ func (c *receiverConnection) configureVideoCrypto(stream map[string]any) error {
 		return fmt.Errorf("configure legacy video decryptor: %w", err)
 	}
 	return nil
+}
+
+func (c *receiverConnection) configureAudioPlayback(stream map[string]any) error {
+	var key, iv, chacha []byte
+	if c.hap != nil && c.server.profile.audioSHKWithHAP {
+		chacha = plistBytes(stream["shk"])
+		if len(chacha) != 32 {
+			return fmt.Errorf("modern audio omitted its 32-byte stream key")
+		}
+	} else if c.legacyFairPlaySet {
+		keys, _ := c.pairing.sessionKeys()
+		var err error
+		key, err = receiverLegacyVideoMasterKey(c.server.profile.legacyVideoKey, c.legacyFairPlayKey[:], keys.sharedSecret)
+		if err != nil {
+			return err
+		}
+		iv = c.legacyFairPlayIV
+	}
+	port := plistInt(stream["controlPort"])
+	if connections, ok := stream["streamConnections"].(map[string]any); ok {
+		if control, ok := connections["streamConnectionTypeRTCP"].(map[string]any); ok {
+			port = plistInt(control["streamConnectionKeyPort"])
+		}
+	}
+	var resend func(uint16, uint16) error
+	if peer, ok := c.conn.RemoteAddr().(*net.TCPAddr); ok && port > 0 {
+		conn := c.media.audioRTCPConn
+		addr := &net.UDPAddr{IP: peer.IP, Port: port}
+		var requestSequence uint16
+		resend = func(first, count uint16) error {
+			requestSequence++
+			packet := [8]byte{0x80, 0xd5}
+			binary.BigEndian.PutUint16(packet[2:4], requestSequence)
+			binary.BigEndian.PutUint16(packet[4:6], first)
+			binary.BigEndian.PutUint16(packet[6:8], count)
+			_, err := conn.WriteToUDP(packet[:], addr)
+			return err
+		}
+	}
+	return c.media.playback.configureAudio(AudioCodec(plistInt(stream["ct"])), key, iv, chacha, resend)
 }
 
 func receiverDataStreamKey(secret []byte, streamID uint64) ([]byte, error) {
@@ -1645,5 +1736,6 @@ func (s *ReceiverServer) Stats() ReceiverStats {
 	stats.AudioBytes = media.AudioBytes
 	stats.TimingProbes = media.TimingProbes
 	stats.TimingReplies = media.TimingReplies
+	stats.Playback = media.Playback
 	return stats
 }

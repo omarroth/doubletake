@@ -380,7 +380,7 @@ func TestReceiverProfilePresets(t *testing.T) {
 			AudioCodecALAC, 0x40000, false, true, receiverLegacyVideoMixed, true, 1920, 1080, 0, 0, false},
 		{ReceiverProfileAirServer, "AppleTV5,3", "375.3", 0x3c177fde4a7fdfd5, receiverPairingLegacy,
 			receiverSetupSessionFirst, timingProtocolNTP, receiverNTPSender, false, false, false, true, false,
-			AudioCodecAACELD, 0x1000000, true, true, receiverLegacyVideoNone, false, 0, 0, 0, 0, false},
+			AudioCodecAACELD, 0x1000000, true, true, receiverLegacyVideoMixed, false, 0, 0, 0, 0, false},
 	}
 	for _, test := range tests {
 		t.Run(string(test.profile), func(t *testing.T) {

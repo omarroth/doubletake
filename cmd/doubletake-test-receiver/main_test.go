@@ -99,6 +99,9 @@ func TestRunRejectsInvalidArgumentsWithoutStartingReceiver(t *testing.T) {
 		{name: "negative interval", args: []string{"-stats-interval=-1ms"}, wantCode: 2, wantStderr: "must be non-negative"},
 		{name: "invalid profile", args: []string{"-profile=other"}, wantCode: 2, wantStderr: "invalid -profile"},
 		{name: "invalid auth", args: []string{"-auth=other"}, wantCode: 2, wantStderr: "invalid -auth"},
+		{name: "invalid loss", args: []string{"-audio-drop-every=1"}, wantCode: 2, wantStderr: "must be 0 or at least 2"},
+		{name: "invalid jitter", args: []string{"-audio-jitter=-1ms"}, wantCode: 2, wantStderr: "must be between 0 and 1s"},
+		{name: "loss without decoder", args: []string{"-decode=false", "-audio-drop-every=2"}, wantCode: 2, wantStderr: "requires -decode"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

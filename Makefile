@@ -30,7 +30,7 @@ doubletake-gstreamer-cgo: doubletake
 
 # Developer-only diagnostic receiver; build explicitly when needed.
 doubletake-test-receiver:
-	go build -o '$(BUILD_DIR)/doubletake-test-receiver' ./cmd/doubletake-test-receiver
+	CGO_ENABLED=1 go build -tags '$(BUILD_TAGS)' -o '$(BUILD_DIR)/doubletake-test-receiver' ./cmd/doubletake-test-receiver
 
 doubletake-release:
 	CGO_ENABLED=1 go build -trimpath -tags '$(BUILD_TAGS)' -ldflags='-s -w $(VERSION_FLAGS)' -o '$(RELEASE_DIR)/doubletake' ./cmd/doubletake

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -34,6 +35,10 @@ func run(args []string) int {
 	debug := flags.Bool("debug", false, "enable verbose receiver protocol logging")
 	statsInterval := flags.Duration("stats-interval", 0, "periodic statistics interval (0 disables periodic output)")
 	acceptEarlyRecord := flags.Bool("accept-early-record", false, "accept RECORD before media SETUP instead of returning 455")
+	decode := flags.Bool("decode", true, "decode audio/video and simulate headless playback (requires linked build)")
+	audioDropEvery := flags.Int("audio-drop-every", 0, "drop every Nth primary audio sequence to test recovery (0 disables)")
+	audioJitter := flags.Duration("audio-jitter", 50*time.Millisecond, "time allowed for missing audio recovery")
+	forceNTP := flags.Bool("ntp", false, "advertise and use NTP independently of the selected profile")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -47,6 +52,18 @@ func run(args []string) int {
 	}
 	if *statsInterval < 0 {
 		fmt.Fprintln(os.Stderr, "error: -stats-interval must be non-negative (0 disables periodic output)")
+		return 2
+	}
+	if *audioDropEvery < 0 || *audioDropEvery == 1 {
+		fmt.Fprintln(os.Stderr, "error: -audio-drop-every must be 0 or at least 2")
+		return 2
+	}
+	if *audioJitter < 0 || *audioJitter > time.Second {
+		fmt.Fprintln(os.Stderr, "error: -audio-jitter must be between 0 and 1s")
+		return 2
+	}
+	if *audioDropEvery > 0 && !*decode {
+		fmt.Fprintln(os.Stderr, "error: -audio-drop-every requires -decode")
 		return 2
 	}
 
@@ -78,6 +95,10 @@ func run(args []string) int {
 		Logger:            logger,
 		Debug:             *debug,
 		AcceptEarlyRecord: *acceptEarlyRecord,
+		DecodeMedia:       *decode,
+		AudioDropEvery:    *audioDropEvery,
+		AudioJitter:       *audioJitter,
+		ForceNTP:          *forceNTP,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: start receiver: %v\n", err)
@@ -99,6 +120,11 @@ func run(args []string) int {
 	<-statsDone
 	closeErr := server.Close()
 	fmt.Printf("final stats: %s\n", receiverStatsSummary(server.Stats()))
+	stats := server.Stats()
+	if *decode && (stats.VideoCryptoErrors > 0 || stats.Playback.DecodeErrors > 0 || stats.Playback.TimestampErrors > 0 || stats.Playback.AudioLost > 0 || stats.Playback.AudioMissingSamples > 0 || stats.Playback.QueueOverruns > 0) {
+		fmt.Fprintf(os.Stderr, "error: headless playback validation failed: %+v\n", stats.Playback)
+		return 1
+	}
 
 	if serveErr != nil {
 		fmt.Fprintf(os.Stderr, "error: receiver failed: %v\n", serveErr)
@@ -162,7 +188,7 @@ func reportReceiverStats(ctx context.Context, server *airplay.ReceiverServer, in
 }
 
 func receiverStatsSummary(stats airplay.ReceiverStats) string {
-	return fmt.Sprintf(
+	summary := fmt.Sprintf(
 		"connections=%d info=%d pairing=%d/%d fairplay=%d setup=%d early_record=%d feedback=%d teardown=%d events=%d video=%d/%dB video_decrypted=%d video_crypto_errors=%d audio=%d/%dB timing=%d/%d digest_challenges=%d",
 		stats.Connections,
 		stats.InfoRequests,
@@ -184,4 +210,14 @@ func receiverStatsSummary(stats airplay.ReceiverStats) string {
 		stats.TimingReplies,
 		stats.DigestChallenges,
 	)
+	p := stats.Playback
+	if p.VideoDecoded > 0 || p.AudioDecoded > 0 || p.DecodeErrors > 0 {
+		rms := 0.0
+		if p.AudioSamples > 0 {
+			rms = math.Sqrt(p.AudioSquares / float64(2*p.AudioSamples))
+		}
+		summary += fmt.Sprintf(" video_decoded=%d video_played=%d audio_samples=%d audio_played=%d audio_peak=%d audio_rms=%.1f recovered=%d lost=%d missing_samples=%d duplicates=%d decode_errors=%d timestamp_errors=%d av_skew=%s",
+			p.VideoDecoded, p.VideoPlayed, p.AudioSamples, p.AudioPlayedSamples, p.AudioPeak, rms, p.AudioRecovered, p.AudioLost, p.AudioMissingSamples, p.AudioDuplicates, p.DecodeErrors, p.TimestampErrors, p.MaxAVSkew)
+	}
+	return summary
 }
