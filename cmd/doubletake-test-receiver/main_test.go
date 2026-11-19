@@ -115,25 +115,28 @@ func TestRunRejectsInvalidArgumentsWithoutStartingReceiver(t *testing.T) {
 
 func TestReceiverStatsSummary(t *testing.T) {
 	stats := airplay.ReceiverStats{
-		Connections:      2,
-		InfoRequests:     3,
-		PairSetup:        4,
-		PairVerify:       5,
-		FairPlayRequests: 17,
-		DigestChallenges: 6,
-		SetupRequests:    7,
-		FeedbackRequests: 8,
-		TeardownRequests: 9,
-		EventConnections: 10,
-		VideoPackets:     11,
-		VideoBytes:       12,
-		AudioPackets:     13,
-		AudioBytes:       14,
-		TimingProbes:     15,
-		TimingReplies:    16,
+		Connections:         2,
+		InfoRequests:        3,
+		PairSetup:           4,
+		PairVerify:          5,
+		FairPlayRequests:    17,
+		DigestChallenges:    6,
+		SetupRequests:       7,
+		EarlyRecordRequests: 20,
+		FeedbackRequests:    8,
+		TeardownRequests:    9,
+		EventConnections:    10,
+		VideoPackets:        11,
+		VideoBytes:          12,
+		VideoDecrypted:      18,
+		VideoCryptoErrors:   19,
+		AudioPackets:        13,
+		AudioBytes:          14,
+		TimingProbes:        15,
+		TimingReplies:       16,
 	}
-	want := "connections=2 info=3 pairing=4/5 fairplay=17 setup=7 feedback=8 teardown=9 " +
-		"events=10 video=11/12B audio=13/14B timing=15/16 digest_challenges=6"
+	want := "connections=2 info=3 pairing=4/5 fairplay=17 setup=7 early_record=20 feedback=8 teardown=9 " +
+		"events=10 video=11/12B video_decrypted=18 video_crypto_errors=19 audio=13/14B timing=15/16 digest_challenges=6"
 	if got := receiverStatsSummary(stats); got != want {
 		t.Fatalf("receiverStatsSummary() =\n%q\nwant\n%q", got, want)
 	}

@@ -3,6 +3,7 @@ package airplay
 import (
 	"bufio"
 	"context"
+	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
 	"errors"
@@ -150,9 +151,9 @@ type receiverMediaCounters struct {
 }
 
 // receiverMediaSession owns the media listeners used by one receiver session.
-// It drains and accounts for traffic without decoding or rendering it. Legacy
-// FairPlay profiles can additionally decrypt and validate video access units,
-// making key-derivation regressions observable in protocol integration tests.
+// It validates and accounts for traffic without decoding or rendering it.
+// Configured video cryptors independently check legacy AES access units or
+// modern ChaCha authentication rather than counting opaque ciphertext as valid.
 type receiverMediaSession struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -171,6 +172,7 @@ type receiverMediaSession struct {
 	legacyVideoKey  [16]byte
 	legacyVideoIV   [16]byte
 	legacyVideoSet  bool
+	videoAEAD       cipher.AEAD
 
 	connectionsMu sync.Mutex
 	connections   map[net.Conn]struct{}
@@ -540,14 +542,15 @@ func (s *receiverMediaSession) drainVideo(conn net.Conn) {
 	defer s.untrackConnection(conn)
 	defer conn.Close()
 
-	videoCipher, err := s.newLegacyVideoCipher()
+	videoCipher, videoAEAD, err := s.newVideoCiphers()
 	if err != nil {
 		s.counters.videoCryptoErrors.Add(1)
-		dbg("[RECEIVER-VIDEO] initialize legacy cipher: %v", err)
+		dbg("[RECEIVER-VIDEO] initialize cipher: %v", err)
 		return
 	}
 
 	header := make([]byte, receiverMirrorHeaderSize)
+	var videoNonce uint64
 	for {
 		if _, err := io.ReadFull(conn, header); err != nil {
 			if errors.Is(err, io.ErrUnexpectedEOF) {
@@ -568,7 +571,7 @@ func (s *receiverMediaSession) drainVideo(conn net.Conn) {
 		}
 		var payload []byte
 		if payloadSize > 0 {
-			if videoCipher != nil && header[4] == 0x00 {
+			if (videoCipher != nil || videoAEAD != nil) && header[4] == 0x00 {
 				payload = make([]byte, payloadSize)
 				n, err := io.ReadFull(conn, payload)
 				s.counters.videoBytes.Add(uint64(n))
@@ -603,13 +606,26 @@ func (s *receiverMediaSession) drainVideo(conn net.Conn) {
 				s.counters.videoKeyFrames.Add(1)
 			}
 			if videoCipher != nil {
-				plain := videoCipher.EncryptFrame(payload) // CTR encryption and decryption are identical.
+				plain := make([]byte, len(payload))
+				videoCipher.XORKeyStream(plain, payload)
 				if err := validateReceiverAVCCFrame(plain, keyframe); err != nil {
 					s.counters.videoCryptoErrors.Add(1)
 					s.counters.videoMalformed.Add(1)
 					dbg("[RECEIVER-VIDEO] legacy frame decryption failed validation: %v", err)
 					return
 				}
+				s.counters.videoDecrypted.Add(1)
+			}
+			if videoAEAD != nil {
+				var nonce [12]byte
+				binary.LittleEndian.PutUint64(nonce[4:], videoNonce)
+				if _, err := videoAEAD.Open(payload[:0], nonce[:], payload, header); err != nil {
+					s.counters.videoCryptoErrors.Add(1)
+					s.counters.videoMalformed.Add(1)
+					dbg("[RECEIVER-VIDEO] frame authentication failed: %v", err)
+					return
+				}
+				videoNonce++
 				s.counters.videoDecrypted.Add(1)
 			}
 		case 0x01:
@@ -641,26 +657,43 @@ func (s *receiverMediaSession) configureLegacyVideo(key, iv []byte) error {
 	if len(key) != 16 || len(iv) != 16 {
 		return fmt.Errorf("legacy video cipher requires a 16-byte key and IV")
 	}
-	if _, err := newMirrorCipher(key, iv); err != nil {
-		return fmt.Errorf("validate legacy video cipher: %w", err)
-	}
 	s.videoCryptoMu.Lock()
 	copy(s.legacyVideoKey[:], key)
 	copy(s.legacyVideoIV[:], iv)
 	s.legacyVideoSet = true
+	s.videoAEAD = nil
 	s.videoCryptoMu.Unlock()
 	return nil
 }
 
-func (s *receiverMediaSession) newLegacyVideoCipher() (*mirrorCipher, error) {
+func (s *receiverMediaSession) configureChaChaVideo(key []byte) error {
+	aead, err := chacha20poly1305.New(key)
+	if err != nil {
+		return fmt.Errorf("create receiver video AEAD: %w", err)
+	}
+	s.videoCryptoMu.Lock()
+	s.videoAEAD = aead
+	s.legacyVideoSet = false
+	s.videoCryptoMu.Unlock()
+	return nil
+}
+
+func (s *receiverMediaSession) newVideoCiphers() (cipher.Stream, cipher.AEAD, error) {
 	s.videoCryptoMu.RLock()
 	configured := s.legacyVideoSet
 	key, iv := s.legacyVideoKey, s.legacyVideoIV
+	aead := s.videoAEAD
 	s.videoCryptoMu.RUnlock()
 	if !configured {
-		return nil, nil
+		return nil, aead, nil
 	}
-	return newMirrorCipher(key[:], iv[:])
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	// Use Go's continuous CTR stream instead of the sender's frame cipher.
+	// This independently checks that partial-block keystream survives frames.
+	return cipher.NewCTR(block, iv[:]), nil, nil
 }
 
 // validateReceiverAVCCFrame validates the decrypted VCL access unit. Legacy
@@ -688,8 +721,13 @@ func validateReceiverAVCCFrame(payload []byte, keyframe bool) error {
 			return fmt.Errorf("H.264 forbidden_zero_bit is set")
 		}
 		nalType := nal[0] & 0x1f
+		if nalType == 6 || nalType == 9 || nalType == 12 {
+			// SEI, AUD and filler can accompany a coded picture. They neither
+			// establish its presence nor change the IDR flag.
+			continue
+		}
 		if nalType < 1 || nalType > 5 {
-			return fmt.Errorf("unexpected VCL NAL type %d", nalType)
+			return fmt.Errorf("unexpected picture NAL type %d", nalType)
 		}
 		if nalType == 5 {
 			sawIDR = true
@@ -700,7 +738,7 @@ func validateReceiverAVCCFrame(payload []byte, keyframe bool) error {
 		return fmt.Errorf("keyframe flag is %t but decrypted access unit IDR is %t", keyframe, sawIDR)
 	}
 	if nalCount == 0 {
-		return fmt.Errorf("AVCC access unit contains no NAL units")
+		return fmt.Errorf("AVCC access unit contains no coded picture")
 	}
 	return nil
 }

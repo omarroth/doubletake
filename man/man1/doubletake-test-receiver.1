@@ -54,16 +54,19 @@ encoder from the session-time nominal canvas, while treating separately
 advertised maximum dimensions only as an acceptance ceiling.
 .PP
 It parses the outer AirPlay video framing and counts video and audio traffic.
-The AppleTV3 and UxPlay profiles authenticate the FairPlay key, decrypt legacy
-AES-CTR video, and validate AVCC/NAL framing. It does not decode or display
-video or play audio; other encrypted media paths remain transport-only checks.
+The AppleTV3 and UxPlay profiles authenticate the FairPlay key, independently
+decrypt legacy AES-CTR video, and validate AVCC/NAL framing. CoreUtils HAP video
+is authenticated with ChaCha20-Poly1305, including the frame header and nonce
+order. Decrypted-frame and crypto-error counters are reported separately from
+received packets. It does not decode or display video or play audio; audio and
+raw sessions without FairPlay validation remain transport-only checks.
 This program is a diagnostic sink, not a media player or a
 receiver-compatibility substitute.
 .SH PROFILES
 .TP
 .B roku
 Advertise third-party/HKP pairing, PTP feature 41 with implementation version
-377.40.x, feature 59 absent, ALAC, and no FPSAP. It rejects the initial control
+377.40.x, feature 59 absent, ALAC/AAC-ELD, and no FPSAP. It rejects the initial control
 SETUP to verify the single media-first transition and the narrow versioned NTP
 selection. Under authenticated HAP, the fixture rejects the initial
 .B controlPort
@@ -72,7 +75,7 @@ audio shape and verifies the sender's single bounded
 retry. This is the default.
 .TP
 .B modern
-Advertise CoreUtils HomeKit-style pairing, features 41 and 59, FPSAP, ALAC, and
+Advertise CoreUtils HomeKit-style pairing, features 41 and 59, FPSAP, ALAC/AAC-ELD, and
 full PTP clock metadata. It verifies encrypted control and event channels,
 acceptance of the initial control SETUP, descriptor-only FairPlay keys, and a
 .B streamConnections
@@ -202,6 +205,12 @@ Enable verbose receiver protocol logging.
 Print periodic protocol and media statistics using a Go duration such as
 \fB1s\fR or \fB500ms\fR. Zero disables periodic output. Final statistics are
 always printed.
+.TP
+.B \-accept-early-record
+Accept RECORD before media SETUP to exercise successful early preparation.
+The default rejects early RECORD with status 455. Media readiness still
+requires both audio and video descriptors. The early-record counter allows
+tests to detect premature activation even when the receiver accepts it.
 .TP
 .B \-h, \-help
 Show command-line help.

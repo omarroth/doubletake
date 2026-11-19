@@ -146,16 +146,21 @@ func TestReceiverMediaSessionDecryptsAndValidatesLegacyVideo(t *testing.T) {
 	writeReceiverMirrorPacket(t, senderConn, 0x00, 0x10, senderCipher.EncryptFrame(idr))
 	// Plaintext packets do not advance the legacy VCL cipher between frames.
 	writeReceiverMirrorPacket(t, senderConn, 0x02, 0, nil)
-	nonIDR := receiverTestAVCC([]byte{0x61}, []byte{0x41, 0x9a, 0x01})
-	writeReceiverMirrorPacket(t, senderConn, 0x00, 0, senderCipher.EncryptFrame(nonIDR))
+	writeReceiverMirrorPacket(t, senderConn, 0x01, 0, []byte{1, 2, 3})
+	lengths := []int{1, 1, 1, 11, 12, 15, 16, 17, 31, 32, 33}
+	for _, length := range lengths {
+		nonIDR := receiverTestAVCC(bytes.Repeat([]byte{0x61}, length))
+		writeReceiverMirrorPacket(t, senderConn, 0x00, 0, senderCipher.EncryptFrame(nonIDR))
+	}
 	if err := senderConn.Close(); err != nil {
 		t.Fatal(err)
 	}
 	waitReceiverPipeSession(t, session)
 
 	stats := session.Snapshot()
-	if stats.VideoFrames != 2 || stats.VideoKeyFrames != 1 || stats.VideoHeartbeats != 1 ||
-		stats.VideoDecrypted != 2 || stats.VideoCryptoErrors != 0 || stats.VideoMalformed != 0 {
+	wantFrames := uint64(1 + len(lengths))
+	if stats.VideoFrames != wantFrames || stats.VideoKeyFrames != 1 || stats.VideoHeartbeats != 1 || stats.VideoCodecFrames != 1 ||
+		stats.VideoDecrypted != wantFrames || stats.VideoCryptoErrors != 0 || stats.VideoMalformed != 0 {
 		t.Fatalf("legacy video stats = %+v", stats)
 	}
 }
@@ -189,6 +194,9 @@ func TestValidateReceiverAVCCFrame(t *testing.T) {
 	}{
 		{name: "IDR", payload: receiverTestAVCC([]byte{0x65, 0x80}), keyframe: true},
 		{name: "multiple non-IDR slices", payload: receiverTestAVCC([]byte{0x61}, []byte{0x42, 0x01})},
+		{name: "SEI with IDR", payload: receiverTestAVCC([]byte{0x06, 0x80}, []byte{0x65, 0x80}), keyframe: true},
+		{name: "AUD and filler with picture", payload: receiverTestAVCC([]byte{0x09}, []byte{0x61}, []byte{0x0c, 0xff})},
+		{name: "metadata without picture", payload: receiverTestAVCC([]byte{0x06, 0x80}), wantErr: true},
 		{name: "empty", wantErr: true},
 		{name: "truncated length", payload: []byte{0, 0, 0}, wantErr: true},
 		{name: "zero length", payload: []byte{0, 0, 0, 0}, wantErr: true},
@@ -405,14 +413,21 @@ func newTestReceiverMediaSession(t *testing.T, cfg receiverMediaConfig) *receive
 
 func newPipeReceiverMediaSession(t *testing.T, key, iv []byte) (*receiverMediaSession, net.Conn) {
 	t.Helper()
+	return newPipeReceiverMediaSessionWithCrypto(t, func(s *receiverMediaSession) error {
+		return s.configureLegacyVideo(key, iv)
+	})
+}
+
+func newPipeReceiverMediaSessionWithCrypto(t *testing.T, configure func(*receiverMediaSession) error) (*receiverMediaSession, net.Conn) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	session := &receiverMediaSession{
 		ctx: ctx, connections: make(map[net.Conn]struct{}),
 		maxVideoPayload: defaultReceiverMaxVideoPayload,
 	}
-	if err := session.configureLegacyVideo(key, iv); err != nil {
-		t.Fatalf("configure legacy video: %v", err)
+	if err := configure(session); err != nil {
+		t.Fatalf("configure video cipher: %v", err)
 	}
 	receiverConn, senderConn := net.Pipe()
 	session.connections[receiverConn] = struct{}{}

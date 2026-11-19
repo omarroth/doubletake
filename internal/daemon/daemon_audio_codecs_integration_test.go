@@ -29,7 +29,8 @@ func TestDaemonReusesCodecBeforeAddingRequiredEncoder(t *testing.T) {
 	defer d.Shutdown()
 	// An ELD-only receiver starts the codec group. A dual-format receiver
 	// reuses ELD; a later ALAC-only receiver needs a second encoder, one source.
-	for i, profile := range []airplay.ReceiverProfile{airplay.ReceiverProfileAirServer, airplay.ReceiverProfileModern, airplay.ReceiverProfileUxPlay} {
+	// A fourth, legacy HAP/AES receiver must reuse those sources too.
+	for i, profile := range []airplay.ReceiverProfile{airplay.ReceiverProfileAirServer, airplay.ReceiverProfileModern, airplay.ReceiverProfileUxPlay, airplay.ReceiverProfileAppleTV3} {
 		server, err := airplay.NewReceiverServer(airplay.ReceiverConfig{ListenAddress: fmt.Sprintf("127.0.0.%d:0", i+1), Profile: profile, DisplayWidth: 1920, DisplayHeight: 1080, Logger: log.New(io.Discard, "", 0)})
 		if err != nil {
 			t.Fatal(err)
@@ -46,9 +47,17 @@ func TestDaemonReusesCodecBeforeAddingRequiredEncoder(t *testing.T) {
 			if status.Error != "" {
 				t.Fatal(status.Error)
 			}
-			if server.Stats().AudioPackets > 5 {
+			stats := server.Stats()
+			if stats.VideoCryptoErrors != 0 {
+				t.Fatalf("%s rejected video encryption: %+v", profile, stats)
+			}
+			videoReady := stats.VideoPackets > 0
+			if profile != airplay.ReceiverProfileAirServer {
+				videoReady = stats.VideoDecrypted > 0
+			}
+			if stats.AudioPackets > 5 && videoReady {
 				encoders := 1
-				if i == 2 {
+				if i >= 2 {
 					encoders = 2
 				}
 				if status.SharedAudio.Sources != 1 || status.SharedAudio.Encoders != encoders || status.SharedAudio.Receivers != i+1 || status.VideoEncoders != 1 {

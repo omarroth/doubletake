@@ -76,6 +76,14 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 			if test.profile == ReceiverProfileUxPlay && session.eventConn != nil {
 				t.Fatal("UxPlay-compatible session unexpectedly opened an unadvertised event channel")
 			}
+			frame := receiverTestAVCC([]byte{0x65, 0x80})
+			if session.streamCipher != nil {
+				frame = session.streamCipher(frame)
+			}
+			timestamp, timeline := session.frameTimeNow()
+			if err := session.sendFrame(frame, true, timestamp, timeline); err != nil {
+				t.Fatalf("send profile's encrypted picture: %v", err)
+			}
 			// Media accepts and sender-initiated AirServer timing probes run in
 			// separate goroutines. Let those observable side effects settle before
 			// closing the session and folding its counters into the server totals.
@@ -87,7 +95,7 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 			}
 			deadline := time.Now().Add(time.Second)
 			stats := server.Stats()
-			for (!eventsReady(stats.EventConnections) || stats.VideoConnections != 1 ||
+			for (!eventsReady(stats.EventConnections) || stats.VideoConnections != 1 || stats.VideoPackets == 0 ||
 				stats.TimingProbes < test.wantTiming || stats.TimingReplies < test.wantTiming) && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 				stats = server.Stats()
@@ -96,6 +104,14 @@ func TestReceiverServerEndToEndProfiles(t *testing.T) {
 				t.Fatalf("close mirror session: %v", err)
 			}
 			stats = server.Stats()
+			if stats.VideoCryptoErrors != 0 || stats.VideoPackets != 1 {
+				t.Fatalf("video validation stats = %+v, want one picture and no crypto errors", stats)
+			}
+			if test.wantEncrypted || test.profile == ReceiverProfileUxPlay {
+				if stats.VideoDecrypted != 1 {
+					t.Fatalf("receiver validated %d decrypted pictures, want 1", stats.VideoDecrypted)
+				}
+			}
 			if stats.SetupRequests != test.wantSetups {
 				t.Fatalf("SETUP requests = %d, want %d", stats.SetupRequests, test.wantSetups)
 			}
@@ -171,7 +187,10 @@ func TestReceiverServerDecryptsLegacyFairPlayVideo(t *testing.T) {
 		{name: "raw-only legacy capabilities", profile: ReceiverProfileUxPlay, features: 0x1e5a7ffff7},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{Profile: test.profile}, func(server *ReceiverServer) {
+			server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{
+				Profile: test.profile, Name: "Independent media endpoint",
+				Model: "UnrelatedModel1,2", Manufacturer: "Independent Vendor",
+			}, func(server *ReceiverServer) {
 				if test.features != 0 {
 					server.profile.features = test.features
 					server.profile.pairing = receiverPairingRawOnly
@@ -1422,7 +1441,11 @@ func receiverTestSetupBody(t *testing.T, streamTypes ...int64) []byte {
 	if len(streamTypes) > 0 {
 		streams := make([]any, len(streamTypes))
 		for i, streamType := range streamTypes {
-			streams[i] = map[string]any{"type": streamType}
+			stream := map[string]any{"type": streamType}
+			if streamType == 110 {
+				stream["streamConnectionID"] = int64(1)
+			}
+			streams[i] = stream
 		}
 		setup["streams"] = streams
 	}

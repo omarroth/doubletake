@@ -2,9 +2,8 @@ package airplay
 
 import "testing"
 
-// Exercise authentication independently of each profile's media capabilities.
-// In particular, raw-only video fixtures cannot display HAP-encrypted video,
-// but must still verify fresh and reconnected controller identities correctly.
+// Exercise authentication independently of media capabilities, including fresh
+// and reconnected raw, legacy HAP and CoreUtils controller identities.
 func TestReceiverPairingAndReconnectMatrix(t *testing.T) {
 	for _, profile := range []ReceiverProfile{
 		ReceiverProfileModern, ReceiverProfileRoku, ReceiverProfileLG,

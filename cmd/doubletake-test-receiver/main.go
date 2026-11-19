@@ -33,6 +33,7 @@ func run(args []string) int {
 	deviceID := flags.String("device-id", "", "receiver device ID advertised by /info (random when empty)")
 	debug := flags.Bool("debug", false, "enable verbose receiver protocol logging")
 	statsInterval := flags.Duration("stats-interval", 0, "periodic statistics interval (0 disables periodic output)")
+	acceptEarlyRecord := flags.Bool("accept-early-record", false, "accept RECORD before media SETUP instead of returning 455")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -67,15 +68,16 @@ func run(args []string) int {
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 	server, err := airplay.NewReceiverServer(airplay.ReceiverConfig{
-		ListenAddress: *listenAddress,
-		Profile:       profile,
-		Auth:          auth,
-		Code:          receiverCode,
-		Name:          *name,
-		Model:         *model,
-		DeviceID:      *deviceID,
-		Logger:        logger,
-		Debug:         *debug,
+		ListenAddress:     *listenAddress,
+		Profile:           profile,
+		Auth:              auth,
+		Code:              receiverCode,
+		Name:              *name,
+		Model:             *model,
+		DeviceID:          *deviceID,
+		Logger:            logger,
+		Debug:             *debug,
+		AcceptEarlyRecord: *acceptEarlyRecord,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: start receiver: %v\n", err)
@@ -161,18 +163,21 @@ func reportReceiverStats(ctx context.Context, server *airplay.ReceiverServer, in
 
 func receiverStatsSummary(stats airplay.ReceiverStats) string {
 	return fmt.Sprintf(
-		"connections=%d info=%d pairing=%d/%d fairplay=%d setup=%d feedback=%d teardown=%d events=%d video=%d/%dB audio=%d/%dB timing=%d/%d digest_challenges=%d",
+		"connections=%d info=%d pairing=%d/%d fairplay=%d setup=%d early_record=%d feedback=%d teardown=%d events=%d video=%d/%dB video_decrypted=%d video_crypto_errors=%d audio=%d/%dB timing=%d/%d digest_challenges=%d",
 		stats.Connections,
 		stats.InfoRequests,
 		stats.PairSetup,
 		stats.PairVerify,
 		stats.FairPlayRequests,
 		stats.SetupRequests,
+		stats.EarlyRecordRequests,
 		stats.FeedbackRequests,
 		stats.TeardownRequests,
 		stats.EventConnections,
 		stats.VideoPackets,
 		stats.VideoBytes,
+		stats.VideoDecrypted,
+		stats.VideoCryptoErrors,
 		stats.AudioPackets,
 		stats.AudioBytes,
 		stats.TimingProbes,

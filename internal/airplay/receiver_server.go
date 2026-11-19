@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/hkdf"
 	"howett.net/plist"
 )
 
@@ -67,6 +68,9 @@ type ReceiverConfig struct {
 	// optional nested info dictionary. It exercises the sender's post-session
 	// GET /info compatibility fallback.
 	OmitCombinedInfo bool
+	// AcceptEarlyRecord prepares a control-first session before stream SETUP
+	// instead of returning 455. Readiness still requires both media descriptors.
+	AcceptEarlyRecord bool
 	// OmitPTPClockIdentity accepts a PTP session without returning
 	// timingPeerInfo.ClockID. AcceptNTPFallback additionally accepts an NTP
 	// session on a fresh, authenticated connection after TEARDOWN. These options
@@ -87,24 +91,25 @@ type ReceiverConfig struct {
 
 // ReceiverStats is a race-free snapshot of protocol and media activity.
 type ReceiverStats struct {
-	Connections       uint64
-	InfoRequests      uint64
-	PINStarts         uint64
-	PairSetup         uint64
-	PairVerify        uint64
-	FairPlayRequests  uint64
-	DigestChallenges  uint64
-	SetupRequests     uint64
-	RecordRequests    uint64
-	ParameterRequests uint64
-	FeedbackRequests  uint64
-	TeardownRequests  uint64
-	EventConnections  uint64
-	VideoConnections  uint64
-	VideoPackets      uint64
-	VideoBytes        uint64
-	VideoDecrypted    uint64
-	VideoCryptoErrors uint64
+	Connections         uint64
+	InfoRequests        uint64
+	PINStarts           uint64
+	PairSetup           uint64
+	PairVerify          uint64
+	FairPlayRequests    uint64
+	DigestChallenges    uint64
+	SetupRequests       uint64
+	RecordRequests      uint64
+	EarlyRecordRequests uint64
+	ParameterRequests   uint64
+	FeedbackRequests    uint64
+	TeardownRequests    uint64
+	EventConnections    uint64
+	VideoConnections    uint64
+	VideoPackets        uint64
+	VideoBytes          uint64
+	VideoDecrypted      uint64
+	VideoCryptoErrors   uint64
 	// VideoWidth and VideoHeight are the largest codec-header canvas observed.
 	VideoWidth    uint64
 	VideoHeight   uint64
@@ -115,20 +120,21 @@ type ReceiverStats struct {
 }
 
 type receiverAtomicStats struct {
-	connections       atomic.Uint64
-	infoRequests      atomic.Uint64
-	pinStarts         atomic.Uint64
-	pairSetup         atomic.Uint64
-	pairVerify        atomic.Uint64
-	fairPlayRequests  atomic.Uint64
-	digestChallenges  atomic.Uint64
-	setupRequests     atomic.Uint64
-	audioControlPort  atomic.Uint64
-	audioConnections  atomic.Uint64
-	recordRequests    atomic.Uint64
-	parameterRequests atomic.Uint64
-	feedbackRequests  atomic.Uint64
-	teardownRequests  atomic.Uint64
+	connections         atomic.Uint64
+	infoRequests        atomic.Uint64
+	pinStarts           atomic.Uint64
+	pairSetup           atomic.Uint64
+	pairVerify          atomic.Uint64
+	fairPlayRequests    atomic.Uint64
+	digestChallenges    atomic.Uint64
+	setupRequests       atomic.Uint64
+	audioControlPort    atomic.Uint64
+	audioConnections    atomic.Uint64
+	recordRequests      atomic.Uint64
+	earlyRecordRequests atomic.Uint64
+	parameterRequests   atomic.Uint64
+	feedbackRequests    atomic.Uint64
+	teardownRequests    atomic.Uint64
 }
 
 type receiverProfileSpec struct {
@@ -558,6 +564,7 @@ type receiverConnection struct {
 	legacyFairPlayIV  []byte
 	legacyFairPlaySet bool
 	sessionState      receiverSessionState
+	recorded          bool
 }
 
 type receiverSessionState uint8
@@ -991,7 +998,7 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 		c.probeLegacyTiming(setup)
 	}
 	if kind == receiverSetupVideo {
-		if err := c.configureLegacyVideo(streams[0]); err != nil {
+		if err := c.configureVideoCrypto(streams[0]); err != nil {
 			return receiverError(400, err)
 		}
 	}
@@ -1053,6 +1060,9 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 	result := c.setupPlistResponse(response)
 	if result.status == 200 {
 		c.sessionState = nextState
+		if kind == receiverSetupVideo && c.recorded {
+			c.sessionState = receiverSessionReady
+		}
 	}
 	return result
 }
@@ -1235,10 +1245,18 @@ func (c *receiverConnection) nextSetupState(kind receiverSetupKind) (receiverSes
 }
 
 func (c *receiverConnection) handleRecord() receiverResponse {
-	if c.sessionState != receiverSessionVideoPrepared {
+	switch c.sessionState {
+	case receiverSessionVideoPrepared:
+		c.sessionState = receiverSessionReady
+	case receiverSessionControlPrepared, receiverSessionAudioPrepared:
+		c.server.stats.earlyRecordRequests.Add(1)
+		if !c.server.cfg.AcceptEarlyRecord {
+			return c.invalidSessionState("RECORD")
+		}
+	default:
 		return c.invalidSessionState("RECORD")
 	}
-	c.sessionState = receiverSessionReady
+	c.recorded = true
 	return receiverResponse{status: 200, headers: map[string]string{"Audio-Latency": "22050"}}
 }
 
@@ -1299,9 +1317,24 @@ func (c *receiverConnection) ensureMedia() error {
 	return nil
 }
 
-func (c *receiverConnection) configureLegacyVideo(stream map[string]any) error {
+func (c *receiverConnection) configureVideoCrypto(stream map[string]any) error {
 	mode := c.server.profile.legacyVideoKey
 	if mode == receiverLegacyVideoNone {
+		if c.hap != nil {
+			pairKeys, verified := c.pairing.sessionKeys()
+			if !verified {
+				return fmt.Errorf("modern video requires pair-verify keys")
+			}
+			streamID := plistInt(stream["streamConnectionID"])
+			if streamID <= 0 {
+				return fmt.Errorf("modern video omitted streamConnectionID")
+			}
+			key, err := receiverDataStreamKey(pairKeys.sharedSecret, uint64(streamID))
+			if err != nil {
+				return err
+			}
+			return c.media.configureChaChaVideo(key)
+		}
 		return nil
 	}
 	// Keep the independently configured receiver behavior. In particular, an
@@ -1334,16 +1367,32 @@ func (c *receiverConnection) configureLegacyVideo(stream map[string]any) error {
 	if streamConnectionID <= 0 {
 		return fmt.Errorf("legacy video omitted streamConnectionID")
 	}
-	cipherKey, cipherIV := deriveVideoKeys(masterKey, int64(streamConnectionID))
-	if err := c.media.configureLegacyVideo(cipherKey, cipherIV); err != nil {
+	// Derive from the receiver's authenticated root, independently of the
+	// sender's key helper and the descriptor's (untrusted) shorthand key.
+	connectionID := strconv.FormatUint(uint64(streamConnectionID), 10)
+	keyHash := sha512.Sum512(append([]byte("AirPlayStreamKey"+connectionID), masterKey...))
+	ivHash := sha512.Sum512(append([]byte("AirPlayStreamIV"+connectionID), masterKey...))
+	if err := c.media.configureLegacyVideo(keyHash[:16], ivHash[:16]); err != nil {
 		return fmt.Errorf("configure legacy video decryptor: %w", err)
 	}
 	return nil
 }
 
+func receiverDataStreamKey(secret []byte, streamID uint64) ([]byte, error) {
+	if len(secret) != 32 {
+		return nil, fmt.Errorf("modern video requires a 32-byte pair-verify secret")
+	}
+	salt := []byte("DataStream-Salt" + strconv.FormatUint(streamID, 10))
+	key := make([]byte, chacha20poly1305.KeySize)
+	if _, err := io.ReadFull(hkdf.New(sha512.New, secret, salt, []byte("DataStream-Output-Encryption-Key")), key); err != nil {
+		return nil, fmt.Errorf("derive receiver data-stream key: %w", err)
+	}
+	return key, nil
+}
+
 // receiverLegacyVideoMasterKey deliberately models both negotiated legacy-key
 // modes independently of the sender's selection logic: the key authenticated
-// by ekey can remain raw or be mixed with the raw-pair-verify X25519 secret.
+// by ekey can remain raw or be mixed with the pair-verify X25519 secret.
 func receiverLegacyVideoMasterKey(mode receiverLegacyVideoKeyMode, rawKey, pairSecret []byte) ([]byte, error) {
 	if len(rawKey) != 16 {
 		return nil, fmt.Errorf("legacy video raw FairPlay key is %d bytes, want 16", len(rawKey))
@@ -1388,6 +1437,7 @@ func (c *receiverConnection) probeLegacyTiming(setup map[string]any) {
 
 func (c *receiverConnection) closeMedia() {
 	c.timingProbed = false
+	c.recorded = false
 	if c.media == nil {
 		return
 	}
@@ -1563,18 +1613,19 @@ func (s *receiverHAPStream) Write(plain []byte) (int, error) {
 // Stats returns totals including currently active media sessions.
 func (s *ReceiverServer) Stats() ReceiverStats {
 	stats := ReceiverStats{
-		Connections:       s.stats.connections.Load(),
-		InfoRequests:      s.stats.infoRequests.Load(),
-		PINStarts:         s.stats.pinStarts.Load(),
-		PairSetup:         s.stats.pairSetup.Load(),
-		PairVerify:        s.stats.pairVerify.Load(),
-		FairPlayRequests:  s.stats.fairPlayRequests.Load(),
-		DigestChallenges:  s.stats.digestChallenges.Load(),
-		SetupRequests:     s.stats.setupRequests.Load(),
-		RecordRequests:    s.stats.recordRequests.Load(),
-		ParameterRequests: s.stats.parameterRequests.Load(),
-		FeedbackRequests:  s.stats.feedbackRequests.Load(),
-		TeardownRequests:  s.stats.teardownRequests.Load(),
+		Connections:         s.stats.connections.Load(),
+		InfoRequests:        s.stats.infoRequests.Load(),
+		PINStarts:           s.stats.pinStarts.Load(),
+		PairSetup:           s.stats.pairSetup.Load(),
+		PairVerify:          s.stats.pairVerify.Load(),
+		FairPlayRequests:    s.stats.fairPlayRequests.Load(),
+		DigestChallenges:    s.stats.digestChallenges.Load(),
+		SetupRequests:       s.stats.setupRequests.Load(),
+		RecordRequests:      s.stats.recordRequests.Load(),
+		EarlyRecordRequests: s.stats.earlyRecordRequests.Load(),
+		ParameterRequests:   s.stats.parameterRequests.Load(),
+		FeedbackRequests:    s.stats.feedbackRequests.Load(),
+		TeardownRequests:    s.stats.teardownRequests.Load(),
 	}
 	s.mediaMu.Lock()
 	media := s.mediaTotals

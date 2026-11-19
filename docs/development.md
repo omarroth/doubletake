@@ -21,6 +21,27 @@ man -l man/man1/doubletake-test-receiver.1
 
 It is excluded from default builds, installation, and release assets.
 Most protocol and daemon tests run headlessly against local test receivers.
+To run the receiver regression matrix without contacting a device:
+
+```sh
+go test ./internal/airplay -run 'Test(Receiver|LegacyTransientPairing|RawPairVerify)' -count=1
+```
+
+The matrix covers raw, legacy HAP/AES, and CoreUtils/ChaCha sessions; identical
+feature masks with different pairing protocols; authentication and reconnects;
+and both accepted and rejected early RECORD requests. Legacy video is decrypted
+with an independent continuous CTR stream. Modern video authenticates headers,
+payloads, tags, and nonce order against fixed vectors and real sender packets.
+The linked suite also streams synthetic audio/video to four local receivers
+with mixed codecs and encryption, checking that capture remains shared.
+
+For a manual loopback test, run the diagnostic receiver on
+`127.0.0.1:7000`, then use `doubletake -test -target 127.0.0.1 -port 7000`
+with a temporary `-creds` path. `-accept-early-record` on the receiver exercises
+successful early preparation instead of a 455 fallback. Receiver statistics
+distinguish received video from decrypted video and crypto failures. These tests
+do not render media; audio packet counts do not establish audible correctness.
+
 Sound-server integration tests require `DOUBLETAKE_TEST_PULSE_SERVER` pointing
 to a **private** PulseAudio or pipewire-pulse instance; they change routing and
 volume on that server. Ordinary tests do not modify the desktop sound server.

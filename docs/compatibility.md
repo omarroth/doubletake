@@ -25,6 +25,8 @@ see [#4](https://github.com/omarroth/doubletake/issues/4).
 Please report confirmed working receivers and failures not covered here.
 
 macOS receivers may require accepting the connection on the receiving Mac.
+On a third-generation Apple TV, replace previously saved raw-protocol
+credentials with a PIN pairing using `doubletake -pair -target ADDRESS`.
 Shared sender timelines do not guarantee audible synchronization between
 different receiver models or external audio systems.
 
