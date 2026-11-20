@@ -5,6 +5,29 @@ import (
 	"time"
 )
 
+func TestReceiverVideoMarker(t *testing.T) {
+	const width, height, stride = 104, 3, 112
+	const timestamp uint32 = 0xa021d3
+	pixels := make([]byte, stride*height)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			column := x / 4
+			pixels[y*stride+x] = 16
+			if column == 1 || (column >= 2 && (timestamp>>uint(25-column))&1 != 0) {
+				pixels[y*stride+x] = 235
+			}
+		}
+	}
+	got, ok := receiverVideoMarker(pixels, width, height, stride)
+	if !ok || got != timestamp {
+		t.Fatalf("decoded marker = %#x, valid=%t, want %#x", got, ok, timestamp)
+	}
+	clear(pixels)
+	if _, ok := receiverVideoMarker(pixels, width, height, stride); ok {
+		t.Fatal("accepted a blank picture as a timestamp")
+	}
+}
+
 func TestReceiverREDHeaderBounds(t *testing.T) {
 	for _, payload := range [][]byte{nil, {0x61}, {0xe0}, {0xe0, 0, 0, 1}, {0xe0, 0, 0, 1, 0x60}, {0xe0, 0, 4, 0, 0x60}} {
 		if _, _, _, err := receiverREDHeaders(payload); err == nil {

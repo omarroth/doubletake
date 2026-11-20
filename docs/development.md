@@ -164,11 +164,44 @@ uninstallation, reproducible repacking, and completion against actual command
 help, including Ubuntu 20.04's bash-completion version.
 
 CI tests Go 1.25 and the current stable toolchain on both architectures, and
-builds releases with stable Go on Ubuntu 20.04.
+builds releases with stable Go on Ubuntu 20.04. Local builds include the
+supported archives present for the selected version in `SHA256SUMS`. CI
+requires both architectures before writing the release manifest.
 Version tags publish the two complete architecture archives and a SHA-256 manifest
 only when the tagged commit is on `main`. Put release notes in an annotated tag
 message; lightweight tags fall back to the commit message. No tag or release is
 created by the local build targets.
+
+## Desktop VM tests
+
+The desktop jobs extract the x86-64 release archive and stream a real GTK test
+window and a tone from a private audio sink. Ubuntu 24.04 runs Xvfb inside the
+GitHub-hosted VM. A separate job boots Debian 13 in QEMU and runs Sway,
+xdg-desktop-portal-wlr and PipeWire inside the guest. The guest builds portal
+0.7.1 with a test-only startup check that allows shared-memory capture when
+there is no GPU allocator. The sender and headless
+receiver run in the same guest and share a clock for the timestamps.
+
+Each job uploads `playback.json` and logs. The report includes time to first
+picture, median and p95 video latency from GTK redraw to simulated
+presentation, unique pictures per second, audio sample rate and sender
+CPU time. The stream requests 24 fps and 300 ms of playout lead. The checks
+require at least 16 unique pictures per second, video p95 at most 600 ms,
+and sustained, non-silent decoded audio. The result includes software capture,
+loopback transport, the configured buffer, and guest scheduling.
+
+Run the same workload in a Linux VM with the desktop dependencies installed:
+
+```sh
+make doubletake-test-receiver BUILD_TAGS=gstreamer_cgo
+scripts/desktop-test/run.sh x11 dist/doubletake-VERSION-linux-x86_64.tar.gz \
+  bin/doubletake-test-receiver desktop-report
+```
+
+`scripts/desktop-test/linux-vm.sh wayland IMAGE ARCHIVE RECEIVER REPORT_DIR`
+provisions and runs the Debian cloud guest. Future macOS and Windows jobs can
+reuse the on-screen timestamp format and receiver measurements with a native
+fixture and capture stack on each platform.
 
 Headless tests cover protocol, capture, audio lifetime, and multi-target daemon
 behavior. Release candidates should also be checked on real Wayland/X11 desktops

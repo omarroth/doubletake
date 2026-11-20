@@ -85,6 +85,7 @@ type receiverPlaybackConfig struct {
 	Timeline       uint64
 	AudioDropEvery int
 	AudioJitter    time.Duration
+	VideoProbe     func(uint32, time.Time)
 }
 
 type receiverPlayback struct {
@@ -228,7 +229,36 @@ func (p *receiverPlayback) decodedVideo(sample receiverDecodedSample) {
 	p.stats.VideoWidth = sample.Width
 	p.stats.VideoHeight = sample.Height
 	p.statsMu.Unlock()
-	p.schedule(receiverPlayoutEvent{video: true, pts: sample.PTS, hash: checksum})
+	event := receiverPlayoutEvent{video: true, pts: sample.PTS, hash: checksum}
+	if p.cfg.VideoProbe != nil {
+		event.marker, event.hasMarker = receiverVideoMarker(sample.Data, sample.Width, sample.Height, stride)
+	}
+	p.schedule(event)
+}
+
+// The desktop test draws 26 vertical bars. The first two calibrate the
+// luminance threshold after encoding and decoding.
+func receiverVideoMarker(data []byte, width, height, stride int) (uint32, bool) {
+	const bars = 26
+	if width < 2*bars {
+		return 0, false
+	}
+	brightness := func(column int) int {
+		x := (2*column + 1) * width / (2 * bars)
+		return int(data[(height/2)*stride+x])
+	}
+	black, white := brightness(0), brightness(1)
+	if white-black < 128 {
+		return 0, false
+	}
+	var marker uint32
+	for column := 2; column < bars; column++ {
+		marker <<= 1
+		if brightness(column) > (black+white)/2 {
+			marker |= 1
+		}
+	}
+	return marker, true
 }
 
 func (p *receiverPlayback) decodedAudio(sample receiverDecodedSample) {
@@ -257,11 +287,13 @@ func (p *receiverPlayback) decodedAudio(sample receiverDecodedSample) {
 }
 
 type receiverPlayoutEvent struct {
-	video    bool
-	hash     uint64
-	pts      int64
-	samples  uint64
-	deadline time.Time
+	video     bool
+	marker    uint32
+	hasMarker bool
+	hash      uint64
+	pts       int64
+	samples   uint64
+	deadline  time.Time
 }
 type receiverPlayoutQueue []receiverPlayoutEvent
 
@@ -318,7 +350,8 @@ func (p *receiverPlayback) run() {
 		}
 		for len(queue) > 0 && !queue[0].deadline.After(time.Now()) {
 			event := heap.Pop(&queue).(receiverPlayoutEvent)
-			late := time.Since(event.deadline)
+			presented := time.Now()
+			late := presented.Sub(event.deadline)
 			p.statsMu.Lock()
 			if event.video {
 				p.stats.VideoPlayed++
@@ -348,6 +381,9 @@ func (p *receiverPlayback) run() {
 				}
 			}
 			p.statsMu.Unlock()
+			if event.hasMarker {
+				p.cfg.VideoProbe(event.marker, presented)
+			}
 		}
 	}
 }

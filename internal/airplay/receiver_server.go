@@ -65,6 +65,7 @@ type ReceiverConfig struct {
 	DecodeMedia    bool
 	AudioDropEvery int
 	AudioJitter    time.Duration
+	VideoProbe     func(timestampMillis uint32, presentedAt time.Time)
 	// ForceNTP exercises CoreUtils media independently of PTP advertisement.
 	ForceNTP bool
 	// HidePasswordStatus keeps configured password/Digest authentication active
@@ -1337,7 +1338,8 @@ func (c *receiverConnection) ensureMedia() error {
 			now = func() time.Duration { return time.Since(c.server.startedAt) }
 		}
 		playback = &receiverPlaybackConfig{NetworkNow: now, Timing: c.timingProtocol, Timeline: 0x4454424c54414b45,
-			AudioDropEvery: c.server.cfg.AudioDropEvery, AudioJitter: c.server.cfg.AudioJitter}
+			AudioDropEvery: c.server.cfg.AudioDropEvery, AudioJitter: c.server.cfg.AudioJitter,
+			VideoProbe: c.server.cfg.VideoProbe}
 	}
 	media, err := newReceiverMediaSession(c.server.ctx, receiverMediaConfig{
 		BindIP:            controlLocalIP(c.conn),

@@ -165,10 +165,62 @@ jobs:
           path: release/*
           if-no-files-found: error
 
+  desktop-playback:
+    runs-on: ubuntu-24.04
+    needs: build-gstreamer
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        guest: [ubuntu-x11, debian-wayland]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-assets-linux-x86_64
+          path: dist
+      - name: Build the local test receiver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          make doubletake-test-receiver BUILD_TAGS=gstreamer_cgo
+      - name: Capture X11 in the Ubuntu VM
+        if: matrix.guest == 'ubuntu-x11'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            xvfb x11-utils dbus-daemon pulseaudio pulseaudio-utils \
+            python3-gi python3-gi-cairo gir1.2-gtk-3.0 \
+            gstreamer1.0-tools gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-pulseaudio
+          scripts/desktop-test/run.sh x11 "dist/doubletake-$VERSION-linux-x86_64.tar.gz" \
+            bin/doubletake-test-receiver desktop-report
+      - name: Boot Debian and capture Wayland inside the guest
+        if: matrix.guest == 'debian-wayland'
+        run: |
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage
+          if [[ -c /dev/kvm ]]; then sudo chmod a+rw /dev/kvm; fi
+          image=debian-13-genericcloud-amd64.qcow2
+          base=https://cloud.debian.org/images/cloud/trixie/latest
+          curl -fsSL --retry 3 "$base/$image" -o "$image"
+          curl -fsSL --retry 3 "$base/SHA512SUMS" -o SHA512SUMS
+          awk -v image="$image" '$2 == image {print}' SHA512SUMS | sha512sum --check
+          scripts/desktop-test/linux-vm.sh wayland "$image" "dist/doubletake-$VERSION-linux-x86_64.tar.gz" \
+            bin/doubletake-test-receiver desktop-report
+      - name: Upload desktop measurements and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-playback-${{ matrix.guest }}
+          path: desktop-report/
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: package
+    needs: [package, desktop-playback]
     permissions:
       contents: write
     steps:

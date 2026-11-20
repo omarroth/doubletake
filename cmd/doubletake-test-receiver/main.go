@@ -39,6 +39,7 @@ func run(args []string) int {
 	audioDropEvery := flags.Int("audio-drop-every", 0, "drop every Nth primary audio sequence to test recovery (0 disables)")
 	audioJitter := flags.Duration("audio-jitter", 50*time.Millisecond, "time allowed for missing audio recovery")
 	forceNTP := flags.Bool("ntp", false, "advertise and use NTP independently of the selected profile")
+	videoProbe := flags.Bool("video-probe", false, "report simulated presentation latency for the desktop CI timestamp pattern")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -84,6 +85,13 @@ func run(args []string) int {
 	}
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
+	var probe func(uint32, time.Time)
+	if *videoProbe {
+		probe = func(marker uint32, presented time.Time) {
+			latency := (uint32(presented.UnixMilli()) - marker) & 0xffffff
+			fmt.Printf("video-probe: marker=%d presented_ms=%d latency_ms=%d\n", marker, presented.UnixMilli(), latency)
+		}
+	}
 	server, err := airplay.NewReceiverServer(airplay.ReceiverConfig{
 		ListenAddress:     *listenAddress,
 		Profile:           profile,
@@ -99,6 +107,7 @@ func run(args []string) int {
 		AudioDropEvery:    *audioDropEvery,
 		AudioJitter:       *audioJitter,
 		ForceNTP:          *forceNTP,
+		VideoProbe:        probe,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: start receiver: %v\n", err)
