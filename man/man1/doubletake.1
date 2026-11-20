@@ -30,7 +30,7 @@ Capability-gated HEVC Main10/high-resolution encoding with NVENC or x265
 .IP \(bu 2
 ChaCha20-Poly1305 stream encryption
 .IP \(bu 2
-mDNS device discovery
+mDNS discovery of AirPlay displays and classic RAOP speakers
 .IP \(bu 2
 Daemon mode with multi-target streaming control via
 .B doubletake-ctl
@@ -95,11 +95,12 @@ nonzero value disables runtime adjustment (default: 0)
 .B \-target-latency-ms \fIMS\fR
 Override both audio and video playout latency in milliseconds. Zero selects the
 automatic AirPlay policy with separate screen and audio defaults (default: 0).
-Daemon mode instead uses one common 250 ms audio/video budget for all receivers
-when this option is zero. A nonzero value sets that common budget at startup.
+Daemon mode uses a 250 ms budget for mirror sessions. Classic RAOP playback
+uses a 2-second audio lead. A nonzero value sets a common lead at startup,
+subject to the receiver's supported latency.
 .TP
 .B \-no-audio
-Disable audio for video-only mirroring
+Disable audio for video-only mirroring. Audio-only receivers require audio.
 .TP
 .B \-audio-source \fISOURCE\fR
 Audio route: \fBoutput\fR (default) creates a selectable doubletake output;

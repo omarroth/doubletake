@@ -150,10 +150,20 @@ doubletake-ctl disconnect 192.168.1.77
 doubletake-ctl disconnect                # stop all streams
 ```
 
-The daemon shares capture and encoding where receiver formats allow it, using a
-common 250 ms playout budget. Physical synchronization still depends on the
-receivers and their audio outputs. Use `-target-latency-ms` at daemon startup to
-choose a different budget. See `man doubletake-ctl` for pairing and mute commands.
+The daemon shares capture and encoding where receiver formats allow it.
+Mirroring sessions default to 250 ms of playout lead.
+
+Discovered speakers that offer classic RAOP (UDP and ALAC) can stream audio
+without screen capture. Choose one from interactive discovery, or use
+`doubletake-ctl devices` and connect several in daemon mode. Classic RAOP
+sessions default to a 2-second audio lead and schedule shared audio samples on
+the same sender timeline. A common `-target-latency-ms` value can set the same
+lead for mirror and speaker sessions if both accept it. Actual output timing
+depends on receiver buffering and audio hardware.
+
+Classic RAOP supports clear or RSA-wrapped audio and Digest passwords.
+Speakers that require AirPlay 2 media playback or RAOP PIN pairing still need
+those protocols. See `man doubletake-ctl` for pairing and mute commands.
 
 To run the installed daemon as a systemd user service:
 

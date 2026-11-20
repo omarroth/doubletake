@@ -121,7 +121,7 @@ func main() {
 	flag.StringVar(&resolution, "resolution", "max", "Target video canvas: max or WIDTHxHEIGHT[@REFRESH] (highest usable receiver mode by default)")
 	flag.StringVar(&resolution, "s", "max", "Alias for -resolution")
 	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic adaptive budget)")
-	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon uses shared 250 ms)")
+	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon mirrors use 250 ms and classic RAOP uses 2 s)")
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
@@ -239,8 +239,29 @@ func main() {
 		}
 		addr = device.IP
 		*port = device.Port
+		if device.UsesClassicRAOP() {
+			*port = device.RAOP.Port
+		}
 		advertisement = device
 		fmt.Printf("selected: %s (%s:%d)\n", device.Name, device.IP, device.Port)
+	}
+
+	if advertisement != nil && advertisement.UsesClassicRAOP() {
+		if *noAudio || *forcePair {
+			log.Fatal("classic RAOP requires audio and does not support PIN pairing")
+		}
+		store, err := newCredentialStore(*credBackend, *credFile)
+		if err != nil {
+			log.Fatalf("failed to load credentials: %v", err)
+		}
+		if err := store.CheckRAOPReceiver(*expectedDeviceID, advertisement.DeviceID); err != nil {
+			log.Fatal(err)
+		}
+		config := airplay.RAOPConfig{Password: credential, PortMin: portMin, PortMax: portMax}
+		if err := streamRAOP(ctx, *advertisement, config, *testMode, airplay.AudioSource(*audioSource)); err != nil && ctx.Err() == nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	newClient := func() *airplay.AirPlayClient {
@@ -662,6 +683,29 @@ func main() {
 // an on-screen PIN (or the user explicitly requested fresh pairing). A successful
 // /pair-pin-start response alone cannot distinguish a PIN from a fixed password,
 // so an unadvertised fallback keeps its prompt deliberately generic.
+func streamRAOP(ctx context.Context, device airplay.AirPlayDevice, config airplay.RAOPConfig, testMode bool, route airplay.AudioSource) error {
+	session, err := airplay.OpenRAOP(ctx, device, config)
+	if errors.Is(err, airplay.ErrCredentialsRequired) && config.Password == "" && ctx.Err() == nil {
+		config.Password = readCredential(bufio.NewReader(os.Stdin), "Enter the receiver's configured password: ")
+		if config.Password == "" {
+			return errors.New("password cannot be empty")
+		}
+		session, err = airplay.OpenRAOP(ctx, device, config)
+	}
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	var shared airplay.SharedAudioCapture
+	capture, err := shared.Acquire(ctx, testMode, airplay.AudioCodecALAC, route)
+	if err != nil {
+		return fmt.Errorf("RAOP audio capture: %w", err)
+	}
+	defer capture.Stop()
+	log.Printf("streaming RAOP audio to %s (%s)", device.Name, device.IP)
+	return session.Stream(ctx, capture)
+}
+
 func credentialOrPrompt(value string, client *airplay.AirPlayClient, expectPIN bool) string {
 	if value != "" {
 		return value

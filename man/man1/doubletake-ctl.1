@@ -8,8 +8,7 @@ doubletake-ctl \- Control doubletake daemon
 .B doubletake-ctl
 is a command-line interface for controlling the
 .B doubletake
-daemon. It allows you to query status, connect to and disconnect from Apple TVs,
-and manage multiple simultaneous mirroring sessions.
+daemon. It manages simultaneous mirroring and audio-only sessions and reports their status.
 .SH COMMANDS
 .TP
 .B status
@@ -22,8 +21,8 @@ Refresh receiver discovery.
 List cached discovered receivers.
 .TP
 .B connect [\fITARGET\fR] [\fIPIN-OR-PASSWORD\fR]
-Connect to an Apple TV, optionally supplying pairing credentials. If no target
-is specified, connect to the first available discovered receiver
+Start streaming to a receiver, optionally supplying a PIN or password. If no
+target is specified, connect to the first available discovered receiver.
 .TP
 .B pin \fIPIN-OR-PASSWORD\fR
 Submit the credential for a receiver waiting for input. The command retains its
@@ -34,13 +33,13 @@ when multiple receivers are waiting, use
 to select one explicitly.
 .TP
 .B disconnect [\fITARGET\fR]
-Disconnect from an Apple TV. If no target is specified, disconnects all active connections
+Stop streaming to a receiver. If no target is specified, disconnects all active connections.
 .TP
 .B mute [\fITARGET\fR]
-Mute mirrored audio for one receiver, or all receivers if no target is supplied.
+Mute receiver audio for one receiver, or all receivers if no target is supplied.
 .TP
 .B unmute [\fITARGET\fR]
-Unmute mirrored audio for one receiver, or all receivers if no target is supplied.
+Unmute receiver audio for one receiver, or all receivers if no target is supplied.
 .SH OPTIONS
 .TP
 .B \-socket \fIPATH\fR

@@ -32,6 +32,7 @@ type ReceiverProfile string
 
 const (
 	ReceiverProfileModern    ReceiverProfile = "modern"
+	ReceiverProfileRAOP      ReceiverProfile = "raop"
 	ReceiverProfileRoku      ReceiverProfile = "roku"
 	ReceiverProfileLG        ReceiverProfile = "lg"
 	ReceiverProfileAppleTV3  ReceiverProfile = "appletv3"
@@ -66,6 +67,10 @@ type ReceiverConfig struct {
 	AudioDropEvery int
 	AudioJitter    time.Duration
 	VideoProbe     func(timestampMillis uint32, presentedAt time.Time)
+	// AudioProbe observes simulated playout. The callback must not block.
+	AudioProbe func(pcmHash uint64, deadline, presentedAt time.Time)
+	// RAOPAuthSetup requires the classic preliminary auth-setup request.
+	RAOPAuthSetup bool
 	// ForceNTP exercises CoreUtils media independently of PTP advertisement.
 	ForceNTP bool
 	// HidePasswordStatus keeps configured password/Digest authentication active
@@ -281,6 +286,9 @@ func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 		profile.displayWidth = cfg.DisplayWidth
 		profile.displayHeight = cfg.DisplayHeight
 	}
+	if cfg.Profile == ReceiverProfileRAOP && cfg.Auth != ReceiverAuthNone && cfg.Auth != ReceiverAuthDigest {
+		return nil, fmt.Errorf("classic RAOP test receiver supports none or digest authentication")
+	}
 	switch cfg.Auth {
 	case ReceiverAuthNone:
 		if cfg.Code != "" {
@@ -350,6 +358,11 @@ func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 
 func receiverProfile(profile ReceiverProfile) (receiverProfileSpec, error) {
 	switch profile {
+	case ReceiverProfileRAOP:
+		return receiverProfileSpec{
+			name: "doubletake RAOP test receiver", model: "RAOP", manufacturer: "doubletake",
+			timingProtocol: timingProtocolNTP, ntpInitiator: receiverNTPReceiver, audioCodec: AudioCodecALAC,
+		}, nil
 	case ReceiverProfileModern:
 		return receiverProfileSpec{
 			name:                     "doubletake modern Apple test receiver",
@@ -590,6 +603,9 @@ type receiverConnection struct {
 	legacyFairPlayIV  []byte
 	legacyFairPlaySet bool
 	sessionState      receiverSessionState
+	raopAnnounced     bool
+	raopAuthSetup     bool
+	raopVolume        float64
 	recorded          bool
 }
 
@@ -763,6 +779,9 @@ func receiverOK(body []byte, contentType string) receiverResponse {
 
 func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse, *receiverPairingSessionKeys) {
 	s := c.server
+	if s.cfg.Profile == ReceiverProfileRAOP {
+		return c.dispatchClassicAudio(request), nil
+	}
 	path := requestPath(request.uri)
 	switch {
 	case request.method == "GET" && path == "/info":
@@ -1339,7 +1358,7 @@ func (c *receiverConnection) ensureMedia() error {
 		}
 		playback = &receiverPlaybackConfig{NetworkNow: now, Timing: c.timingProtocol, Timeline: 0x4454424c54414b45,
 			AudioDropEvery: c.server.cfg.AudioDropEvery, AudioJitter: c.server.cfg.AudioJitter,
-			VideoProbe: c.server.cfg.VideoProbe}
+			VideoProbe: c.server.cfg.VideoProbe, AudioProbe: c.server.cfg.AudioProbe}
 	}
 	media, err := newReceiverMediaSession(c.server.ctx, receiverMediaConfig{
 		BindIP:            controlLocalIP(c.conn),
@@ -1453,6 +1472,10 @@ func (c *receiverConnection) configureAudioPlayback(stream map[string]any) error
 			port = plistInt(control["streamConnectionKeyPort"])
 		}
 	}
+	return c.media.playback.configureAudio(AudioCodec(plistInt(stream["ct"])), key, iv, chacha, c.audioResend(port))
+}
+
+func (c *receiverConnection) audioResend(port int) func(uint16, uint16) error {
 	var resend func(uint16, uint16) error
 	if peer, ok := c.conn.RemoteAddr().(*net.TCPAddr); ok && port > 0 {
 		conn := c.media.audioRTCPConn
@@ -1468,7 +1491,7 @@ func (c *receiverConnection) configureAudioPlayback(stream map[string]any) error
 			return err
 		}
 	}
-	return c.media.playback.configureAudio(AudioCodec(plistInt(stream["ct"])), key, iv, chacha, resend)
+	return resend
 }
 
 func receiverDataStreamKey(secret []byte, streamID uint64) ([]byte, error) {

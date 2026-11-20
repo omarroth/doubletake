@@ -18,6 +18,8 @@ it listens only on the IPv4 loopback address.
 .SH PROTOCOL COVERAGE AND LIMITATIONS
 The profiles exercise independent pairing, SETUP-order, timing, FairPlay, and
 audio-layout combinations observed across first- and third-party receivers.
+The \fBraop\fR profile validates classic UDP/ALAC audio, NTP timing, and
+retransmission. It supports \fBnone\fR and \fBdigest\fR authentication.
 .PP
 Profile names select synthetic receiver-side validation presets only. The
 sender does not branch on those names, or on the advertised receiver name,
@@ -25,7 +27,7 @@ model, manufacturer, or an exact feature-mask fingerprint. It selects behavior
 from advertised capabilities, receiver implementation version where necessary,
 and the protocol that actually completes.
 .PP
-The sender always starts with the control-only SETUP sequence. A fixture which
+The mirroring sender starts with the control-only SETUP sequence. A fixture which
 explicitly rejects that control shape
 exercises one bounded transition to legacy media-first SETUP. Feature 59 affects
 only the initial audio descriptor: it selects
@@ -184,7 +186,7 @@ startup.
 .TP
 .B \-profile \fIPROFILE\fR
 Receiver-side validation preset: \fBmodern\fR, \fBroku\fR, \fBlg\fR,
-\fBappletv3\fR, \fBuxplay\fR, or \fBairserver\fR. The default is
+\fBappletv3\fR, \fBuxplay\fR, \fBairserver\fR, or \fBraop\fR. The default is
 .BR roku .
 .TP
 .B \-auth \fIMODE\fR

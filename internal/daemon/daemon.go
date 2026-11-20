@@ -56,6 +56,8 @@ type Request struct {
 // StreamInfo describes one active (or connecting) mirror stream.
 type StreamInfo struct {
 	Device          string             `json:"device"`
+	AudioOnly       bool               `json:"audio_only,omitempty"`
+	AudioLeadMS     int64              `json:"audio_lead_ms,omitempty"`
 	DeviceIP        string             `json:"device_ip"`
 	State           State              `json:"state"`
 	HasAudio        bool               `json:"has_audio"`
@@ -99,11 +101,12 @@ type Response struct {
 
 // DeviceInfo is a simplified view of a discovered AirPlay device.
 type DeviceInfo struct {
-	Name     string `json:"name"`
-	Model    string `json:"model"`
-	IP       string `json:"ip"`
-	Port     int    `json:"port"`
-	DeviceID string `json:"device_id"`
+	Name      string `json:"name"`
+	Model     string `json:"model"`
+	IP        string `json:"ip"`
+	Port      int    `json:"port"`
+	DeviceID  string `json:"device_id"`
+	AudioOnly bool   `json:"audio_only,omitempty"`
 }
 
 // Config holds daemon configuration.
@@ -232,6 +235,7 @@ type activeStream struct {
 	state          State
 	audioMuted     bool
 	session        *airplay.MirrorSession
+	raop           *airplay.RAOPSession
 	client         *airplay.AirPlayClient
 	sink           *airplay.BroadcastSink // fan-out video sink (nil when no broadcast)
 	captureGroup   *videoCaptureGroup     // encoder group selected from the resolved nominal canvas
@@ -269,7 +273,7 @@ type videoCaptureGroup struct {
 type daemonCleanup struct {
 	cancels      []context.CancelFunc
 	sinks        []*airplay.BroadcastSink
-	sessions     []*airplay.MirrorSession
+	sessions     []io.Closer
 	clients      []*airplay.AirPlayClient
 	captures     []*airplay.ScreenCapture
 	preparations []*airplay.CapturePreparation
@@ -287,6 +291,10 @@ func (cleanup *daemonCleanup) addStream(entry *activeStream) {
 	if entry.session != nil {
 		cleanup.sessions = append(cleanup.sessions, entry.session)
 		entry.session = nil
+	}
+	if entry.raop != nil {
+		cleanup.sessions = append(cleanup.sessions, entry.raop)
+		entry.raop = nil
 	}
 	if entry.client != nil {
 		cleanup.clients = append(cleanup.clients, entry.client)
@@ -530,10 +538,18 @@ func (d *Daemon) backgroundDiscover(ctx context.Context) {
 				known[dev.IP] = dev
 			}
 
-			// Update last-seen timestamps and merge new devices
+			// The existing control API uses IP addresses as target keys.
+			// Prefer the AirPlay service when unrelated advertisements at
+			// one IP cannot be combined by device ID.
+			seen := make(map[string]airplay.AirPlayDevice)
 			for _, dev := range found {
-				d.deviceLastSeen[dev.IP] = now
-				known[dev.IP] = dev // add or update
+				if previous, ok := seen[dev.IP]; !ok || previous.RAOPOnly && !dev.RAOPOnly {
+					seen[dev.IP] = dev
+				}
+			}
+			for ip, dev := range seen {
+				d.deviceLastSeen[ip] = now
+				known[ip] = dev
 			}
 
 			// Rebuild device list, dropping anything older than TTL
@@ -646,11 +662,17 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 			}
 			source = s.captureGroup.source
 		}
+		var audioLeadMS int64
+		if s.raop != nil {
+			audioLeadMS = s.raop.PlayoutLatency().Milliseconds()
+		}
 		streams = append(streams, StreamInfo{
+			AudioOnly:              s.raop != nil,
+			AudioLeadMS:            audioLeadMS,
 			Device:                 s.device,
 			DeviceIP:               s.deviceIP,
 			State:                  s.state,
-			HasAudio:               s.session != nil && s.session.HasAudio(),
+			HasAudio:               s.raop != nil || s.session != nil && s.session.HasAudio(),
 			AudioMuted:             s.audioMuted,
 			CredentialKind:         waitingCredentialKind(s),
 			Width:                  format.Width,
@@ -845,6 +867,14 @@ func (d *Daemon) handleConnect(req Request) Response {
 		port = 7000
 	}
 
+	var audioDevice *airplay.AirPlayDevice
+	for _, device := range d.devices {
+		if device.IP == target && device.UsesClassicRAOP() && (req.Port == 0 || device.RAOP.Port == port) {
+			audioDevice = &device
+			break
+		}
+	}
+
 	// Create the context before publishing the entry so a concurrent disconnect
 	// can always cancel the connection goroutine.
 	connCtx, cancel := context.WithCancel(context.Background())
@@ -863,7 +893,7 @@ func (d *Daemon) handleConnect(req Request) Response {
 
 	go func() {
 		defer d.streamWorkers.Done()
-		d.connectAndStream(connCtx, entry, target, port, req.Pin, req.DeviceID)
+		d.connectAndStream(connCtx, entry, target, port, req.Pin, req.DeviceID, audioDevice)
 	}()
 
 	d.mu.Lock()
@@ -910,7 +940,7 @@ func (d *Daemon) pickFreeDeviceLocked(preferredPort int) (string, int) {
 	return "", 0
 }
 
-func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, target string, port int, suppliedCredential, expectedDeviceID string) {
+func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, target string, port int, suppliedCredential, expectedDeviceID string, audioDevice *airplay.AirPlayDevice) {
 	// removeStream cleans up this stream's entry and tears down its capture group
 	// if no other streams use that group.
 	removeStream := func(msg string) {
@@ -944,6 +974,15 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	credential := d.cfg.Code
 	if suppliedCredential != "" {
 		credential = suppliedCredential
+	}
+	if audioDevice != nil {
+		err := d.streamRAOP(ctx, entry, *audioDevice, credential, expectedDeviceID)
+		if err != nil && ctx.Err() == nil {
+			removeStream(err.Error())
+		} else {
+			removeStream("")
+		}
+		return
 	}
 	connectClient := func() (*airplay.AirPlayClient, *airplay.ReceiverInfo, error) {
 		var next *airplay.AirPlayClient
@@ -1430,6 +1469,79 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	}
 
 	log.Printf("[daemon] stream ended for %s", target)
+}
+
+func (d *Daemon) streamRAOP(ctx context.Context, entry *activeStream, device airplay.AirPlayDevice, credential, expectedID string) error {
+	if d.cfg.NoAudio {
+		return errors.New("the receiver is audio-only and audio is disabled")
+	}
+	if err := d.credStore.CheckRAOPReceiver(expectedID, device.DeviceID); err != nil {
+		return err
+	}
+	config := airplay.RAOPConfig{Password: credential, PortMin: d.cfg.PortMin, PortMax: d.cfg.PortMax}
+	d.mu.Lock()
+	if d.streams[device.IP] != entry {
+		d.mu.Unlock()
+		return context.Canceled
+	}
+	entry.device, entry.deviceID = device.Name, device.DeviceID
+	for _, destination := range d.streams {
+		if destination.raop != nil {
+			config.PlayoutLatency = destination.raop.PlayoutLatency()
+			break
+		}
+	}
+	d.mu.Unlock()
+
+	session, err := airplay.OpenRAOP(ctx, device, config)
+	if errors.Is(err, airplay.ErrCredentialsRequired) && credential == "" {
+		d.mu.Lock()
+		if d.streams[device.IP] != entry {
+			d.mu.Unlock()
+			return context.Canceled
+		}
+		entry.state = StatePINRequired
+		entry.credentialKind = CredentialKindPassword
+		d.mu.Unlock()
+		select {
+		case config.Password = <-entry.credentialCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		session, err = airplay.OpenRAOP(ctx, device, config)
+	}
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	capture, err := d.audioCapture.Acquire(ctx, d.cfg.TestMode, airplay.AudioCodecALAC, d.cfg.AudioSource)
+	if err != nil {
+		return fmt.Errorf("RAOP audio capture: %w", err)
+	}
+	defer capture.Stop()
+
+	d.mu.Lock()
+	if d.streams[device.IP] != entry {
+		d.mu.Unlock()
+		return context.Canceled
+	}
+	// A concurrent SETUP may have finished while this one was negotiating.
+	// Keep the established lead so existing rooms can play continuously.
+	for _, destination := range d.streams {
+		if destination.raop != nil {
+			activeLead := destination.raop.PlayoutLatency()
+			if activeLead != session.PlayoutLatency() {
+				d.mu.Unlock()
+				return fmt.Errorf("RAOP playout lead differs from the active rooms (%v versus %v)", session.PlayoutLatency(), activeLead)
+			}
+		}
+	}
+	entry.raop = session
+	entry.state = StateStreaming
+	d.mu.Unlock()
+
+	log.Printf("[daemon] streaming RAOP audio to %s (%s)", device.Name, device.IP)
+	return session.Stream(ctx, capture)
 }
 
 // retryMirrorSetupAfterDigestChallenge handles receivers which reveal a
@@ -1933,9 +2045,11 @@ func (d *Daemon) handleSetMute(req Request, muted bool) Response {
 		return resp
 	}
 
-	sessions := make([]*airplay.MirrorSession, 0, len(targets))
+	sessions := make([]interface{ SetAudioMuted(bool) error }, 0, len(targets))
 	for _, t := range targets {
-		if t.session != nil && (d.cfg.NoAudio || t.session.HasAudio()) {
+		if t.raop != nil {
+			sessions = append(sessions, t.raop)
+		} else if t.session != nil && (d.cfg.NoAudio || t.session.HasAudio()) {
 			sessions = append(sessions, t.session)
 		}
 	}
@@ -1982,12 +2096,17 @@ func (d *Daemon) detachAllLocked() daemonCleanup {
 func toDeviceInfos(devices []airplay.AirPlayDevice) []DeviceInfo {
 	infos := make([]DeviceInfo, len(devices))
 	for i, d := range devices {
+		port := d.Port
+		if d.UsesClassicRAOP() {
+			port = d.RAOP.Port
+		}
 		infos[i] = DeviceInfo{
-			Name:     d.Name,
-			Model:    d.Model,
-			IP:       d.IP,
-			Port:     d.Port,
-			DeviceID: d.DeviceID,
+			Name:      d.Name,
+			Model:     d.Model,
+			IP:        d.IP,
+			Port:      port,
+			DeviceID:  d.DeviceID,
+			AudioOnly: d.UsesClassicRAOP(),
 		}
 	}
 	return infos

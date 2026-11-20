@@ -15,7 +15,7 @@ func TestConsumeAirPlayEntriesCancellationDoesNotWaitForChannelClose(t *testing.
 	entries := make(chan *zeroconf.ServiceEntry)
 	done := make(chan error, 1)
 	go func() {
-		done <- consumeAirPlayEntries(ctx, entries, nil)
+		done <- consumeAirPlayEntries(ctx, entries, nil, nil)
 	}()
 
 	cancel()
@@ -42,7 +42,7 @@ func TestConsumeAirPlayEntriesReportsParsedDevices(t *testing.T) {
 	devices := make(chan AirPlayDevice, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- consumeAirPlayEntries(ctx, entries, func(device AirPlayDevice) {
+		done <- consumeAirPlayEntries(ctx, entries, nil, func(device AirPlayDevice) {
 			devices <- device
 		})
 	}()
@@ -411,5 +411,53 @@ func TestCoreUtilsPairingCapabilityIsIndependentOfThirdPartyBits(t *testing.T) {
 
 	if (*ReceiverInfo)(nil).supportsCoreUtilsPairing() {
 		t.Fatal("nil ReceiverInfo supports CoreUtils pairing")
+	}
+}
+
+func TestDiscoveryKeepsAirPlayAndRAOPServiceCapabilitiesSeparate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	screen := make(chan *zeroconf.ServiceEntry)
+	audio := make(chan *zeroconf.ServiceEntry)
+	updates := make(chan AirPlayDevice, 3)
+	go consumeAirPlayEntries(ctx, screen, audio, func(device AirPlayDevice) { updates <- device })
+
+	next := func(entries chan<- *zeroconf.ServiceEntry, entry *zeroconf.ServiceEntry) AirPlayDevice {
+		t.Helper()
+		select {
+		case entries <- entry:
+		case <-ctx.Done():
+			t.Fatal("mDNS consumer stopped before reading the entry")
+		}
+		select {
+		case device := <-updates:
+			return device
+		case <-ctx.Done():
+			t.Fatal("mDNS consumer did not report the entry")
+			return AirPlayDevice{}
+		}
+	}
+
+	ap := zeroconf.NewServiceEntry("Display", "_airplay._tcp", "local.")
+	ap.AddrIPv4, ap.Port = []net.IP{net.ParseIP("192.0.2.1")}, 7000
+	ap.Text = []string{"deviceid=12:34:56:78:AB:CD", "pk=display-key", "features=0x480"}
+	raop := zeroconf.NewServiceEntry("12345678ABCD@Display", "_raop._tcp", "local.")
+	raop.AddrIPv4, raop.Port = ap.AddrIPv4, 5000
+	raop.Text = []string{"pk=audio-key", "cn=1", "et=0", "am=Speaker"}
+	only := next(audio, raop)
+	if !only.RAOPOnly || only.Name != "Display" || only.Port != 5000 || only.Model != "Speaker" || only.PK != "" {
+		t.Fatalf("RAOP-only announcement: %+v", only)
+	}
+
+	both := next(screen, ap)
+	if both.RAOPOnly || both.UsesClassicRAOP() || both.Port != 7000 || both.PK != "display-key" ||
+		both.RAOP == nil || both.RAOP.Port != 5000 || both.RAOP.TXT["pk"] != "audio-key" {
+		t.Fatalf("combined announcement: %+v", both)
+	}
+
+	other := zeroconf.NewServiceEntry("12345678ABCD@Display", "_raop._tcp", "local.")
+	other.AddrIPv4, other.Port = []net.IP{net.ParseIP("192.0.2.2")}, 5001
+	if device := next(audio, other); !device.RAOPOnly || device.Port != 5001 {
+		t.Fatalf("merged addresses based on advertised ID alone: %+v", device)
 	}
 }

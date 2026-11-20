@@ -96,7 +96,7 @@ func receiverREDHeaders(payload []byte) (prefix int, offsets []uint32, lengths [
 }
 
 func (p *receiverPlayback) audioPacket(packet []byte, retransmitted bool) {
-	if len(packet) < 12 || packet[0] != 0x80 || (packet[1] != 96 && packet[1] != 97) {
+	if len(packet) < 12 || packet[0] != 0x80 || (packet[1]&0x7f != 96 && packet[1]&0x7f != 97) {
 		p.fail(fmt.Errorf("invalid receiver audio RTP packet"))
 		return
 	}
@@ -125,7 +125,7 @@ func (p *receiverPlayback) audioPacket(packet []byte, retransmitted bool) {
 	var offsets []uint32
 	var lengths []int
 	var err error
-	if packet[1] == 97 {
+	if packet[1]&0x7f == 97 {
 		prefix, offsets, lengths, err = receiverREDHeaders(payload)
 		if err != nil {
 			p.fail(err)

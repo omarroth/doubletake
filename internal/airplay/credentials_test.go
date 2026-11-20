@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -209,5 +210,29 @@ func TestRestorePairingCredentialsRejectsUnknownProtocol(t *testing.T) {
 	}
 	if client.PairKeys != nil || client.PairingProtocol() != PairingProtocolUnknown {
 		t.Fatal("failed restore partially mutated the client")
+	}
+}
+
+func TestRAOPDoesNotBypassSavedPairing(t *testing.T) {
+	store, err := NewCredentialStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const advertised = "12:34:56:78:AB:CD"
+	if err := store.CheckRAOPReceiver("", advertised); err != nil {
+		t.Fatalf("first contact: %v", err)
+	}
+	if err := store.CheckRAOPReceiver("12:34:56:78:AB:CE", advertised); !errors.Is(err, ErrReceiverNotAuthenticated) {
+		t.Fatalf("mismatched device ID: %v", err)
+	}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save("12:34:56:78:ab:cd", "paired-controller", pub, priv); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CheckRAOPReceiver("", advertised); !errors.Is(err, ErrReceiverNotAuthenticated) {
+		t.Fatalf("saved lowercase ID must prevent classic playback: %v", err)
 	}
 }

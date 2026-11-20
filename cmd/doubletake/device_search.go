@@ -31,7 +31,7 @@ func (l *stableDeviceList) upsert(device airplay.AirPlayDevice) (index int, adde
 		displayChanged = previous.Name != device.Name ||
 			previous.Model != device.Model ||
 			previous.IP != device.IP ||
-			previous.Port != device.Port
+			previous.Port != device.Port || previous.UsesClassicRAOP() != device.UsesClassicRAOP()
 		l.devices[index] = device
 		return index, false, displayChanged
 	}
@@ -237,8 +237,11 @@ func printDiscoveredDevice(out io.Writer, index int, device airplay.AirPlayDevic
 	}
 	model := safeTerminalText(device.Model)
 	suffix := ""
+	if device.UsesClassicRAOP() {
+		suffix = " [audio only]"
+	}
 	if updated {
-		suffix = " (updated)"
+		suffix += " (updated)"
 	}
 	if model == "" {
 		fmt.Fprintf(out, "  [%d] %s - %s%s\n", index+1, name, safeTerminalText(device.IP), suffix)

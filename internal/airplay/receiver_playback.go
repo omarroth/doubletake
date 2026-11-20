@@ -86,6 +86,7 @@ type receiverPlaybackConfig struct {
 	AudioDropEvery int
 	AudioJitter    time.Duration
 	VideoProbe     func(uint32, time.Time)
+	AudioProbe     func(uint64, time.Time, time.Time)
 }
 
 type receiverPlayback struct {
@@ -283,7 +284,11 @@ func (p *receiverPlayback) decodedAudio(sample receiverDecodedSample) {
 		p.stats.AudioSquares += float64(value) * float64(value)
 	}
 	p.statsMu.Unlock()
-	p.schedule(receiverPlayoutEvent{pts: sample.PTS, samples: count})
+	event := receiverPlayoutEvent{pts: sample.PTS, samples: count}
+	if p.cfg.AudioProbe != nil {
+		event.hash = receiverChecksum(0, sample.Data)
+	}
+	p.schedule(event)
 }
 
 type receiverPlayoutEvent struct {
@@ -383,6 +388,9 @@ func (p *receiverPlayback) run() {
 			p.statsMu.Unlock()
 			if event.hasMarker {
 				p.cfg.VideoProbe(event.marker, presented)
+			}
+			if !event.video && p.cfg.AudioProbe != nil {
+				p.cfg.AudioProbe(event.hash, event.deadline, presented)
 			}
 		}
 	}

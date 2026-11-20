@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -33,6 +34,24 @@ type AirPlayDevice struct {
 	PI              string
 	PSI             string
 	RawTXT          map[string]string
+	RAOP            *RAOPAdvertisement
+	RAOPOnly        bool
+}
+
+// RAOPAdvertisement keeps the audio endpoint and capabilities independent of
+// the AirPlay service. The services may use different ports and public keys.
+type RAOPAdvertisement struct {
+	IP   string
+	Port int
+	TXT  map[string]string
+}
+
+// UsesClassicRAOP selects the separate audio endpoint for speakers. A
+// dual-advertised device with unknown screen capabilities keeps the AirPlay
+// path, where /info can complete the capability report.
+func (d AirPlayDevice) UsesClassicRAOP() bool {
+	knownFeatures := d.Features != 0 || len(d.FeaturesEx) != 0
+	return d.RAOP != nil && (d.RAOPOnly || knownFeatures && !d.SupportsScreen())
 }
 
 // FeatureSet is AirPlay's arbitrary-length, little-endian feature bit vector.
@@ -81,7 +100,14 @@ func (f *FeatureSet) UnmarshalPlist(unmarshal func(interface{}) error) error {
 // DiscoverAirPlayDevices browses the local network for AirPlay receivers.
 func DiscoverAirPlayDevices(ctx context.Context) ([]AirPlayDevice, error) {
 	var devices []AirPlayDevice
+	indices := make(map[discoveryIdentity]int)
 	err := BrowseAirPlayDevices(ctx, func(device AirPlayDevice) {
+		key := discoveryKey(device)
+		if index, ok := indices[key]; ok {
+			devices[index] = device
+			return
+		}
+		indices[key] = len(devices)
 		devices = append(devices, device)
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errNoAirPlayMDNSInterfaces) {
@@ -103,38 +129,106 @@ func BrowseAirPlayDevices(ctx context.Context, onDevice func(AirPlayDevice)) err
 		return errNoAirPlayMDNSInterfaces
 	}
 
-	resolver, err := zeroconf.NewResolver(
-		zeroconf.SelectIfaces(ifaces),
-		zeroconf.SelectIPTraffic(traffic),
-	)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	browse := func(service string) (<-chan *zeroconf.ServiceEntry, error) {
+		// One resolver per query: zeroconf's browse loop owns and closes
+		// its resolver's sockets when the query ends.
+		resolver, err := zeroconf.NewResolver(zeroconf.SelectIfaces(ifaces), zeroconf.SelectIPTraffic(traffic))
+		if err != nil {
+			return nil, fmt.Errorf("zeroconf resolver: %w", err)
+		}
+		entries := make(chan *zeroconf.ServiceEntry, 16)
+		if err := resolver.Browse(ctx, service, "local.", entries); err != nil {
+			return nil, fmt.Errorf("browse %s: %w", service, err)
+		}
+		return entries, nil
+	}
+	screen, err := browse("_airplay._tcp")
 	if err != nil {
-		return fmt.Errorf("zeroconf resolver: %w", err)
+		return err
 	}
-
-	entries := make(chan *zeroconf.ServiceEntry, 16)
-	if err := resolver.Browse(ctx, "_airplay._tcp", "local.", entries); err != nil {
-		return fmt.Errorf("browse: %w", err)
+	audio, err := browse("_raop._tcp")
+	if err != nil {
+		return err
 	}
-
-	return consumeAirPlayEntries(ctx, entries, onDevice)
+	return consumeAirPlayEntries(ctx, screen, audio, onDevice)
 }
 
-func consumeAirPlayEntries(ctx context.Context, entries <-chan *zeroconf.ServiceEntry, onDevice func(AirPlayDevice)) error {
-	for {
+type discoveryIdentity struct {
+	ip, id, service string
+	port            int
+}
+
+func discoveryKey(device AirPlayDevice) discoveryIdentity {
+	if device.DeviceID != "" {
+		id := strings.ToLower(strings.ReplaceAll(device.DeviceID, ":", ""))
+		return discoveryIdentity{ip: device.IP, id: id}
+	}
+	return discoveryIdentity{ip: device.IP, port: device.Port, service: device.Name}
+}
+
+func consumeAirPlayEntries(ctx context.Context, screen, audio <-chan *zeroconf.ServiceEntry, onDevice func(AirPlayDevice)) error {
+	devices := make(map[discoveryIdentity]AirPlayDevice)
+	for screen != nil || audio != nil {
+		var device *AirPlayDevice
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case entry, ok := <-entries:
+		case entry, ok := <-screen:
 			if !ok {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				return fmt.Errorf("mDNS browse stopped unexpectedly")
+				screen = nil
+				continue
 			}
-			if device := parseServiceEntry(entry); device != nil && onDevice != nil {
-				onDevice(*device)
+			device = parseServiceEntry(entry)
+		case entry, ok := <-audio:
+			if !ok {
+				audio = nil
+				continue
+			}
+			device = parseRAOPServiceEntry(entry)
+		}
+		if device == nil || onDevice == nil {
+			continue
+		}
+		key := discoveryKey(*device)
+		if previous, ok := devices[key]; ok {
+			if device.RAOPOnly && !previous.RAOPOnly {
+				previous.RAOP = device.RAOP
+				*device = previous
+			} else if !device.RAOPOnly {
+				device.RAOP = previous.RAOP
 			}
 		}
+		devices[key] = *device
+		onDevice(*device)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("mDNS browse stopped unexpectedly")
+}
+
+func parseRAOPServiceEntry(entry *zeroconf.ServiceEntry) *AirPlayDevice {
+	device := parseServiceEntry(entry)
+	if device == nil || device.Port < 1 || device.Port > 65535 {
+		return nil
+	}
+	id, name, found := strings.Cut(device.Name, "@")
+	if !found || len(id) != 12 || name == "" {
+		return nil
+	}
+	mac, err := hex.DecodeString(id)
+	if err != nil {
+		return nil
+	}
+	txt := device.RawTXT
+	// Do not populate AirPlay fields from a separate service's TXT record.
+	return &AirPlayDevice{
+		Name: name, Model: txt["am"], IP: device.IP, Port: device.Port,
+		DeviceID: strings.ToUpper(net.HardwareAddr(mac).String()),
+		RAOPOnly: true,
+		RAOP:     &RAOPAdvertisement{IP: device.IP, Port: device.Port, TXT: txt},
 	}
 }
 
@@ -234,7 +328,7 @@ func isUsableMDNSAddress(ip net.IP) bool {
 }
 
 func parseServiceEntry(entry *zeroconf.ServiceEntry) *AirPlayDevice {
-	if len(entry.AddrIPv4) == 0 && len(entry.AddrIPv6) == 0 {
+	if entry == nil || len(entry.AddrIPv4) == 0 && len(entry.AddrIPv6) == 0 {
 		return nil
 	}
 

@@ -434,6 +434,11 @@ func (c *AirPlayClient) SetAdvertisement(device AirPlayDevice) {
 func cloneAirPlayDevice(device AirPlayDevice) AirPlayDevice {
 	device.FeaturesEx = device.FeaturesEx.clone()
 	device.RawTXT = cloneTXT(device.RawTXT)
+	if device.RAOP != nil {
+		endpoint := *device.RAOP
+		endpoint.TXT = cloneTXT(endpoint.TXT)
+		device.RAOP = &endpoint
+	}
 	return device
 }
 
