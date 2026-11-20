@@ -156,11 +156,8 @@ jobs:
           merge-multiple: true
       - name: Validate packages and create checksums
         run: |
+          scripts/release-checksums.sh release "$VERSION" linux-x86_64 linux-arm64
           cd release
-          for target in linux-x86_64 linux-arm64; do
-            test -s "doubletake-${VERSION}-${target}.tar.gz"
-          done
-          sha256sum "doubletake-${VERSION}-linux-x86_64.tar.gz" "doubletake-${VERSION}-linux-arm64.tar.gz" > SHA256SUMS
           sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:

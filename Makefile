@@ -40,7 +40,9 @@ doubletake-ctl-release:
 
 package-release:
 	+SOURCE_DATE_EPOCH='$(SOURCE_DATE_EPOCH)' scripts/package-release.sh '$(VERSION)' '$(TARGET)' '$(RELEASE_DIR)' '$(DISTDIR)'
-	cd '$(DISTDIR)' && sha256sum 'doubletake-$(VERSION)-linux-'*.tar.gz > SHA256SUMS
+	@set --; for target in linux-x86_64 linux-arm64; do \
+		if test -f '$(DISTDIR)/doubletake-$(VERSION)-'$$target.tar.gz; then set -- "$$@" "$$target"; fi; \
+	done; scripts/release-checksums.sh '$(DISTDIR)' '$(VERSION)' "$$@"
 
 release: doubletake-release doubletake-ctl-release
 	$(MAKE) package-release
