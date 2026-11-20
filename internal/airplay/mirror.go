@@ -1513,7 +1513,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		if !adaptiveAudioLatency || !mediaDataControlEnabled || mediaDataControlPort <= 0 {
 			audioLatencyTiers = nil
 		}
-		as, err := session.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, policy.audioRFC2198, audioLatencyTiers, audioCtrlConn, audioDataConn)
+		as, err := c.setupAudioStream(audioDataPort, audioControlPort, audioKey, audioIV, audioChaChaKey, audioMode, audioCT, audioLatencySamples, policy.audioRFC2198, audioLatencyTiers, audioCtrlConn, audioDataConn)
 		if err != nil {
 			audioCtrlConn.Close()
 			audioDataConn.Close()
@@ -2605,6 +2605,10 @@ func (s *MirrorSession) AudioStream() *AudioStream {
 
 // ntpTimingResponder replies to NTP timing requests from the receiver.
 func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
+	respondToNTPTiming(ctx, conn, ntpBootTimestamp, nil)
+}
+
+func respondToNTPTiming(ctx context.Context, conn net.PacketConn, clock func() uint64, peer net.IP) {
 	buf := make([]byte, 128)
 	for {
 		select {
@@ -2631,6 +2635,13 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 			continue
 		}
 
+		if peer != nil {
+			udpAddr, ok := addr.(*net.UDPAddr)
+			if !ok || !udpAddr.IP.Equal(peer) {
+				continue
+			}
+		}
+
 		// Log the receiver's send timestamp for timing analysis.
 		senderTS := binary.BigEndian.Uint64(buf[24:32])
 		dbg("[NTP] receiver transmit timestamp: 0x%016x (sec=%d)", senderTS, senderTS>>32)
@@ -2644,7 +2655,7 @@ func ntpTimingResponder(ctx context.Context, conn net.PacketConn) {
 		reply[0] = 0x80
 		reply[1] = 0xd3
 
-		now := ntpBootTimestamp()
+		now := clock()
 		// Bytes 8-15: Reference = sender's transmit timestamp
 		copy(reply[8:16], buf[24:32])
 		// Bytes 16-23: Receive timestamp = now (NTP format, BE)
