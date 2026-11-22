@@ -99,6 +99,10 @@ func openPulseMonitor(ctx context.Context) (nativePCMInput, error) {
 		return nativePCMInput{}, fmt.Errorf("authorize desktop audio: %w", err)
 	}
 	client.SetVersion(auth.Version)
+	properties := proto.PropList{"application.name": proto.PropListString("doubletake")}
+	if err := client.Request(&proto.SetClientName{Props: properties}, nil); err != nil {
+		return nativePCMInput{}, fmt.Errorf("register desktop audio client: %w", err)
+	}
 	var server proto.GetServerInfoReply
 	if err := client.Request(&proto.GetServerInfo{}, &server); err != nil {
 		return nativePCMInput{}, fmt.Errorf("find default desktop audio output: %w", err)
@@ -124,7 +128,7 @@ func openPulseMonitor(ctx context.Context) (nativePCMInput, error) {
 		ChannelMap:  proto.ChannelMap{proto.ChannelLeft, proto.ChannelRight},
 		SourceIndex: sink.MonitorSourceIndex, NoMove: true, DirectOnInputIndex: proto.Undefined,
 		BufferMaxLength: 24 * fragment, BufferFragSize: fragment, AdjustLatency: true,
-		Properties:     proto.PropList{"application.name": proto.PropListString("doubletake")},
+		Properties:     properties,
 		ChannelVolumes: proto.ChannelVolumes{0x10000, 0x10000},
 	}, &stream)
 	if err != nil {
