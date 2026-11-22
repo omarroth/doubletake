@@ -80,17 +80,6 @@ jobs:
             $feature = Install-WindowsFeature Server-Media-Foundation
             if (-not $feature.Success) { throw 'Could not install Media Foundation' }
           }
-      - name: Build and test native capture without GStreamer
-        shell: bash
-        env:
-          MACOSX_DEPLOYMENT_TARGET: '13.0'
-        run: |
-          mkdir -p bin/native
-          go build -tags no_gstreamer -o bin/native/ ./cmd/doubletake
-          suffix=''
-          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
-          "bin/native/doubletake$suffix" -version
-          go test -tags no_gstreamer ./internal/airplay -run '^TestNativeDesktopPattern$' -count=1 -v
       - name: Install macOS GStreamer SDK and runtime
         if: runner.os == 'macOS'
         run: |
@@ -165,6 +154,139 @@ jobs:
             gst-inspect-1.0 "$plugin" >/dev/null
           done
           go test ./internal/daemon -run '^TestDaemonPlayMediaSource$' -count=1 -v
+
+  build-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: macos-universal
+            goarch: arm64
+            extension: tar.gz
+          - runner: windows-2025
+            target: windows-x86_64
+            goarch: amd64
+            extension: zip
+            msystem: UCRT64
+            cc: gcc
+            packages: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-fdk-aac
+          - runner: windows-11-arm
+            target: windows-arm64
+            goarch: arm64
+            extension: zip
+            msystem: CLANGARM64
+            cc: clang
+            packages: mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-fdk-aac
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '1'
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      TARGET: ${{ matrix.target }}
+      EXPECTED_ARCH: ${{ matrix.goarch }}
+      ARCHIVE_EXTENSION: ${{ matrix.extension }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        id: msys2
+        with:
+          msystem: ${{ matrix.msystem }}
+          install: ${{ matrix.packages }}
+      - name: Set up the Windows C compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+          MSYSTEM_NAME: ${{ matrix.msystem }}
+          NATIVE_CC: ${{ matrix.cc }}
+        run: |
+          $mingwBin = Join-Path $env:MSYS2_LOCATION "$($env:MSYSTEM_NAME.ToLowerInvariant())\bin"
+          $mingwBin >> $env:GITHUB_PATH
+          "MINGW_BIN=$mingwBin" >> $env:GITHUB_ENV
+          "CC=$env:NATIVE_CC" >> $env:GITHUB_ENV
+      - name: Enable Media Foundation on Windows Server
+        if: matrix.runner == 'windows-2025'
+        shell: powershell
+        run: |
+          if (-not (Test-Path "$env:WINDIR\System32\mfh264enc.dll")) {
+            $feature = Install-WindowsFeature Server-Media-Foundation
+            if (-not $feature.Success) { throw 'Could not install Media Foundation' }
+          }
+      - name: Build and package native commands
+        shell: bash
+        run: |
+          test "$(go env GOARCH)" = "$EXPECTED_ARCH"
+          version_flags="-s -w -X doubletake/internal/version.Version=$VERSION -X doubletake/internal/version.Commit=$GITHUB_SHA"
+          binaries="bin/release/$TARGET"
+          mkdir -p "$binaries"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            for arch in arm64 amd64; do
+              dir="bin/release/darwin-$arch"
+              mkdir -p "$dir"
+              GOARCH="$arch" go build -trimpath -tags no_gstreamer -ldflags "$version_flags" -o "$dir/doubletake" ./cmd/doubletake
+              GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "$version_flags" -o "$dir/doubletake-ctl" ./cmd/doubletake-ctl
+            done
+            for command in doubletake doubletake-ctl; do
+              xcrun lipo -create "bin/release/darwin-arm64/$command" "bin/release/darwin-amd64/$command" -output "$binaries/$command"
+              xcrun lipo "$binaries/$command" -verify_arch arm64 x86_64
+              codesign --force --sign - --timestamp=none "$binaries/$command"
+            done
+          else
+            go build -trimpath -tags no_gstreamer -ldflags "$version_flags" -o "$binaries/doubletake.exe" ./cmd/doubletake
+            CGO_ENABLED=0 go build -trimpath -ldflags "$version_flags" -o "$binaries/doubletake-ctl.exe" ./cmd/doubletake-ctl
+            for command in doubletake doubletake-ctl; do
+              go version -m "$binaries/$command.exe" | grep -F "GOARCH=$EXPECTED_ARCH"
+            done
+          fi
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) python scripts/package-native-release.py "$VERSION" "$TARGET" "$binaries" dist
+      - name: Verify the unpacked release and native capture
+        shell: bash
+        run: |
+          archive="dist/doubletake-$VERSION-$TARGET.$ARCHIVE_EXTENSION"
+          mkdir -p bin/unpacked
+          suffix=''
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            suffix=.exe
+            python -m zipfile -e "$archive" bin/unpacked
+          else
+            tar -xzf "$archive" -C bin/unpacked
+            codesign --verify --all-architectures bin/unpacked/doubletake
+            codesign --verify --all-architectures bin/unpacked/doubletake-ctl
+          fi
+          expected_commit=$(git rev-parse --short=12 HEAD)
+          for command in doubletake doubletake-ctl; do
+            binary="bin/unpacked/$command$suffix"
+            "$binary" -help >/dev/null
+            reported=$("$binary" -version)
+            grep -F "$VERSION" <<< "$reported"
+            grep -F "$expected_commit" <<< "$reported"
+          done
+          cmp LICENSE bin/unpacked/LICENSE
+          cmp COPYING.GPL bin/unpacked/COPYING.GPL
+          go test -tags no_gstreamer ./internal/airplay -run '^TestNativeDesktopPattern$' -count=1 -v
+      - name: Verify the optional Windows AAC-ELD runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p bin/aac-test
+          cp "$(cygpath -u "$MINGW_BIN")/libfdk-aac-2.dll" bin/aac-test/
+          go test -c -tags no_gstreamer -o bin/aac-test/airplay.test.exe ./internal/airplay
+          bin/aac-test/airplay.test.exe -test.run '^TestFDKAACELDEncodesRawFrame$' -test.v | tee bin/aac-test/output.log
+          grep -F -- '--- PASS: TestFDKAACELDEncodesRawFrame' bin/aac-test/output.log
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-${{ matrix.target }}
+          path: dist/doubletake-${{ env.VERSION }}-${{ matrix.target }}.${{ matrix.extension }}
+          if-no-files-found: error
 
   build-gstreamer:
     strategy:
@@ -270,7 +392,7 @@ jobs:
 
   package:
     runs-on: ubuntu-latest
-    needs: build-gstreamer
+    needs: [build-gstreamer, build-native]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -280,7 +402,7 @@ jobs:
           merge-multiple: true
       - name: Validate packages and create checksums
         run: |
-          scripts/release-checksums.sh release "$VERSION" linux-x86_64 linux-arm64
+          scripts/release-checksums.sh release "$VERSION" linux-x86_64 linux-arm64 macos-universal windows-x86_64 windows-arm64
           cd release
           sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v7
@@ -368,4 +490,7 @@ jobs:
           files: |
             release/doubletake-*-linux-x86_64.tar.gz
             release/doubletake-*-linux-arm64.tar.gz
+            release/doubletake-*-macos-universal.tar.gz
+            release/doubletake-*-windows-x86_64.zip
+            release/doubletake-*-windows-arm64.zip
             release/SHA256SUMS

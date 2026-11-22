@@ -103,5 +103,7 @@ clean:
 		dist|dist/|./dist|./dist/|'$(CURDIR)/dist'|'$(CURDIR)/dist/') rm -rf -- dist ;; \
 		'') ;; \
 		*) rm -f -- "$$dist"/doubletake-*-linux-x86_64.tar.gz \
-			"$$dist"/doubletake-*-linux-arm64.tar.gz "$$dist"/SHA256SUMS ;; \
+			"$$dist"/doubletake-*-linux-arm64.tar.gz "$$dist"/doubletake-*-macos-universal.tar.gz \
+			"$$dist"/doubletake-*-windows-x86_64.zip "$$dist"/doubletake-*-windows-arm64.zip \
+			"$$dist"/SHA256SUMS ;; \
 	esac

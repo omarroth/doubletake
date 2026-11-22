@@ -1,7 +1,6 @@
 # doubletake
 
 Mirror a desktop and audio to Apple TV, macOS, and compatible AirPlay receivers.
-Released packages target Linux. See the [macOS and Windows build instructions](docs/compatibility.md#macos-and-windows-development-builds) for those platforms.
 
 - Wayland and X11 screen capture, with hardware or software encoding.
 - Automatic video quality adjustment and configurable resolution.
@@ -12,6 +11,8 @@ See the [compatibility notes](docs/compatibility.md) for tested receivers,
 capture requirements, and troubleshooting.
 
 ## Install
+
+### Linux
 
 Download `doubletake-VERSION-linux-x86_64.tar.gz` or
 `doubletake-VERSION-linux-arm64.tar.gz` from
@@ -61,6 +62,27 @@ Arch users can also use the AUR packages
 [`doubletake`](https://aur.archlinux.org/packages/doubletake),
 [`doubletake-git`](https://aur.archlinux.org/packages/doubletake-git), or
 [`doubletake-bin`](https://aur.archlinux.org/packages/doubletake-bin).
+
+### macOS and Windows
+
+Download the matching archive and `SHA256SUMS` from
+[Releases](https://github.com/omarroth/doubletake/releases).
+
+| Platform | Archive |
+| --- | --- |
+| macOS 13+ on Apple silicon or Intel | `doubletake-VERSION-macos-universal.tar.gz` |
+| Windows x86-64 | `doubletake-VERSION-windows-x86_64.zip` |
+| Windows ARM64 | `doubletake-VERSION-windows-arm64.zip` |
+
+Extract the archive into a folder and run `./doubletake` on macOS or
+`.\doubletake.exe` in PowerShell. Both commands are at the top level. These
+builds use the native desktop capture and need no GStreamer installation.
+On macOS, allow Screen & System Audio Recording.
+
+For AAC-ELD on Windows, put `libfdk-aac-2.dll` alongside the executable.
+Use the MSYS2 package for [x86-64](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-fdk-aac)
+or [ARM64](https://packages.msys2.org/packages/mingw-w64-clang-aarch64-fdk-aac).
+See the [native capture compatibility notes](docs/compatibility.md#builds-without-gstreamer).
 
 ## Build from source
 

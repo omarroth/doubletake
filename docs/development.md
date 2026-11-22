@@ -88,7 +88,7 @@ Linux builds with headers outside the compiler's search path can set
 `CGO_CPPFLAGS=-I/path/to/include`. Windows builds with cgo, including
 `make doubletake-native`, look for an optional `libfdk-aac-2.dll` at startup.
 For x86-64, copy it from the [MSYS2 UCRT64 FDK-AAC package](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-fdk-aac)
-next to `doubletake.exe`. Use a DLL matching the executable architecture.
+next to `doubletake.exe`. For ARM64, use the [MSYS2 CLANGARM64 package](https://packages.msys2.org/packages/mingw-w64-clang-aarch64-fdk-aac).
 Other platforms that opt in with `-tags fdk_aac` use the `fdk-aac` pkg-config
 file and link the library directly.
 
@@ -171,14 +171,23 @@ defaults to the source commit's timestamp. CI checks staged installation,
 uninstallation, reproducible repacking, and completion against actual command
 help, including Ubuntu 20.04's bash-completion version.
 
-CI tests Go 1.25 and the current stable toolchain on both architectures, and
-builds releases with stable Go on Ubuntu 20.04. Local builds include the
-supported archives present for the selected version in `SHA256SUMS`. CI
-requires both architectures before writing the release manifest.
-Version tags publish the two complete architecture archives and a SHA-256 manifest
-only when the tagged commit is on `main`. Put release notes in an annotated tag
-message; lightweight tags fall back to the commit message. No tag or release is
-created by the local build targets.
+CI tests Go 1.25 and the current stable toolchain on both Linux architectures
+and builds the Linux release binaries on Ubuntu 20.04.
+
+The macOS and Windows release archives contain both commands and the license
+files at the top level. The macOS tarball contains universal, ad hoc signed
+binaries. The Windows ZIPs contain native x86-64 or ARM64 executables. These
+senders use `no_gstreamer`. Windows loads the optional FDK-AAC DLL at runtime.
+CI runs the unpacked commands and checks the native capture backend on all
+three runners. It also tests the matching Windows FDK-AAC runtime separately.
+
+To archive prebuilt native commands locally, use
+`python3 scripts/package-native-release.py VERSION TARGET BINARY_DIRECTORY OUTPUT_DIRECTORY`.
+Native targets are `macos-universal`, `windows-x86_64`, and `windows-arm64`.
+
+CI requires all five archives for `SHA256SUMS`. A version tag publishes the
+archives and manifest when the tagged commit is on `main`. Use an annotated
+tag for release notes. A lightweight tag uses the commit message.
 
 ## Desktop VM tests
 

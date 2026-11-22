@@ -11,10 +11,11 @@ shift 2
 archives=()
 for target in "$@"; do
     case $target in
-        linux-x86_64|linux-arm64) ;;
+        linux-x86_64|linux-arm64|macos-universal) extension=tar.gz ;;
+        windows-x86_64|windows-arm64) extension=zip ;;
         *) echo "Unsupported package target: $target" >&2; exit 2 ;;
     esac
-    archive="doubletake-$version-$target.tar.gz"
+    archive="doubletake-$version-$target.$extension"
     test -s "$archive"
     archives+=("$archive")
 done
