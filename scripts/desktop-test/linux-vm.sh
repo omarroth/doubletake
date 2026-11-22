@@ -73,8 +73,8 @@ packages=(dbus-daemon pulseaudio pulseaudio-utils python3-gi python3-gi-cairo gi
     gstreamer1.0-tools gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good
     gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-pulseaudio)
 if [[ $mode == wayland ]]; then
-    packages+=(sway wayland-utils xdg-desktop-portal-wlr pipewire wireplumber gstreamer1.0-pipewire
-        libglib2.0-bin build-essential meson pkg-config libpipewire-0.3-dev
+    packages+=(sway wayland-utils xdg-desktop-portal-wlr wireplumber
+        libglib2.0-bin build-essential meson patch pkg-config
         libwayland-dev wayland-protocols libinih-dev libgbm-dev libdrm-dev libsystemd-dev)
 else
     packages+=(xvfb x11-utils)
@@ -82,21 +82,19 @@ fi
 ssh_guest 'sudo apt-get update'
 ssh_guest sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
 if [[ $mode == wayland ]]; then
-    # Trixie's portal has a shared-memory path, but its startup check also
-    # requires DMA-BUF metadata. Allow the software-only output in this VM.
-    curl -fsSL --retry 3 https://codeload.github.com/emersion/xdg-desktop-portal-wlr/tar.gz/refs/tags/v0.7.1 \
+    # Use one PipeWire release across the server, GStreamer plugin and portal build.
+    ssh_guest sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        -t trixie-backports pipewire gstreamer1.0-pipewire libpipewire-0.3-dev
+    # Pin a portal revision with the upstream PipeWire graph trigger for
+    # Trixie's wlr-screencopy backend. The fixture patch permits software-only
+    # outputs and waits one frame for the client to settle after negotiation.
+    portal_revision=8388b8a6214470462146840e92909aff5983eeac
+    curl -fsSL --retry 3 "https://codeload.github.com/emersion/xdg-desktop-portal-wlr/tar.gz/$portal_revision" \
         -o "$work/portal.tar.gz"
-    (cd "$work" && echo '4bddc236aa9d1a2b33e7f0bef09a8712ded51e8bc335a2b6c8cd1d088863e676  portal.tar.gz' | sha256sum -c)
-    scp -q -P "$port" "${options[@]}" "$work/portal.tar.gz" "$guest:"
+    (cd "$work" && echo 'f7f3c4ca43525e41bb0caaf6ae39ba607a77624bff345d90b9bd2e4d6109569c  portal.tar.gz' | sha256sum -c)
+    scp -q -P "$port" "${options[@]}" "$work/portal.tar.gz" "$scripts/portal-wayland-vm.patch" "$guest:"
     ssh_guest 'mkdir portal-source && tar -xzf portal.tar.gz --strip-components=1 -C portal-source &&
-        python3 -c "
-from pathlib import Path
-path = Path(\"portal-source/src/screencast/screencast.c\")
-source = path.read_text()
-condition = \"(cast->ctx->state->screencast_version >= 3 &&\"
-assert source.count(condition) == 1
-path.write_text(source.replace(condition, \"(cast->ctx->gbm && cast->ctx->state->screencast_version >= 3 &&\"))
-" &&
+        patch --batch --fuzz=0 -d portal-source -p1 < portal-wayland-vm.patch &&
         meson setup portal-build portal-source -Dman-pages=disabled -Dsystemd=disabled &&
         meson compile -C portal-build'
 fi

@@ -1,0 +1,15 @@
+--- a/src/screencast/wlr_screencast.c
++++ b/src/screencast/wlr_screencast.c
+@@ -602 +602 @@
+-	} else {
++	} else if (!ctx->screencopy_manager) {
+--- a/src/screencast/pipewire_screencast.c
++++ b/src/screencast/pipewire_screencast.c
+@@ -378,0 +379,2 @@
++static void pwr_arm_process_retry(struct xdpw_screencast_instance *cast);
++
+@@ -393 +395,3 @@
+-		pw_stream_trigger_process(cast->stream);
++		/* The test client corks briefly between negotiation and PLAYING.
++		 * Let that transition settle before taking the first buffer. */
++		pwr_arm_process_retry(cast);
