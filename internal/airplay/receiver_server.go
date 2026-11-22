@@ -108,6 +108,15 @@ type ReceiverConfig struct {
 	Debug         bool
 }
 
+// AirPlayDevice returns the fixture's AirPlay discovery data for loopback tests.
+func (s *ReceiverServer) AirPlayDevice() AirPlayDevice {
+	address := s.Addr().(*net.TCPAddr)
+	return AirPlayDevice{
+		Name: s.cfg.Name, Model: s.cfg.Model, DeviceID: s.cfg.DeviceID,
+		IP: address.IP.String(), Port: address.Port, Features: s.profile.features,
+	}
+}
+
 // ReceiverStats is a race-free snapshot of protocol and media activity.
 type ReceiverStats struct {
 	Connections         uint64

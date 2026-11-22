@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -17,24 +16,28 @@ import (
 )
 
 func TestDaemonRAOPSharedAudioPlayout(t *testing.T) {
-	testSharedAudioPlayout(t, false, false)
+	testSharedAudioPlayout(t, airplay.ReceiverProfileRAOP, false)
 }
 
 func TestDaemonRAOPAndMirrorSharedAudioPlayout(t *testing.T) {
 	if err := exec.Command("gst-inspect-1.0", "openh264enc").Run(); err != nil {
 		t.Skip("requires the OpenH264 encoder")
 	}
-	airplay.SetTargetLatency(airplay.DefaultRAOPPlayoutLatency)
-	t.Cleanup(func() { airplay.SetTargetLatency(0) })
-	testSharedAudioPlayout(t, true, false)
+	testSharedAudioPlayout(t, airplay.ReceiverProfileUxPlay, false)
+}
+
+func TestDaemonRAOPAndAirPlay2AudioSharedPlayout(t *testing.T) {
+	testSharedAudioPlayout(t, airplay.ReceiverProfileRoku, false)
 }
 
 func TestDaemonNoVideoStreamsAudioToDisplayRAOPEndpoint(t *testing.T) {
-	testSharedAudioPlayout(t, false, true)
+	testSharedAudioPlayout(t, airplay.ReceiverProfileRAOP, true)
 }
 
-func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
+func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile, noVideo bool) {
 	t.Helper()
+	mirror := secondProfile == airplay.ReceiverProfileUxPlay
+	classic := secondProfile == airplay.ReceiverProfileRAOP
 	if err := exec.Command("gst-inspect-1.0", "rtponviftimestamp").Run(); err != nil {
 		t.Skip("requires GStreamer ONVIF audio timestamps")
 	}
@@ -67,13 +70,16 @@ func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
 			},
 		}
 		if i == 1 {
-			if mirror {
-				cfg.Profile = airplay.ReceiverProfileUxPlay
+			cfg.Profile = secondProfile
+			switch secondProfile {
+			case airplay.ReceiverProfileUxPlay:
 				cfg.DeviceID = "02:00:00:00:00:02"
 				cfg.DisplayWidth, cfg.DisplayHeight = 320, 180
-			} else {
+			case airplay.ReceiverProfileRAOP:
 				cfg.Auth, cfg.Code = airplay.ReceiverAuthDigest, "fixture-password"
 				cfg.RAOPAuthSetup = true
+			default:
+				cfg.RealtimeAudio = true
 			}
 		}
 		server, err := airplay.NewReceiverServer(cfg)
@@ -83,13 +89,12 @@ func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
 		defer server.Close()
 		go server.Serve(ctx)
 		receivers[i] = server
-		if i == 1 && mirror {
-			addr := server.Addr().(*net.TCPAddr)
-			devices[i] = airplay.AirPlayDevice{IP: addr.IP.String(), Port: addr.Port, DeviceID: cfg.DeviceID}
+		if i == 1 && !classic {
+			devices[i] = server.AirPlayDevice()
 		} else {
 			devices[i] = server.RAOPDevice()
 		}
-		if i == 1 && !mirror {
+		if i == 1 && classic {
 			// A dual-advertised speaker uses the RAOP service port.
 			devices[i].RAOPOnly = false
 			devices[i].Port = 7000
@@ -133,10 +138,8 @@ func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
 	}
 	connect(0, "")
 	wait("first receiver started", func() bool { return receivers[0].Stats().AudioPackets > 10 })
-	if mirror {
-		connect(1, "")
-	} else {
-		connect(1, "")
+	connect(1, "")
+	if classic {
 		wait("second receiver requests Digest password", func() bool {
 			status := d.handleStatus()
 			return status.NeedsCredential && status.CredentialKind == CredentialKindPassword
@@ -163,18 +166,25 @@ func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
 		t.Fatalf("capture/encoder sharing: %+v", status)
 	}
 	for i, entry := range status.Streams {
-		audioOnly := i == 0 || !mirror
-		if entry.AudioOnly != audioOnly || !entry.HasAudio || audioOnly && entry.AudioLeadMS != 2000 || entry.State != StateStreaming {
+		protocol, videoLead := "raop", int64(0)
+		if i == 1 && mirror {
+			protocol, videoLead = "airplay-mirror", 2000
+		} else if i == 1 && !classic {
+			protocol = "airplay2-audio"
+		}
+		if entry.AudioOnly != (videoLead == 0) || !entry.HasAudio || entry.AudioLeadMS != 2000 || entry.VideoLeadMS != videoLead ||
+			entry.Protocol != protocol || entry.TimingProtocol != "NTP" || entry.State != StateStreaming {
 			t.Fatalf("unexpected stream status: %+v", entry)
 		}
 	}
 	for i, server := range receivers {
 		stats := server.Stats()
 		playback := stats.Playback
-		if (i == 0 || !mirror) && (stats.TimingReplies != 3 || stats.VideoPackets != 0) ||
+		if (i == 0 || classic) && stats.TimingReplies != 3 ||
+			(i == 0 || !mirror) && stats.VideoPackets != 0 ||
 			i == 1 && mirror && playback.VideoPlayed == 0 ||
 			playback.AudioPeak == 0 || playback.AudioMissingSamples != 0 || playback.AudioLost != 0 ||
-			playback.DecodeErrors != 0 || playback.TimestampErrors != 0 || playback.QueueOverruns != 0 {
+			playback.DecodeErrors != 0 || playback.AudioCryptoErrors != 0 || playback.TimestampErrors != 0 || playback.QueueOverruns != 0 {
 			t.Fatalf("invalid headless audio playback: %+v", stats)
 		}
 	}
@@ -199,7 +209,7 @@ func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
 	if overlap < 20 || maxDeadlineSkew > 2*time.Millisecond || maxPlayoutSkew > 35*time.Millisecond {
 		t.Fatalf("expected at least 20 common frames aligned across both rooms")
 	}
-	if !mirror {
+	if classic {
 		firstBefore := receivers[0].Stats().ParameterRequests
 		secondBefore := receivers[1].Stats().ParameterRequests
 		if firstBefore != 2 || secondBefore != 2 {

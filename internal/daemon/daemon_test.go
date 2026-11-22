@@ -128,7 +128,7 @@ func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 		PortMax:             60010,
 		NoAudio:             true,
 	}
-	if got := d.mirrorStreamConfig(); got != want {
+	if got := d.mirrorStreamConfig(""); got != want {
 		t.Fatalf("mirror stream config = %+v, want %+v", got, want)
 	}
 }

@@ -2603,6 +2603,14 @@ func (s *MirrorSession) HasAudio() bool {
 	return s.audioStream != nil
 }
 
+// PlayoutTiming reports the timing protocol and current capture-to-playout leads.
+func (s *MirrorSession) PlayoutTiming() (clock string, video, audio time.Duration) {
+	if s.audioStream != nil && !s.noAudio {
+		audio = audioLatencyDuration(s.audioStream.currentLatencySamples())
+	}
+	return s.timingProtocol, s.timestampBias, audio
+}
+
 // SetAudioMuted updates mirrored audio volume on the receiver. AirPlay uses
 // -144 dB as its mute sentinel; unmute restores the receiver's initial volume
 // rather than forcing the old hard-coded 0 dB (full-scale) value.

@@ -348,6 +348,15 @@ func (s *AudioOnlySession) PlayoutLatency() time.Duration {
 	return audioLatencyDuration(s.stream.currentLatencySamples())
 }
 
+// PlayoutTransport reports the negotiated direct audio and clock protocols.
+func (s *AudioOnlySession) PlayoutTransport() (transport, clock string) {
+	transport = "raop"
+	if s.airPlay2 {
+		transport = "airplay2-audio"
+	}
+	return transport, s.playback.timingProtocol
+}
+
 // Stream consumes one ALAC tap. Joining another session on the same timestamped
 // capture keeps both mappings aligned at capture PTS plus the common lead.
 func (s *AudioOnlySession) Stream(ctx context.Context, capture *AudioCapture) error {

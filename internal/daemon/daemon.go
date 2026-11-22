@@ -55,11 +55,14 @@ type Request struct {
 	VolumeDB    *float64 `json:"volume_db,omitempty"`
 }
 
-// StreamInfo describes one active (or connecting) mirror stream.
+// StreamInfo describes one active or connecting destination.
 type StreamInfo struct {
 	Device          string             `json:"device"`
 	AudioOnly       bool               `json:"audio_only,omitempty"`
 	AudioLeadMS     int64              `json:"audio_lead_ms,omitempty"`
+	VideoLeadMS     int64              `json:"video_lead_ms,omitempty"`
+	Protocol        string             `json:"protocol,omitempty"`
+	TimingProtocol  string             `json:"timing_protocol,omitempty"`
 	DeviceIP        string             `json:"device_ip"`
 	State           State              `json:"state"`
 	HasAudio        bool               `json:"has_audio"`
@@ -135,7 +138,20 @@ type Config struct {
 	Code         string // default pairing/Digest credential; request Pin overrides it
 }
 
-func (d *Daemon) mirrorStreamConfig() airplay.StreamConfig {
+func (d *Daemon) mirrorStreamConfig(mediaSource string) airplay.StreamConfig {
+	lead := d.playoutLatency
+	if mediaSource == "" && !d.cfg.NoAudio && !airplay.HasExplicitTargetLatency() {
+		d.mu.Lock()
+		for _, room := range d.streams {
+			if room.audioOnly != nil {
+				if speakerLead := room.audioOnly.PlayoutLatency(); speakerLead <= 2*time.Second {
+					lead = max(lead, speakerLead)
+				}
+				break
+			}
+		}
+		d.mu.Unlock()
+	}
 	return airplay.StreamConfig{
 		FPS:                 d.cfg.FPS,
 		TargetWidth:         d.cfg.TargetWidth,
@@ -143,7 +159,7 @@ func (d *Daemon) mirrorStreamConfig() airplay.StreamConfig {
 		Bitrate:             d.cfg.Bitrate,
 		VideoCodec:          d.cfg.VideoCodec,
 		NoAudio:             d.cfg.NoAudio,
-		PlayoutLatency:      d.playoutLatency,
+		PlayoutLatency:      lead,
 		PreferredAudioCodec: d.audioCapture.PreferredCodec(),
 		PortMin:             d.cfg.PortMin,
 		PortMax:             d.cfg.PortMax,
@@ -683,17 +699,29 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 			format = s.mediaCapture.Format()
 			videoEncoders++
 		}
-		var audioLeadMS int64
+		hasAudio := s.audioOnly != nil || s.mediaCapture.HasMediaAudio() || s.mediaSource == "" && s.session != nil && !d.cfg.NoAudio && s.session.HasAudio()
+		var protocol, timing string
+		var videoLead, audioLead time.Duration
 		if s.audioOnly != nil {
-			audioLeadMS = s.audioOnly.PlayoutLatency().Milliseconds()
+			protocol, timing = s.audioOnly.PlayoutTransport()
+			audioLead = s.audioOnly.PlayoutLatency()
+		} else if s.session != nil {
+			protocol = "airplay-mirror"
+			timing, videoLead, audioLead = s.session.PlayoutTiming()
+			if !hasAudio {
+				audioLead = 0
+			}
 		}
 		streams = append(streams, StreamInfo{
 			AudioOnly:              s.audioOnly != nil,
-			AudioLeadMS:            audioLeadMS,
+			AudioLeadMS:            audioLead.Milliseconds(),
+			VideoLeadMS:            videoLead.Milliseconds(),
+			Protocol:               protocol,
+			TimingProtocol:         timing,
 			Device:                 s.device,
 			DeviceIP:               s.deviceIP,
 			State:                  s.state,
-			HasAudio:               s.audioOnly != nil || s.mediaCapture.HasMediaAudio() || s.mediaSource == "" && s.session != nil && s.session.HasAudio(),
+			HasAudio:               hasAudio,
 			AudioMuted:             s.audioMuted,
 			CredentialKind:         waitingCredentialKind(s),
 			Width:                  format.Width,
@@ -1379,7 +1407,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		return
 	}
 	defer func() { capturePreparation.Close() }()
-	streamCfg := d.mirrorStreamConfig()
+	streamCfg := d.mirrorStreamConfig(entry.mediaSource)
 	streamCfg.AutomaticHEVCAvailable = capturePreparation.AutomaticHEVCAvailable()
 	streamCfg.MeasuredVideoLatency = capturePreparation.MeasuredVideoLatency()
 	var broadcast *airplay.BroadcastCapture
