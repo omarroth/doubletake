@@ -1,6 +1,7 @@
 # doubletake
 
-Mirror a Linux desktop and audio to Apple TV, macOS, and compatible AirPlay receivers.
+Mirror a desktop and audio to Apple TV, macOS, and compatible AirPlay receivers.
+Released packages target Linux. See the [macOS and Windows build instructions](docs/compatibility.md#macos-and-windows-development-builds) for those platforms.
 
 - Wayland and X11 screen capture, with hardware or software encoding.
 - Automatic video quality adjustment and configurable resolution.

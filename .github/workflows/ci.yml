@@ -52,6 +52,7 @@ jobs:
     timeout-minutes: 15
     env:
       CGO_ENABLED: '0'
+      GST_VERSION: '1.26.11'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -64,6 +65,50 @@ jobs:
         run: go test ./internal/airplay -run 'Test(ReceiverServerRequiresPairVerifyBeforeSessionRequests|ReceiverFPSAPCompletesSenderExchange|RAOPMatchesLocalVolumeAndPreservesDaemonMute|DiscoveryPreservesLinkLocalIPv6Interface)$' -count=1
       - name: Exercise daemon socket access and exclusive instance ownership
         run: go test ./internal/daemon -run '^Test(RunRejects(SecondDaemonWithoutRemovingLiveSocket|LiveDaemonThatPredatesInstanceLock)|RemoveStaleControlSocket)$' -count=1
+      - name: Install macOS GStreamer runtime
+        if: runner.os == 'macOS'
+        run: |
+          package="gstreamer-1.0-$GST_VERSION-universal.pkg"
+          curl -fsSL --retry 3 "https://gstreamer.freedesktop.org/data/pkg/osx/$GST_VERSION/$package" -o "$package"
+          echo "bd6f3ad26126a6db726608f15622efaec383d672daa0a309775785d42c326f9c  $package" | shasum -a 256 -c
+          sudo installer -pkg "$package" -target /
+          echo /Library/Frameworks/GStreamer.framework/Versions/1.0/bin >> "$GITHUB_PATH"
+      - name: Install Windows GStreamer runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.msi"
+          $installer = Join-Path $env:RUNNER_TEMP $package
+          $runtime = Join-Path $env:RUNNER_TEMP 'gstreamer-sdk'
+          Invoke-WebRequest "https://gstreamer.freedesktop.org/pkg/windows/$env:GST_VERSION/msvc/$package" -OutFile $installer
+          if ((Get-FileHash $installer).Hash -ne '31cbc21fa0950b5c1e79c80959b2799805cb05a7a35953a13a9f790776137605') {
+            throw 'Unexpected GStreamer installer checksum'
+          }
+          $install = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/a', "`"$installer`"", '/qn', "TARGETDIR=`"$runtime`"")
+          if ($install.ExitCode -ne 0) { throw "GStreamer installer exited with $($install.ExitCode)" }
+          $gst = Get-ChildItem $runtime -Recurse -Filter gst-launch-1.0.exe | Select-Object -First 1
+          if (-not $gst) { throw 'GStreamer runtime is missing gst-launch-1.0.exe' }
+          $gst.DirectoryName >> $env:GITHUB_PATH
+      - name: Verify native capture plugins and build macOS audio helper
+        if: runner.os == 'macOS'
+        run: |
+          gst-inspect-1.0 avfvideosrc >/dev/null
+          gst-inspect-1.0 rawaudioparse >/dev/null
+          make macos-audio-helper
+          bin/doubletake-macos-audio --version
+      - name: Verify native capture plugins and media audio pipe on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for plugin in d3d11screencapturesrc wasapi2src; do gst-inspect-1.0 "$plugin" >/dev/null; done
+          go test ./internal/airplay -run '^TestWindowsMediaAudioPipe$' -count=1 -v
+      - name: Play local and HTTP media through the daemon and loopback receiver
+        shell: bash
+        run: |
+          for plugin in vp8enc vp8dec matroskamux matroskademux openh264enc rtponviftimestamp vorbisenc vorbisdec rtpL16pay souphttpsrc; do
+            gst-inspect-1.0 "$plugin" >/dev/null
+          done
+          go test ./internal/daemon -run '^TestDaemonPlayMediaSource$' -count=1 -v
 
   build-gstreamer:
     strategy:

@@ -76,16 +76,22 @@ it as `gst-plugin-va`. Older `vaapipostproc` packages do not provide that elemen
 
 ## macOS and Windows development builds
 
-Install GStreamer with its tools and plugins on PATH. Build the commands into
+Install the [GStreamer runtime](https://gstreamer.freedesktop.org/download/) with
+its tools and plugins on PATH. Build the commands into
 `bin/` with `CGO_ENABLED=0 go build -o bin/ ./cmd/doubletake ./cmd/doubletake-ctl`.
 In Windows PowerShell, set `$env:CGO_ENABLED = '0'` before running `go build`.
-Native desktop capture is
-experimental. macOS uses `avfvideosrc` and requires Screen Recording access
-for the launching terminal or app. Use `-no-audio` for macOS desktop capture.
-Windows uses `d3d11screencapturesrc` in an interactive desktop session and
-`wasapi2src` for output monitoring. Use `-no-audio` for Windows custom media.
+
+- On macOS, GStreamer uses `avfvideosrc` for video. On macOS 13 or later,
+  `make macos-audio-helper` builds the ScreenCaptureKit system audio helper
+  next to `doubletake`. Allow Screen & System Audio Recording when macOS
+  prompts. Use `-no-audio` for video-only capture without the helper.
+- On Windows, use an interactive desktop session. The GStreamer runtime needs
+  `d3d11screencapturesrc` for video and `wasapi2src` for system audio loopback.
+
 These builds use GStreamer's subprocess backend and a fixed video encoder
-configuration. CI runs protocol and process tests in macOS and Windows VMs.
+configuration. CI verifies custom media playback through a loopback receiver
+on both platforms. Desktop capture requires an interactive session with the
+appropriate display and audio permissions.
 
 ## Audio
 
