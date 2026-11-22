@@ -119,7 +119,7 @@ _doubletake_ctl()
     if [[ $options_done == false && $cur == -* ]]; then
         _doubletake_complete_flags -socket -version -help -h
     else
-        _doubletake_complete_words 'status discover devices connect play pin disconnect mute unmute'
+        _doubletake_complete_words 'status discover devices connect play pin disconnect mute unmute volume'
     fi
 }
 

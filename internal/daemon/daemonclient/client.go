@@ -49,6 +49,11 @@ func (c *Client) Play(source, target string) (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "play", MediaSource: source, Target: target})
 }
 
+// Volume reads the receiver volume or sets it when db is supplied.
+func (c *Client) Volume(target string, db *float64) (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "volume", Target: target, VolumeDB: db})
+}
+
 // Disconnect stops all active mirroring sessions.
 func (c *Client) Disconnect() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "disconnect"})

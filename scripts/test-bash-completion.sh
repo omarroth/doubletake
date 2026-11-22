@@ -85,6 +85,8 @@ complete_line _doubletake_ctl 'doubletake-ctl con' doubletake-ctl con
 expect connect
 complete_line _doubletake_ctl 'doubletake-ctl pl' doubletake-ctl pl
 expect play
+complete_line _doubletake_ctl 'doubletake-ctl vol' doubletake-ctl vol
+expect volume
 complete_line _doubletake_ctl 'doubletake-ctl -socket connect con' doubletake-ctl -socket connect con
 expect connect
 complete_line _doubletake_ctl 'doubletake-ctl --socket=/tmp/d.sock con' doubletake-ctl --socket = /tmp/d.sock con

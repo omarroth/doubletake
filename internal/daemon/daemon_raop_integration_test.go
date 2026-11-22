@@ -216,6 +216,37 @@ func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
 		}
 	}
 
+	req := Request{Cmd: "volume", Target: devices[1].IP}
+	checkVolume := func(want float64) {
+		t.Helper()
+		resp := d.handleRequest(Request{Cmd: "volume", Target: req.Target})
+		if !resp.OK || resp.VolumeDB == nil || *resp.VolumeDB != want {
+			t.Fatalf("receiver volume: got %+v, want %v dB", resp, want)
+		}
+	}
+	firstBefore := receivers[0].Stats().ParameterRequests
+	level := -12.5
+	req.VolumeDB = &level
+	if reply := d.handleRequest(req); !reply.OK {
+		t.Fatal(reply.Error)
+	}
+	checkVolume(level)
+	if reply := d.handleSetMute(req, true); !reply.OK {
+		t.Fatal(reply.Error)
+	}
+	level = -18
+	if reply := d.handleRequest(req); !reply.OK {
+		t.Fatal(reply.Error)
+	}
+	checkVolume(-144)
+	if reply := d.handleSetMute(req, false); !reply.OK {
+		t.Fatal(reply.Error)
+	}
+	checkVolume(level)
+	if got := receivers[0].Stats().ParameterRequests; got != firstBefore {
+		t.Fatal("volume controls reached the other room")
+	}
+
 	if response := d.handleDisconnect(Request{Target: devices[0].IP}); !response.OK {
 		t.Fatalf("disconnect first room: %+v", response)
 	}

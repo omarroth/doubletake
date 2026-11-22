@@ -912,10 +912,16 @@ func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse
 		}
 		c.mediaPeersSet = true
 		return receiverOK(nil, ""), nil
-	case request.method == "SET_PARAMETER":
+	case request.method == "GET_PARAMETER", request.method == "SET_PARAMETER":
 		s.stats.parameterRequests.Add(1)
 		if c.sessionState != receiverSessionReady {
 			return c.invalidSessionState(request.method), nil
+		}
+		if request.method == "GET_PARAMETER" {
+			return receiverOK(audioVolumeBody(c.raopVolume), "text/parameters"), nil
+		}
+		if volume, err := parseReceiverVolume(request.body); err == nil {
+			c.raopVolume = volume
 		}
 		return receiverOK(nil, ""), nil
 	case request.method == "POST" && path == "/feedback":

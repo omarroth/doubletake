@@ -431,6 +431,8 @@ type MirrorSession struct {
 	noAudio               bool
 	receiverVolumeDB      float64
 	receiverVolumeDBKnown bool
+	receiverVolumeMu      sync.Mutex
+	receiverMuted         bool
 }
 
 type mirrorSetupRequest struct {
@@ -2615,6 +2617,8 @@ func (s *MirrorSession) SetAudioMuted(muted bool) error {
 		return fmt.Errorf("audio control unavailable: session was started with audio disabled")
 	}
 
+	s.receiverVolumeMu.Lock()
+	defer s.receiverVolumeMu.Unlock()
 	volumeDB := s.receiverVolumeDB
 	if !s.receiverVolumeDBKnown {
 		volumeDB = airPlayDefaultVolumeDB
@@ -2625,6 +2629,46 @@ func (s *MirrorSession) SetAudioMuted(muted bool) error {
 	volumeDB = normalizeOutgoingVolume(volumeDB)
 	if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", audioVolumeBody(volumeDB), nil); err != nil {
 		return fmt.Errorf("set audio muted=%t: %w", muted, err)
+	}
+	s.receiverMuted = muted
+	return nil
+}
+
+// ReceiverVolume reads the receiver's current AirPlay volume.
+func (s *MirrorSession) ReceiverVolume() (float64, error) {
+	if s.noAudio {
+		return 0, errors.New("session audio is disabled")
+	}
+	body, _, err := s.client.rtspRequest("GET_PARAMETER", s.sessionURI, "text/parameters", []byte("volume\r\n"), nil)
+	if err != nil {
+		return 0, err
+	}
+	return parseReceiverVolume(body)
+}
+
+// SetReceiverVolume sets the playback level. A muted stream keeps the new
+// level for unmute.
+func (s *MirrorSession) SetReceiverVolume(db float64) error {
+	if err := validateReceiverVolume(db); err != nil {
+		return err
+	}
+	if s.noAudio {
+		return errors.New("session audio is disabled")
+	}
+	s.receiverVolumeMu.Lock()
+	defer s.receiverVolumeMu.Unlock()
+	if !s.receiverMuted {
+		if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", audioVolumeBody(db), nil); err != nil {
+			return err
+		}
+	}
+	s.receiverVolumeDB, s.receiverVolumeDBKnown = db, true
+	return nil
+}
+
+func validateReceiverVolume(db float64) error {
+	if math.IsNaN(db) || db < airPlayMinimumVolumeDB || db > 0 {
+		return fmt.Errorf("receiver volume must be between %.0f and 0 dB", airPlayMinimumVolumeDB)
 	}
 	return nil
 }

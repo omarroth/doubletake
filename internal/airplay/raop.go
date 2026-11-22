@@ -466,6 +466,28 @@ func (s *AudioOnlySession) SetAudioMuted(muted bool) error {
 	return nil
 }
 
+func (s *AudioOnlySession) ReceiverVolume() (float64, error) {
+	body, err := s.request("GET_PARAMETER", s.uri, "text/parameters", []byte("volume\r\n"))
+	if err != nil {
+		return 0, err
+	}
+	return parseReceiverVolume(body)
+}
+
+func (s *AudioOnlySession) SetReceiverVolume(db float64) error {
+	if err := validateReceiverVolume(db); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.restore != nil {
+		*s.restore = db
+		return nil
+	}
+	_, err := s.requestLocked("SET_PARAMETER", s.uri, "text/parameters", audioVolumeBody(db))
+	return err
+}
+
 func (s *AudioOnlySession) Close() error {
 	s.closeOnce.Do(func() {
 		s.stopTiming()

@@ -50,8 +50,9 @@ type Request struct {
 	// applies even if the device at Target names itself differently, and such
 	// a device is refused. Without it, the ID discovery advertised for Target
 	// is used.
-	DeviceID    string `json:"device_id,omitempty"`
-	MediaSource string `json:"media_source,omitempty"`
+	DeviceID    string   `json:"device_id,omitempty"`
+	MediaSource string   `json:"media_source,omitempty"`
+	VolumeDB    *float64 `json:"volume_db,omitempty"`
 }
 
 // StreamInfo describes one active (or connecting) mirror stream.
@@ -91,6 +92,7 @@ type Response struct {
 	DeviceIP         string                   `json:"device_ip,omitempty"`
 	HasAudio         bool                     `json:"has_audio"`
 	AudioMuted       bool                     `json:"audio_muted"`
+	VolumeDB         *float64                 `json:"volume_db,omitempty"`
 	// NeedsPIN is retained for older clients and is true only for an on-screen
 	// PIN. NeedsCredential and CredentialKind distinguish configured passwords.
 	NeedsPIN        bool           `json:"needs_pin,omitempty"`
@@ -624,6 +626,8 @@ func (d *Daemon) handleRequest(req Request) Response {
 		return d.handleSetMute(req, true)
 	case "unmute":
 		return d.handleSetMute(req, false)
+	case "volume":
+		return d.handleVolume(req)
 	default:
 		return Response{OK: false, Error: "unknown command: " + req.Cmd}
 	}
@@ -2102,6 +2106,41 @@ func (d *Daemon) handleDisconnect(req Request) Response {
 		d.streamWorkers.Done()
 	}
 	return Response{OK: true, State: StateIdle}
+}
+
+func (d *Daemon) handleVolume(req Request) Response {
+	type receiverVolume interface {
+		ReceiverVolume() (float64, error)
+		SetReceiverVolume(float64) error
+	}
+	d.mu.Lock()
+	entry := d.streams[req.Target]
+	var receiver receiverVolume
+	if entry != nil && entry.state == StateStreaming {
+		if entry.audioOnly != nil {
+			receiver = entry.audioOnly
+		} else if entry.session != nil && !d.cfg.NoAudio && (entry.mediaSource == "" || entry.mediaCapture.HasMediaAudio()) && entry.session.HasAudio() {
+			receiver = entry.session
+		}
+	}
+	d.mu.Unlock()
+	if receiver == nil {
+		return Response{OK: false, Error: "volume requires a target with active audio"}
+	}
+	var db float64
+	var err error
+	if req.VolumeDB == nil {
+		db, err = receiver.ReceiverVolume()
+	} else {
+		db = *req.VolumeDB
+		err = receiver.SetReceiverVolume(db)
+	}
+	if err != nil {
+		return Response{OK: false, Error: fmt.Sprintf("receiver volume: %v", err)}
+	}
+	resp := d.handleStatus()
+	resp.VolumeDB = &db
+	return resp
 }
 
 func (d *Daemon) handleSetMute(req Request, muted bool) Response {

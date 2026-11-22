@@ -171,6 +171,8 @@ doubletake-ctl disconnect                # stop all streams
 ```
 
 The daemon shares capture and encoding where receiver formats allow it.
+Use `doubletake-ctl volume TARGET` to read an active receiver's level or
+`doubletake-ctl volume TARGET -18` to set it in dB.
 Mirroring sessions default to 250 ms of playout lead.
 
 HomePods and other compatible AirPlay speakers can stream audio without screen

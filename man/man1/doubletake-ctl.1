@@ -45,6 +45,11 @@ Mute receiver audio for one receiver, or all receivers if no target is supplied.
 .TP
 .B unmute [\fITARGET\fR]
 Unmute receiver audio for one receiver, or all receivers if no target is supplied.
+.TP
+.B volume \fITARGET\fR [\fIDB\fR]
+Read the receiver's volume during playback, or set a value between
+\-30 and 0 dB. Use mute and unmute to toggle sound. Setting a level while
+muted saves that level for unmute.
 .SH OPTIONS
 .TP
 .B \-socket \fIPATH\fR
