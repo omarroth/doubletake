@@ -361,6 +361,37 @@ func TestReceiverHeadlessDetectsSourceAudioGapWithoutRequestingLostPackets(t *te
 	}
 }
 
+func TestReceiverHeadlessHandlesREDAcrossSourceGap(t *testing.T) {
+	p, err := newReceiverPlayback(receiverPlaybackConfig{Timing: timingProtocolNTP, AudioJitter: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.configureAudio(AudioCodecALAC, nil, nil, nil, func(uint16, uint16) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	// A 17-sample capture gap precedes the primary packet. The older
+	// redundant blocks still have the preceding sequence numbers.
+	const primaryRTP = 2*352 + 17
+	encoded := make([]byte, 4096)
+	n := (&alacEncoder{}).Encode(encoded, make([]byte, 352*audioBytesPerSampleFrame))
+	payload := composeAudioREDPayload(encoded[:n], primaryRTP, []audioREDFrame{
+		{payload: encoded[:n], rtpTime: 0},
+		{payload: encoded[:n], rtpTime: 352},
+	}, maximumAudioRTPDatagramBytes-12)
+	packet, _ := (&AudioStream{}).buildAudioPacketLocked(payload, primaryRTP, 3, audioREDPayloadType, nil)
+	p.audioPacket(packet, false)
+
+	var announce [20]byte
+	announce[0], announce[1] = 0x90, 0xd4
+	binary.BigEndian.PutUint64(announce[8:16], ntpBootTimestamp()+compactTimestamp(200*time.Millisecond))
+	p.audioControl(announce[:])
+	stats := p.snapshot()
+	if stats.DecodeErrors != 0 || stats.AudioRecovered != 2 || stats.AudioMissingSamples != 17 || stats.AudioLost != 0 || stats.AudioResends != 0 {
+		t.Fatalf("RED reordered or discarded a block across a source gap: %+v", stats)
+	}
+}
+
 func TestReceiverHeadlessReportsUnrecoverableAudioLoss(t *testing.T) {
 	p, err := newReceiverPlayback(receiverPlaybackConfig{Timing: timingProtocolNTP, AudioJitter: time.Millisecond})
 	if err != nil {

@@ -153,11 +153,13 @@ func (p *receiverPlayback) audioPacket(packet []byte, retransmitted bool) {
 	}
 	frames := make([]receiverAudioFrame, 0, len(offsets)+1)
 	for i, offset := range offsets {
-		if offset%a.spf != 0 || lengths[i] > len(payload) {
-			p.fail(fmt.Errorf("invalid RED sample offset or block length"))
+		if lengths[i] > len(payload) {
+			p.fail(fmt.Errorf("invalid RED block length"))
 			return
 		}
-		frames = append(frames, receiverAudioFrame{seq: seq - uint16(offset/a.spf), rtp: rtp - offset, data: append([]byte(nil), payload[:lengths[i]]...), recovered: true})
+		// Apple's APSRTPPacketHandlerGetSeqNumOfPacket uses block order
+		// for the sequence number. The offset locates the samples in time.
+		frames = append(frames, receiverAudioFrame{seq: seq - uint16(len(offsets)-i), rtp: rtp - offset, data: append([]byte(nil), payload[:lengths[i]]...), recovered: true})
 		payload = payload[lengths[i]:]
 	}
 	if len(payload) == 0 {
