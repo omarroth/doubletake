@@ -26,8 +26,8 @@ target is specified, connect to the first available discovered receiver.
 .TP
 .B play \fISOURCE\fR [\fITARGET\fR]
 Play video and audio from a local file or a direct HTTP(S) media URL until end of input.
-With no target, use the
-first available discovered display. To stop early, use \fBdisconnect\fR.
+Requires a GStreamer-enabled sender. With no target, use the first available
+discovered display. To stop early, use \fBdisconnect\fR.
 .TP
 .B pin \fIPIN-OR-PASSWORD\fR
 Submit the credential for a receiver waiting for input. The command retains its

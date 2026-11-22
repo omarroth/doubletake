@@ -2,9 +2,9 @@
 
 Mirror a desktop and audio to Apple TV, macOS, and compatible AirPlay receivers.
 
-- Wayland and X11 screen capture, with hardware or software encoding.
+- Screen capture on Linux (Wayland and X11), macOS, and Windows.
 - Automatic video quality adjustment and configurable resolution.
-- A selectable audio output, with volume and mute controls.
+- System audio capture, with a selectable output on Linux.
 - Multiple receivers through the daemon and [KDE Plasma widget](plasmoid/).
 
 See the [compatibility notes](docs/compatibility.md) for tested receivers,
@@ -78,6 +78,7 @@ Extract the archive into a folder and run `./doubletake` on macOS or
 `.\doubletake.exe` in PowerShell. Both commands are at the top level. These
 builds use the native desktop capture and need no GStreamer installation.
 On macOS, allow Screen & System Audio Recording.
+File, HTTP, and stdin playback require a GStreamer-enabled sender.
 
 For AAC-ELD on Windows, put `libfdk-aac-2.dll` alongside the executable.
 Use the MSYS2 package for [x86-64](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-fdk-aac)
@@ -141,9 +142,9 @@ replacing a receiver, use `-pair` to pair again. Saved pairings verify the
 receiver's identity on reconnect.
 
 By default, doubletake streams audio from your default local output while it
-continues playing locally. With `-audio-sink output`, select **doubletake**
-in your sound settings to route audio to the receiver. Use `-no-audio` for
-video only or `-no-video` for audio-only playback.
+continues playing locally. On Linux with GStreamer, use `-audio-sink output`
+and select **doubletake** in your sound settings to route audio to the receiver.
+Use `-no-audio` for video only or `-no-video` for audio-only playback.
 
 Resolution defaults to the highest usable receiver mode. Video bitrate and frame
 rate adapt to network conditions unless you set a fixed `-bitrate`.

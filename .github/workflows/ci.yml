@@ -254,9 +254,12 @@ jobs:
           archive="dist/doubletake-$VERSION-$TARGET.$ARCHIVE_EXTENSION"
           mkdir -p bin/unpacked
           suffix=''
+          runtime_path=$PATH
           if [[ "$RUNNER_OS" == Windows ]]; then
             suffix=.exe
             python -m zipfile -e "$archive" bin/unpacked
+            # Smoke-test the archive with only the system runtime on PATH.
+            runtime_path="$(cygpath -u "$WINDIR")/System32"
           else
             tar -xzf "$archive" -C bin/unpacked
             codesign --verify --all-architectures bin/unpacked/doubletake
@@ -265,8 +268,8 @@ jobs:
           expected_commit=$(git rev-parse --short=12 HEAD)
           for command in doubletake doubletake-ctl; do
             binary="bin/unpacked/$command$suffix"
-            "$binary" -help >/dev/null
-            reported=$("$binary" -version)
+            PATH="$runtime_path" "$binary" -help >/dev/null
+            reported=$(PATH="$runtime_path" "$binary" -version)
             grep -F "$VERSION" <<< "$reported"
             grep -F "$expected_commit" <<< "$reported"
           done
