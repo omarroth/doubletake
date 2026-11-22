@@ -263,7 +263,7 @@ type ReceiverServer struct {
 // accept clients, and Close (or cancel Serve's context) to stop it.
 func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 	if cfg.DecodeMedia && !receiverDecoderAvailable() {
-		return nil, fmt.Errorf("headless playback requires make doubletake-test-receiver (gstreamer_cgo)")
+		return nil, fmt.Errorf("headless playback requires make doubletake-test-receiver")
 	}
 	if cfg.AudioDropEvery < 0 || cfg.AudioDropEvery == 1 || cfg.AudioJitter < 0 || cfg.AudioJitter > time.Second {
 		return nil, fmt.Errorf("audio drop interval must be 0 or at least 2; jitter must be between 0 and 1s")

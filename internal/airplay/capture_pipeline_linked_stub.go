@@ -1,21 +1,27 @@
-//go:build !gstreamer_cgo || !cgo || !linux
+//go:build !cgo || !(linux || darwin || windows)
 
 package airplay
 
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 )
 
-// HasInProcessGStreamer reports whether this binary owns its video pipeline.
-// Static fallback builds launch gst-launch-1.0 and cannot adjust it at runtime.
-func HasInProcessGStreamer() bool { return false }
+var errGStreamerUnavailable = errors.New("media capture requires cgo and the GStreamer development libraries")
 
-func launchLinkedGStreamerPipeline(context.Context, []string, encoderResult, []*os.File) (*runningGStreamerPipeline, bool, error) {
-	return nil, false, nil
+func HasInProcessGStreamer() bool                      { return false }
+func hasGstElement(string) bool                        { return false }
+func hasGstProperty(string, string) bool               { return false }
+func probeGstPipeline(context.Context, []string) error { return errGStreamerUnavailable }
+func launchGStreamerPipeline(context.Context, []string, encoderResult, *os.File) (*runningGStreamerPipeline, error) {
+	return nil, errGStreamerUnavailable
+}
+func launchLinkedMediaGraph(context.Context, string, encoderResult, []string, []string) (*runningGStreamerPipeline, io.ReadCloser, error) {
+	return nil, nil, errGStreamerUnavailable
 }
 
-func launchLinkedMediaGraph(context.Context, []string, encoderResult, *os.File, *os.File, *os.File, *os.File) (*runningGStreamerPipeline, error) {
-	return nil, errors.New("linked GStreamer playback unavailable")
+func launchAudioPipeline(context.Context, []string, bool) (*runningGStreamerPipeline, error) {
+	return nil, errGStreamerUnavailable
 }

@@ -1,4 +1,4 @@
-//go:build cgo && gstreamer_cgo
+//go:build cgo && (linux || darwin || windows)
 
 package daemon
 

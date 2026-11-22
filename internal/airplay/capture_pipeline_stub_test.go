@@ -1,4 +1,4 @@
-//go:build !gstreamer_cgo || !cgo || !linux
+//go:build !cgo || !(linux || darwin || windows)
 
 package airplay
 

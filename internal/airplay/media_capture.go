@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -114,9 +113,9 @@ func startPreparedMediaCapture(ctx context.Context, cfg CaptureConfig, encoder e
 		return nil, err
 	}
 	capture := &ScreenCapture{
-		cmd: pipeline.cmd, stdout: pipeline.stdout, cancel: cancel,
+		stdout: pipeline.stdout, cancel: cancel,
 		runtime: pipeline.runtime, waitCh: make(chan struct{}), finite: true,
-		stderr: pipeline.stderr, format: captureFormat(cfg, encoder), mediaAudio: audio,
+		format: captureFormat(cfg, encoder), mediaAudio: audio,
 		frames: &pacedMediaVideo{
 			ctx: ctx, reader: newRTPVideoAccessUnitReader(pipeline.stdout, encoder.codec), timeline: timeline,
 		},
@@ -247,7 +246,7 @@ func launchMediaAV(ctx context.Context, cfg CaptureConfig, encoder encoderResult
 	audioArgs := appendTimestampedPCMOutput(appendPCMConversion([]string{"queue"}, true), spf)
 	// playbin manages the optional audio pad and signals EOS for all tracks,
 	// including files with no audio or whose tracks end at different times.
-	pipeline, pcm, err := launchMediaGraph(ctx, uri, encoder, videoArgs, audioArgs)
+	pipeline, pcm, err := launchLinkedMediaGraph(ctx, uri, encoder, videoArgs, audioArgs)
 	if err != nil {
 		if audioCapture.eld != nil {
 			audioCapture.eld.Close()
@@ -267,50 +266,6 @@ func launchMediaAV(ctx context.Context, cfg CaptureConfig, encoder encoderResult
 func mediaGraphArgs(uri string, videoArgs, audioArgs []string) []string {
 	return []string{"playbin", "flags=video+audio", "uri=" + uri,
 		playbackSinkProperty("video-sink", videoArgs), playbackSinkProperty("audio-sink", audioArgs)}
-}
-
-func launchMediaGraph(ctx context.Context, uri string, encoder encoderResult, videoArgs, audioArgs []string) (*runningGStreamerPipeline, io.ReadCloser, error) {
-	if !HasInProcessGStreamer() {
-		return launchMediaGraphProcess(ctx, uri, videoArgs, audioArgs)
-	}
-	pcm, audioWriter, err := os.Pipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	video, videoWriter, err := os.Pipe()
-	if err != nil {
-		_ = pcm.Close()
-		_ = audioWriter.Close()
-		return nil, nil, err
-	}
-	for i, token := range videoArgs {
-		if token == encoder.name {
-			// Name the encoder so runtime adjustments still work during playback.
-			videoArgs = slices.Insert(videoArgs, i+1, "name=doubletake-encoder")
-			break
-		}
-	}
-	videoArgs = replaceMediaSinkFD(videoArgs, int(videoWriter.Fd()))
-	audioArgs = replaceMediaSinkFD(audioArgs, int(audioWriter.Fd()))
-	args := mediaGraphArgs(uri, videoArgs, audioArgs)
-	pipeline, err := launchLinkedMediaGraph(ctx, args, encoder, video, videoWriter, pcm, audioWriter)
-	if err != nil {
-		_ = video.Close()
-		_ = videoWriter.Close()
-		_ = pcm.Close()
-		_ = audioWriter.Close()
-		return nil, nil, err
-	}
-	return pipeline, pcm, nil
-}
-
-func replaceMediaSinkFD(args []string, fd int) []string {
-	for i, token := range args {
-		if token == "fd=1" {
-			args[i] = "fd=" + strconv.Itoa(fd)
-		}
-	}
-	return args
 }
 
 // HasMediaAudio reports whether the source has delivered an audio track.

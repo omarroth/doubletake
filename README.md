@@ -29,13 +29,13 @@ licenses, and a systemd user service. Enable the service separately if desired.
 
 `doubletake` requires GStreamer 1.16+ and its runtime plugins. Install FDK-AAC
 to enable AAC-ELD audio; otherwise doubletake uses ALAC when supported by the
-receiver. `doubletake-ctl` is static and requires neither library. Release
+receiver. The optional standalone controller `doubletake-ctl` is static. Release
 binaries target Ubuntu 20.04 and newer Linux systems.
 
 On Ubuntu/Debian:
 
 ```sh
-sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-base \
+sudo apt install gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
   gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio pulseaudio-utils \
   bash-completion
@@ -69,7 +69,7 @@ On Ubuntu/Debian, install these in addition to the runtime packages:
 
 ```sh
 sudo apt install build-essential pkg-config \
-  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfdk-aac-dev
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libfdk-aac-dev gstreamer1.0-tools
 ```
 
 ```sh
@@ -146,7 +146,7 @@ Use `doubletake -help` or `man doubletake` for all options, and
 doubletake -target 192.168.1.77 -source ./clip.mp4
 doubletake -target 192.168.1.77 -source - < clip.mkv
 doubletake -target 192.168.1.77 -source 'https://example.net/clip.mp4'
-doubletake-ctl play ./clip.mp4 192.168.1.77
+doubletake ctl play ./clip.mp4 192.168.1.77
 ```
 
 Custom sources play the clip's video and audio and stop at end of input.
@@ -156,7 +156,7 @@ use a streamable container such as Matroska or MPEG-TS and pair first if the
 receiver needs an interactive PIN. For example, pipe Streamlink output with
 `streamlink --stdout URL best | doubletake -target RECEIVER_IP -source -`.
 With a running daemon, `play` accepts a file or URL and uses the first free
-display if you omit the target. Use `doubletake-ctl disconnect TARGET` to stop early.
+display if you omit the target. Use `doubletake ctl disconnect TARGET` to stop early.
 
 ## Multiple receivers
 
@@ -164,28 +164,29 @@ Start the daemon, then control it from another terminal:
 
 ```sh
 doubletake -daemonize
-doubletake-ctl connect 192.168.1.77
-doubletake-ctl connect 192.168.1.133
-doubletake-ctl status
-doubletake-ctl disconnect 192.168.1.77
-doubletake-ctl disconnect                # stop all streams
+doubletake ctl connect 192.168.1.77
+doubletake ctl connect 192.168.1.133
+doubletake ctl status
+doubletake ctl disconnect 192.168.1.77
+doubletake ctl disconnect                # stop all streams
 ```
 
 The daemon shares capture and encoding where receiver formats allow it.
-Use `doubletake-ctl volume TARGET` to read an active receiver's level or
-`doubletake-ctl volume TARGET -18` to set it in dB.
+Use `doubletake ctl -help` for all commands.
+Use `doubletake ctl volume TARGET` to read an active receiver's level or
+`doubletake ctl volume TARGET -18` to set it in dB.
 Mirroring sessions default to 250 ms of playout lead.
 
 HomePods and other compatible AirPlay speakers can stream audio without screen
 capture. Choose one from interactive discovery, or use
-`doubletake-ctl devices` and connect several in daemon mode. Start the daemon
+`doubletake ctl devices` and connect several in daemon mode. Start the daemon
 with `-no-video` to request audio-only playback on all connections. With a direct
 `-target`, `-no-video` looks up the audio endpoint via mDNS. doubletake prefers
 realtime AirPlay 2 audio and shares one PTP clock across compatible speakers.
 Speakers that offer classic RAOP can also use that transport. Direct audio
 defaults to a 2-second playout lead. Start a speaker before a mirror to let the
 mirror inherit the speaker's lead. Use `-target-latency-ms` to set a common lead
-regardless of connection order. `doubletake-ctl status` reports the transport,
+regardless of connection order. `doubletake ctl status` reports the transport,
 clock and playout leads for each destination.
 AirPlay 2 uses transient pairing or saved HomeKit credentials. Speakers that
 require a new persistent pairing cannot be enrolled in audio-only mode yet.

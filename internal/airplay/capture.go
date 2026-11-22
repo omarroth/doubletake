@@ -1,7 +1,6 @@
 package airplay
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -113,7 +112,6 @@ const (
 
 // ScreenCapture manages screen capture via GStreamer.
 type ScreenCapture struct {
-	cmd      *exec.Cmd // gst-launch-1.0 process
 	stdout   io.ReadCloser
 	frames   videoAccessUnitReader
 	cancel   context.CancelFunc
@@ -125,7 +123,6 @@ type ScreenCapture struct {
 	waitErr  error         // set before waitCh is closed
 	stopped  bool
 	stopOnce sync.Once
-	stderr   *captureStderrTail
 	formatMu sync.RWMutex
 	format   CaptureFormat
 	// Synthetic relays have no process exit status. Their readers own terminal
@@ -242,27 +239,11 @@ func probeX11CaptureSource(ctx context.Context, display string, cfg CaptureConfi
 	} else if cfg.X11WindowName != "" {
 		source = append(source, fmt.Sprintf("xname=%s", cfg.X11WindowName))
 	}
-	args := append([]string{"--quiet"}, source...)
-	args = appendGstStage(args, gstStage{"fakesink", "sync=false", "async=false"})
-	cmd := exec.CommandContext(probeCtx, "gst-launch-1.0", args...)
-	cmd.Stdout = io.Discard
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if probeCtx.Err() != nil {
-		return fmt.Errorf("validate X11 capture source on DISPLAY=%q: %w", display, probeCtx.Err())
-	}
-	if err == nil {
-		return nil
-	}
-	diagnostic := strings.TrimSpace(stderr.String())
-	if len(diagnostic) > maxCaptureStderrTailBytes {
-		diagnostic = diagnostic[len(diagnostic)-maxCaptureStderrTailBytes:]
-	}
-	if diagnostic == "" {
+	args := appendGstStage(source, gstStage{"fakesink", "sync=false", "async=false"})
+	if err := probeGstPipeline(probeCtx, args); err != nil {
 		return fmt.Errorf("validate X11 capture source on DISPLAY=%q: %w", display, err)
 	}
-	return fmt.Errorf("validate X11 capture source on DISPLAY=%q: %w; GStreamer stderr: %s", display, err, diagnostic)
+	return nil
 }
 
 // PrepareCapture selects and validates the capture path. Wayland portal access
@@ -337,7 +318,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		log.Printf("[CAPTURE] warning: GStreamer RTP/ONVIF timestamp elements are unavailable; video will use output-time timestamps")
 	}
 	if kind == capturePreparationX11 {
-		if err := exec.Command("gst-inspect-1.0", "ximagesrc").Run(); err != nil {
+		if !hasGstElement("ximagesrc") {
 			return nil, fmt.Errorf("GStreamer 'ximagesrc' plugin not found; install gst-plugins-good")
 		}
 		if err := probeX11CaptureSource(ctx, os.Getenv("DISPLAY"), cfg); err != nil {
@@ -346,7 +327,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		return preparation, nil
 	}
 
-	if err := exec.Command("gst-inspect-1.0", "pipewiresrc").Run(); err != nil {
+	if !hasGstElement("pipewiresrc") {
 		return nil, fmt.Errorf("GStreamer 'pipewiresrc' plugin not found; install gst-pipewire")
 	}
 	if err := probeWaylandDisplay(ctx, os.Getenv("WAYLAND_DISPLAY")); err != nil {
@@ -622,10 +603,6 @@ func (p *CapturePreparation) Close() {
 	}
 }
 
-func hasGstElement(name string) bool {
-	return exec.Command("gst-inspect-1.0", name).Run() == nil
-}
-
 func supportsTimestampedVideoOutput(codec VideoCodec) bool {
 	return supportsTimestampedVideoOutputWithProbe(codec, hasGstElement)
 }
@@ -876,33 +853,6 @@ func automaticHEVCAvailable(hwaccel string) bool {
 	return ok
 }
 
-// startGStreamerCommand starts a capture child whose lifetime cannot outlive
-// doubletake. Linux delivers Pdeathsig when the creating OS thread exits, not
-// strictly when the whole process exits, so the supervising goroutine keeps
-// that thread locked until Wait completes.
-func startGStreamerCommand(cmd *exec.Cmd) (<-chan error, error) {
-	started := make(chan error, 1)
-	waitResult := make(chan error, 1)
-
-	go func() {
-		release := configureCaptureProcess(cmd)
-		defer release()
-		err := cmd.Start()
-		started <- err
-		if err != nil {
-			close(waitResult)
-			return
-		}
-		waitResult <- cmd.Wait()
-		close(waitResult)
-	}()
-
-	if err := <-started; err != nil {
-		return nil, err
-	}
-	return waitResult, nil
-}
-
 // gstStage is one GStreamer element (or caps filter) followed by its arguments.
 // Keeping separators out of stages makes it difficult for source-specific
 // pipelines to accidentally diverge in the shared encoding path.
@@ -988,8 +938,7 @@ func captureFormat(cfg CaptureConfig, encoder encoderResult) CaptureFormat {
 // pipeWireSourceHasProvideClock reports whether the installed pipewiresrc
 // exposes provide-clock. Older plugins reject unknown properties at launch.
 var pipeWireSourceHasProvideClock = sync.OnceValue(func() bool {
-	out, err := exec.Command("gst-inspect-1.0", "pipewiresrc").Output()
-	return err == nil && bytes.Contains(out, []byte("provide-clock"))
+	return hasGstProperty("pipewiresrc", "provide-clock")
 })
 
 func pipeWireVideoSourceStage(fd int, nodeID uint32, fps int, alwaysCopy bool) gstStage {
@@ -1138,7 +1087,7 @@ func appendGstVideoEncoding(args []string, encoder encoderResult, timestampedOut
 	if timestampedOutput {
 		// RTP marker bits retain access-unit boundaries, while the ONVIF header
 		// extension serializes each encoded buffer's absolute capture PTS. The
-		// RFC4571 length prefix makes the packet stream safe to carry over stdout.
+		// RFC4571 preserves packet boundaries when the sender reads the stream.
 		args = appendGstStage(args, gstStage{
 			payloader, "pt=96", "mtu=60000",
 			"timestamp-offset=0", "seqnum-offset=0",
@@ -1446,11 +1395,7 @@ func startPreparedWaylandCapturePlans(
 		cancelProbe()
 		if err != nil {
 			capture.Stop()
-			attemptError := fmt.Sprintf("%s: %v", plan, err)
-			if stderr := capture.stderrText(); stderr != "" {
-				attemptError += "; GStreamer stderr: " + stderr
-			}
-			attemptErrors = append(attemptErrors, attemptError)
+			attemptErrors = append(attemptErrors, fmt.Sprintf("%s: %v", plan, capture.withPipelineError(err)))
 			log.Printf("[CAPTURE] %s failed startup validation: %v", plan, err)
 			continue
 		}
@@ -1490,21 +1435,19 @@ func startWaylandCaptureAttempt(ctx context.Context, cfg CaptureConfig, plan way
 	gstArgs := buildWaylandVideoPipelineForPlan(
 		pwFdNum, nodeID, fps, plan, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
-	dbg("[CAPTURE] gst-launch-1.0 (wayland) %s", strings.Join(gstArgs, " "))
-	pipeline, err := launchGStreamerPipeline(captureCtx, gstArgs, plan.encoder, []*os.File{pwFd})
+	dbg("[CAPTURE] GStreamer graph (Wayland) %s", strings.Join(gstArgs, " "))
+	pipeline, err := launchGStreamerPipeline(captureCtx, gstArgs, plan.encoder, pwFd)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
 
 	capture := &ScreenCapture{
-		cmd:      pipeline.cmd,
 		stdout:   pipeline.stdout,
 		cancel:   cancel,
 		runtime:  pipeline.runtime,
 		pwNodeID: nodeID,
 		waitCh:   make(chan struct{}),
-		stderr:   pipeline.stderr,
 		format:   captureFormat(cfg, plan.encoder),
 	}
 	capture.enableAutomaticVideoRateControl(cfg)
@@ -1873,7 +1816,7 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 	beforeConvert := []gstStage{frameRateStage(fps), lowLatencyVideoQueueStage()}
 	gstArgs := buildGstVideoPipeline(ximageSrcArgs, beforeConvert, nil, encoder, cfg.MaxWidth, cfg.MaxHeight, timestampedOutput)
 
-	dbg("[CAPTURE] gst-launch-1.0 (x11) %s", strings.Join(gstArgs, " "))
+	dbg("[CAPTURE] GStreamer graph (X11) %s", strings.Join(gstArgs, " "))
 	pipeline, err := launchGStreamerPipeline(captureCtx, gstArgs, encoder, nil)
 	if err != nil {
 		cancel()
@@ -1881,9 +1824,9 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 	}
 
 	capture := &ScreenCapture{
-		cmd: pipeline.cmd, stdout: pipeline.stdout, cancel: cancel,
+		stdout: pipeline.stdout, cancel: cancel,
 		runtime: pipeline.runtime, waitCh: make(chan struct{}),
-		stderr: pipeline.stderr, format: captureFormat(cfg, encoder),
+		format: captureFormat(cfg, encoder),
 	}
 	capture.enableAutomaticVideoRateControl(cfg)
 	if timestampedOutput {
@@ -1899,11 +1842,7 @@ func startPreparedX11Capture(startupCtx, lifetimeCtx context.Context, cfg Captur
 	cancelProbe()
 	if err != nil {
 		capture.Stop()
-		result := fmt.Errorf("X11 capture on DISPLAY=%q failed startup validation: %w", display, err)
-		if stderr := capture.stderrText(); stderr != "" {
-			result = fmt.Errorf("%w; GStreamer stderr: %s", result, stderr)
-		}
-		return nil, result
+		return nil, fmt.Errorf("X11 capture on DISPLAY=%q failed startup validation: %w", display, capture.withPipelineError(err))
 	}
 
 	return capture, nil
@@ -1971,7 +1910,7 @@ func (sc *ScreenCapture) SetBitrateKbps(bitrate int) error {
 		return fmt.Errorf("video bitrate must be positive")
 	}
 	if sc.runtime == nil {
-		return fmt.Errorf("runtime video control is unavailable in the static fallback build")
+		return fmt.Errorf("this capture has no controllable video pipeline")
 	}
 	if err := sc.runtime.setBitrateKbps(bitrate); err != nil {
 		return err
@@ -1993,7 +1932,7 @@ func (sc *ScreenCapture) SetFrameRate(fps int) error {
 		return fmt.Errorf("video frame rate must be positive")
 	}
 	if sc.runtime == nil {
-		return fmt.Errorf("runtime video control is unavailable in the static fallback build")
+		return fmt.Errorf("this capture has no controllable video pipeline")
 	}
 	if err := sc.runtime.setFrameRate(fps); err != nil {
 		return err
@@ -2012,7 +1951,7 @@ func (sc *ScreenCapture) RequestKeyFrame() error {
 		return fmt.Errorf("video capture is nil")
 	}
 	if sc.runtime == nil {
-		return fmt.Errorf("runtime video control is unavailable in the static fallback build")
+		return fmt.Errorf("this capture has no controllable video pipeline")
 	}
 	return sc.runtime.requestKeyFrame()
 }
@@ -2033,11 +1972,6 @@ func (sc *ScreenCapture) ReadVideoAccessUnit() (VideoAccessUnit, error) {
 			<-sc.waitCh
 			if sc.waitErr != nil {
 				return unit, fmt.Errorf("video input failed: %w", sc.waitErr)
-			}
-		}
-		if err != nil && err != io.EOF {
-			if diagnostics := sc.stderrText(); diagnostics != "" {
-				return unit, fmt.Errorf("%w; GStreamer stderr: %s", err, diagnostics)
 			}
 		}
 		return unit, err
@@ -2078,18 +2012,7 @@ func (sc *ScreenCapture) Stop() {
 			_ = sc.stdout.Close()
 		}
 
-		if sc.cmd != nil && sc.cmd.Process != nil {
-			_ = sc.cmd.Process.Signal(os.Interrupt)
-			if sc.waitCh != nil {
-				select {
-				case <-sc.waitCh:
-				case <-time.After(2 * time.Second):
-					_ = sc.cmd.Process.Kill()
-					<-sc.waitCh
-				}
-			}
-		}
-		if sc.cmd == nil && sc.runtime != nil && sc.waitCh != nil {
+		if sc.runtime != nil && sc.waitCh != nil {
 			select {
 			case <-sc.waitCh:
 			case <-time.After(2 * time.Second):
@@ -2458,9 +2381,9 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 	}
 
 	capture := &ScreenCapture{
-		cmd: pipeline.cmd, stdout: pipeline.stdout, cancel: cancel,
+		stdout: pipeline.stdout, cancel: cancel,
 		runtime: pipeline.runtime, waitCh: make(chan struct{}),
-		stderr: pipeline.stderr, format: captureFormat(cfg, encoder),
+		format: captureFormat(cfg, encoder),
 	}
 	capture.enableAutomaticVideoRateControl(cfg)
 	if timestampedOutput {
@@ -2474,81 +2397,15 @@ func startPreparedTestCapture(ctx context.Context, cfg CaptureConfig, encoder en
 	return capture, nil
 }
 
-const maxCaptureStderrTailBytes = 32 << 10
-
-type captureStderrTail struct {
-	mu   sync.Mutex
-	data []byte
-	done chan struct{}
-}
-
-func newCaptureStderrTail() *captureStderrTail {
-	return &captureStderrTail{done: make(chan struct{})}
-}
-
-func (t *captureStderrTail) append(line string) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.data = append(t.data, line...)
-	t.data = append(t.data, '\n')
-	if len(t.data) > maxCaptureStderrTailBytes {
-		t.data = append([]byte(nil), t.data[len(t.data)-maxCaptureStderrTailBytes:]...)
-	}
-}
-
-func (t *captureStderrTail) finish() {
-	if t != nil {
-		close(t.done)
-	}
-}
-
-func (t *captureStderrTail) String() string {
-	if t == nil {
-		return ""
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return strings.TrimSpace(string(t.data))
-}
-
-func (sc *ScreenCapture) stderrText() string {
-	if sc == nil || sc.stderr == nil {
-		return ""
-	}
+func (sc *ScreenCapture) withPipelineError(err error) error {
 	select {
-	case <-sc.stderr.done:
-	case <-time.After(100 * time.Millisecond):
-	}
-	return sc.stderr.String()
-}
-
-func logStderr(prefix string, r io.Reader, tails ...*captureStderrTail) {
-	if r == nil {
-		for _, tail := range tails {
-			tail.finish()
+	case <-sc.waitCh:
+		if sc.waitErr != nil && !errors.Is(err, sc.waitErr) {
+			return fmt.Errorf("%w: %w", err, sc.waitErr)
 		}
-		return
+	default:
 	}
-	defer func() {
-		for _, tail := range tails {
-			tail.finish()
-		}
-	}()
-	scanner := bufio.NewScanner(r)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
-		for _, tail := range tails {
-			tail.append(scanner.Text())
-		}
-		dbg("[%s] %s", prefix, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		dbg("[%s] stderr read error: %v", prefix, err)
-	}
+	return err
 }
 
 func captureBitrateKbps(cfg CaptureConfig) int {
@@ -2600,11 +2457,8 @@ func keyframeIntervalFrames(fps int) int {
 	}
 	// Capture starts before media SETUP completes and shared captures may already
 	// be running when another receiver attaches, so either path can miss the
-	// encoder's initial IDR. The protocol lets a receiver request an immediate
-	// bitstream restart, but gst-launch does not expose that upstream encoder event
-	// to its parent process. Keep a nearby periodic random-access point instead.
-	// This bounds startup and decoder recovery to half a second without making
-	// every frame intra-coded.
+	// encoder's initial IDR. Periodic random-access points also bound decoder
+	// recovery when the encoder cannot honor an immediate key-frame request.
 	return max(1, (fps+1)/2)
 }
 

@@ -76,21 +76,23 @@ it as `gst-plugin-va`. Older `vaapipostproc` packages do not provide that elemen
 
 ## macOS and Windows development builds
 
-Install the [GStreamer runtime](https://gstreamer.freedesktop.org/download/) with
-its tools and plugins on PATH. Build the commands into
-`bin/` with `CGO_ENABLED=0 go build -o bin/ ./cmd/doubletake ./cmd/doubletake-ctl`.
-In Windows PowerShell, set `$env:CGO_ENABLED = '0'` before running `go build`.
+Install the [GStreamer runtime and development packages](https://gstreamer.freedesktop.org/download/).
+With cgo enabled, `go build -o bin/ ./cmd/doubletake` builds the sender and
+its daemon controller. Use `doubletake ctl -help` for daemon commands.
 
-- On macOS, GStreamer uses `avfvideosrc` for video. On macOS 13 or later,
-  `make macos-audio-helper` builds the ScreenCaptureKit system audio helper
-  next to `doubletake`. Allow Screen & System Audio Recording when macOS
-  prompts. Use `-no-audio` for video-only capture without the helper.
-- On Windows, use an interactive desktop session. The GStreamer runtime needs
-  `d3d11screencapturesrc` for video and `wasapi2src` for system audio loopback.
+- macOS 13 or newer uses GStreamer's `avfvideosrc` for video and
+  ScreenCaptureKit for system audio. Set `PKG_CONFIG_PATH` to
+  `/Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig`.
+  Allow Screen & System Audio Recording when prompted.
+- On Windows, use MinGW-w64/UCRT GCC and `pkgconf`. Add GStreamer's `bin`
+  directory to PATH and set `PKG_CONFIG_LIBDIR` to its `lib/pkgconfig`.
+  Desktop capture uses `d3d11screencapturesrc` and `wasapi2src` for audio
+  loopback. If Go rejects static LLVM LTO archives from the MSVC SDK, build
+  with a private copy of the SDK and remove those `.a` archives from its
+  `lib` directory. Keep the `.lib` import libraries.
 
-These builds use GStreamer's subprocess backend and a fixed video encoder
-configuration. CI verifies custom media playback through a loopback receiver
-on both platforms. Desktop capture requires an interactive session with the
+CI verifies custom media playback through a loopback receiver on both
+platforms. Desktop capture requires an interactive session with the
 appropriate display and audio permissions.
 
 ## Audio
@@ -100,8 +102,8 @@ Audio defaults to monitoring the local output. The selectable output
 GStreamer's `pulsesrc`. Use its volume and mute controls for the captured audio
 and route applications to it through your sound settings.
 
-ALAC is built in. Default builds also support AAC-ELD when the external FDK-AAC
-library is installed. Without it, audio requires a receiver offering ALAC.
+ALAC is built in. Default Linux builds also support AAC-ELD when the external
+FDK-AAC library is installed. With ALAC alone, the receiver must offer ALAC.
 See [audio codec build options](development.md#audio-codecs).
 
 Daemon mode shares one timestamped PCM source and one encoder per audio codec.

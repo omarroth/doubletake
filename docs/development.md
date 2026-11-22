@@ -39,7 +39,7 @@ source timestamp gaps, RED recovery, and retransmission. Four simultaneous recei
 shared capture and matching picture presentation deadlines across clocks.
 
 ```sh
-CGO_ENABLED=1 go test -tags 'gstreamer_cgo fdk_aac' ./internal/airplay -run '^TestReceiverHeadless' -v
+CGO_ENABLED=1 go test -tags fdk_aac ./internal/airplay -run '^TestReceiverHeadless' -v
 ```
 
 For a manual loopback test:
@@ -74,7 +74,7 @@ private server automatically to exercise those tests.
 
 ## Audio codecs
 
-Default builds include ALAC and the external FDK-AAC encoder bridge for AAC-ELD.
+Default Linux builds include ALAC and the external FDK-AAC bridge for AAC-ELD.
 Install the FDK-AAC development headers to build it. On Linux, doubletake loads
 `libfdk-aac.so.2` or `libfdk-aac.so.1` at startup and checks for AAC-ELD support.
 The library is supplied by the distribution and is not bundled. If neither
@@ -92,8 +92,8 @@ select only formats they advertise.
 To build without FDK-AAC, retaining GStreamer and ALAC:
 
 ```sh
-make BUILD_TAGS=gstreamer_cgo
-make test BUILD_TAGS=gstreamer_cgo
+make BUILD_TAGS=
+make test BUILD_TAGS=
 ```
 
 This build cannot send audio to receivers requiring AAC-ELD without ALAC;
@@ -107,8 +107,8 @@ Before tagging a release on `main`, run:
 ```sh
 make test
 make test-go
-CGO_ENABLED=1 go test -race -tags 'gstreamer_cgo fdk_aac' ./...
-CGO_ENABLED=1 go vet -tags 'gstreamer_cgo fdk_aac' ./...
+CGO_ENABLED=1 go test -race -tags fdk_aac ./...
+CGO_ENABLED=1 go vet -tags fdk_aac ./...
 make release VERSION=vX.Y.Z
 (cd dist && sha256sum -c SHA256SUMS)
 ```
@@ -118,7 +118,8 @@ make release VERSION=vX.Y.Z
 to `linux-x86_64` or `linux-arm64` according to the Go target architecture.
 Build on Ubuntu 20.04 to retain the supported glibc and GStreamer baseline;
 a binary built on a newer system can require newer libraries. The sender links
-GStreamer, and the controller remains static.
+GStreamer and includes the daemon controller as `doubletake ctl`. The release
+also includes the standalone static controller.
 
 The archive is a relative installation tree, with no enclosing version folder:
 
@@ -193,7 +194,7 @@ loopback transport, the configured buffer, and guest scheduling.
 Run the same workload in a Linux VM with the desktop dependencies installed:
 
 ```sh
-make doubletake-test-receiver BUILD_TAGS=gstreamer_cgo
+make doubletake-test-receiver BUILD_TAGS=
 scripts/desktop-test/run.sh x11 dist/doubletake-VERSION-linux-x86_64.tar.gz \
   bin/doubletake-test-receiver desktop-report
 ```

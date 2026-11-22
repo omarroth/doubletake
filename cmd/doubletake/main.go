@@ -174,8 +174,8 @@ func main() {
 			*videoSource = path
 		}
 	}
-	if !*noVideo && !airplay.HasInProcessGStreamer() {
-		log.Println("warning: build without in-process GStreamer uses gst-launch-1.0 for video; adaptive stream quality is unavailable")
+	if !airplay.HasInProcessGStreamer() {
+		log.Fatal("media capture requires cgo and the GStreamer development libraries")
 	}
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)

@@ -1,4 +1,4 @@
-//go:build gstreamer_cgo && cgo && linux
+//go:build cgo && (linux || darwin || windows)
 
 package airplay
 
@@ -28,22 +28,9 @@ static char *dt_receiver_decode_error(DTReceiverDecoder *p) {
     return result;
 }
 
-static int dt_receiver_has_decoder(const char *name) {
-    gst_init(NULL, NULL);
-    GstElementFactory *factory = gst_element_factory_find(name);
-    if (!factory) return 0;
-    gst_object_unref(factory);
-    return 1;
-}
-
 static DTReceiverDecoder *dt_receiver_decoder_new(const char *description,
     const char *caps_string, const void *config, size_t config_size, char **error) {
     GError *e = NULL;
-    if (!gst_init_check(NULL, NULL, &e)) {
-        *error = g_strdup(e ? e->message : "initialize GStreamer");
-        if (e) g_error_free(e);
-        return NULL;
-    }
     GstElement *pipeline = gst_parse_launch(description, &e);
     if (e || !pipeline) {
         *error = g_strdup(e ? e->message : "create decoder pipeline");
@@ -150,25 +137,22 @@ type receiverGstDecoder struct {
 
 func receiverDecoderAvailable() bool { return true }
 
-func receiverHasDecoder(name string) bool {
-	s := C.CString(name)
-	defer C.free(unsafe.Pointer(s))
-	return C.dt_receiver_has_decoder(s) != 0
-}
-
 func newReceiverMediaDecoder(codec string, config []byte, callbacks receiverDecodeCallbacks) (receiverDecoder, error) {
+	if err := initializeGStreamer(); err != nil {
+		return nil, err
+	}
 	var caps, chain string
 	switch codec {
 	case "h264":
 		decoder := "avdec_h264 max-threads=1"
-		if !receiverHasDecoder("avdec_h264") {
+		if !hasGstElement("avdec_h264") {
 			decoder = "openh264dec"
 		}
 		caps = "video/x-h264,stream-format=avc,alignment=au"
 		chain = "h264parse ! " + decoder + " ! videoconvert ! video/x-raw,format=GRAY8"
 	case "hevc":
 		decoder := "avdec_h265 max-threads=1"
-		if !receiverHasDecoder("avdec_h265") {
+		if !hasGstElement("avdec_h265") {
 			decoder = "libde265dec"
 		}
 		caps = "video/x-h265,stream-format=hvc1,alignment=au"

@@ -1,4 +1,4 @@
-//go:build gstreamer_cgo && cgo && linux
+//go:build cgo && (linux || darwin || windows)
 
 package airplay
 
@@ -6,6 +6,7 @@ package airplay
 #cgo pkg-config: gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
+#include <gst/app/gstappsrc.h>
 #include <gst/video/video-event.h>
 #include <stdlib.h>
 
@@ -18,10 +19,8 @@ typedef struct {
 	GstElement *encoder;
 	GstElement *rate;
 	GstAppSink *sink;
+	GstAppSink *audio_sink;
 	GstBus *bus;
-	GstSample *pulled_sample;
-	GstBuffer *pulled_buffer;
-	GstMapInfo pulled_map;
 } DTGstPipeline;
 
 static void dt_set_error(char **out, const char *message) {
@@ -55,93 +54,90 @@ static char *dt_bus_error(DTGstPipeline *p) {
 	return result;
 }
 
-static DTGstPipeline *dt_gst_pipeline_new(char **argv, gboolean playback, char **error_out) {
-	GError *error = NULL;
-	if (!gst_init_check(NULL, NULL, &error)) {
-		dt_set_gerror(error_out, "initialize GStreamer", error);
-		if (error != NULL) g_error_free(error);
-		return NULL;
-	}
-	guint major = 0, minor = 0, micro = 0, nano = 0;
-	gst_version(&major, &minor, &micro, &nano);
-	if (major < 1 || (major == 1 && minor < 16)) {
-		dt_set_error(error_out, "GStreamer 1.16 or newer is required");
-		return NULL;
-	}
+static void dt_gst_pipeline_free(DTGstPipeline *p);
 
+static char *dt_gst_init(void) {
+	GError *error = NULL;
+	if (gst_init_check(NULL, NULL, &error)) return NULL;
+	char *message = g_strdup(error != NULL ? error->message : "initialize GStreamer");
+	if (error != NULL) g_error_free(error);
+	return message;
+}
+
+static int dt_gst_has_element(const char *name, const char *property) {
+	GstElementFactory *factory = gst_element_factory_find(name);
+	if (!factory) return 0;
+	int found = 1;
+	if (property != NULL) {
+		GstElement *element = gst_element_factory_create(factory, NULL);
+		found = element != NULL && g_object_class_find_property(G_OBJECT_GET_CLASS(element), property) != NULL;
+		if (element) gst_object_unref(element);
+	}
+	gst_object_unref(factory);
+	return found;
+}
+
+static GstAppSink *dt_find_sink(GstElement *bin, const char *name) {
+	if (bin == NULL) return NULL;
+	GstElement *sink = GST_IS_BIN(bin) ? gst_bin_get_by_name(GST_BIN(bin), name) : gst_object_ref(bin);
+	if (sink == NULL) return NULL;
+	if (!GST_IS_APP_SINK(sink)) {
+		gst_object_unref(sink);
+		return NULL;
+	}
+	return GST_APP_SINK(sink);
+}
+
+static DTGstPipeline *dt_gst_pipeline_new(char **argv, gboolean playback, gboolean output, char **error_out) {
+	GError *error = NULL;
 	GstElement *pipeline = gst_parse_launchv((const gchar **)argv, &error);
-	if (pipeline == NULL) {
+	if (pipeline == NULL || error != NULL || !GST_IS_BIN(pipeline)) {
 		dt_set_gerror(error_out, "parse GStreamer pipeline", error);
 		if (error != NULL) g_error_free(error);
-		return NULL;
-	}
-	if (error != NULL) {
-		dt_set_gerror(error_out, "parse GStreamer pipeline", error);
-		g_error_free(error);
-		gst_object_unref(pipeline);
-		return NULL;
-	}
-	if (!GST_IS_BIN(pipeline)) {
-		dt_set_error(error_out, "parsed GStreamer graph is not a bin");
-		gst_object_unref(pipeline);
+		if (pipeline != NULL) gst_object_unref(pipeline);
 		return NULL;
 	}
 
 	DTGstPipeline *result = g_new0(DTGstPipeline, 1);
 	result->pipeline = pipeline;
 	GstElement *video = pipeline;
-	if (playback) g_object_get(pipeline, "video-sink", &video, NULL);
+	if (playback) {
+		GstElement *audio = NULL;
+		g_object_get(pipeline, "video-sink", &video, "audio-sink", &audio, NULL);
+		result->audio_sink = dt_find_sink(audio, "doubletake-audio-output");
+		if (audio != NULL) gst_object_unref(audio);
+	}
 	if (video != NULL && GST_IS_BIN(video)) {
 		result->encoder = gst_bin_get_by_name(GST_BIN(video), "doubletake-encoder");
 		result->rate = gst_bin_get_by_name(GST_BIN(video), "doubletake-rate");
 	}
+	if (output) result->sink = dt_find_sink(video, "doubletake-output");
 	if (playback && video != NULL) gst_object_unref(video);
-	GstElement *sink = playback ? NULL : gst_bin_get_by_name(GST_BIN(pipeline), "doubletake-output");
-	if (result->encoder == NULL || result->rate == NULL || (!playback && (sink == NULL || !GST_IS_APP_SINK(sink)))) {
-		dt_set_error(error_out, "linked pipeline is missing its named rate control, encoder, or appsink");
-		if (sink != NULL) gst_object_unref(sink);
-		if (result->rate != NULL) gst_object_unref(result->rate);
-		if (result->encoder != NULL) gst_object_unref(result->encoder);
-		gst_object_unref(pipeline);
-		g_free(result);
+	if ((output && result->sink == NULL) || (playback && result->audio_sink == NULL)) {
+		dt_set_error(error_out, "GStreamer graph is missing an appsink");
+		dt_gst_pipeline_free(result);
 		return NULL;
 	}
 	result->bus = gst_element_get_bus(pipeline);
-	if (sink != NULL) {
-		result->sink = GST_APP_SINK(sink);
-		gst_app_sink_set_emit_signals(result->sink, FALSE);
-		gst_app_sink_set_drop(result->sink, FALSE);
-		gst_app_sink_set_max_buffers(result->sink, 8);
-	}
-
-	GstStateChangeReturn state = gst_element_set_state(pipeline, GST_STATE_PLAYING);
-	if (state == GST_STATE_CHANGE_FAILURE) {
+	if (gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
 		char *bus_error = dt_bus_error(result);
 		dt_set_error(error_out, bus_error != NULL ? bus_error : "put GStreamer pipeline in PLAYING state");
 		g_free(bus_error);
-		gst_element_set_state(pipeline, GST_STATE_NULL);
-		gst_object_unref(result->bus);
-		if (result->sink != NULL) gst_object_unref(result->sink);
-		gst_object_unref(result->rate);
-		gst_object_unref(result->encoder);
-		gst_object_unref(result->pipeline);
-		g_free(result);
+		dt_gst_pipeline_free(result);
 		return NULL;
 	}
 	return result;
 }
 
-// Playback has two fd sinks. Wait for both tracks' EOS, or for stop to flush
-// the bus and return the pipeline to NULL.
-static void dt_gst_playback_wait(DTGstPipeline *p, char **error_out) {
+static void dt_gst_wait(DTGstPipeline *p, char **error_out) {
 	for (;;) {
-		GstMessage *message = gst_bus_timed_pop_filtered(p->bus, 100 * GST_MSECOND,
+		GstMessage *message = gst_bus_timed_pop_filtered(p->bus, 25 * GST_MSECOND,
 			GST_MESSAGE_EOS | GST_MESSAGE_ERROR);
 		if (message != NULL) {
 			if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
 				GError *error = NULL;
 				gst_message_parse_error(message, &error, NULL);
-				dt_set_gerror(error_out, "GStreamer playback", error);
+				dt_set_gerror(error_out, "GStreamer pipeline", error);
 				if (error != NULL) g_error_free(error);
 			}
 			gst_message_unref(message);
@@ -153,50 +149,23 @@ static void dt_gst_playback_wait(DTGstPipeline *p, char **error_out) {
 	}
 }
 
-static void dt_gst_pipeline_release_sample(DTGstPipeline *p) {
-	if (p == NULL || p->pulled_sample == NULL) return;
-	if (p->pulled_buffer != NULL) {
-		gst_buffer_unmap(p->pulled_buffer, &p->pulled_map);
-	}
-	gst_sample_unref(p->pulled_sample);
-	p->pulled_sample = NULL;
-	p->pulled_buffer = NULL;
-}
-
-// The returned pointer remains valid until dt_gst_pipeline_release_sample.
-// Returns one for a sample, zero for EOS/stop, and minus one for an error.
-static int dt_gst_pipeline_pull(DTGstPipeline *p, const unsigned char **data_out, size_t *size_out, char **error_out) {
-	if (p == NULL || data_out == NULL || size_out == NULL) {
-		dt_set_error(error_out, "invalid linked-pipeline pull arguments");
-		return -1;
-	}
-	if (p->pulled_sample != NULL) {
-		dt_set_error(error_out, "previous linked-pipeline sample was not released");
-		return -1;
-	}
-	*data_out = NULL;
-	*size_out = 0;
-	GstSample *sample = gst_app_sink_pull_sample(p->sink);
-	if (sample == NULL) {
-		char *bus_error = dt_bus_error(p);
-		if (bus_error != NULL) {
-			dt_set_error(error_out, bus_error);
-			g_free(bus_error);
-			return -1;
-		}
-		return 0;
-	}
+// Returns one for a mapped sample, zero for no sample, or minus one for a
+// bad buffer.
+static int dt_gst_pull(GstAppSink *sink, GstSample **sample_out, GstMapInfo *map) {
+	GstSample *sample = gst_app_sink_try_pull_sample(sink, 25 * GST_MSECOND);
+	if (sample == NULL) return 0;
 	GstBuffer *buffer = gst_sample_get_buffer(sample);
-	if (buffer == NULL || !gst_buffer_map(buffer, &p->pulled_map, GST_MAP_READ)) {
-		dt_set_error(error_out, "map GStreamer appsink buffer");
+	if (buffer == NULL || !gst_buffer_map(buffer, map, GST_MAP_READ)) {
 		gst_sample_unref(sample);
 		return -1;
 	}
-	p->pulled_sample = sample;
-	p->pulled_buffer = buffer;
-	*data_out = p->pulled_map.data;
-	*size_out = p->pulled_map.size;
+	*sample_out = sample;
 	return 1;
+}
+
+static void dt_gst_release(GstSample *sample, GstMapInfo *map) {
+	gst_buffer_unmap(gst_sample_get_buffer(sample), map);
+	gst_sample_unref(sample);
 }
 
 static int dt_gst_element_set_uint(GstElement *element, const char *property, guint64 value, gboolean require_mutable, char **error_out) {
@@ -312,9 +281,9 @@ static void dt_gst_pipeline_stop(DTGstPipeline *p) {
 static void dt_gst_pipeline_free(DTGstPipeline *p) {
 	if (p == NULL) return;
 	dt_gst_pipeline_stop(p);
-	dt_gst_pipeline_release_sample(p);
 	if (p->bus != NULL) gst_object_unref(p->bus);
 	if (p->sink != NULL) gst_object_unref(p->sink);
+	if (p->audio_sink != NULL) gst_object_unref(p->audio_sink);
 	if (p->rate != NULL) gst_object_unref(p->rate);
 	if (p->encoder != NULL) gst_object_unref(p->encoder);
 	if (p->pipeline != NULL) gst_object_unref(p->pipeline);
@@ -334,7 +303,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -350,41 +319,54 @@ func HasInProcessGStreamer() bool { return true }
 type linkedGStreamerPipeline struct {
 	mu       sync.Mutex
 	handle   *C.DTGstPipeline
-	reader   *io.PipeReader
-	writer   *io.PipeWriter
+	video    *io.PipeWriter
+	audio    *io.PipeWriter
 	wait     chan error
-	done     chan struct{}
 	stopOnce sync.Once
 	encoder  string
+	cleanup  func()
 }
 
 func linkedPipelineArguments(args []string, encoderName string) ([]string, error) {
+	return linkedOutputArguments(args, encoderName, linkedOutputName)
+}
+
+func linkedOutputArguments(args []string, encoderName, sinkName string) ([]string, error) {
 	result := make([]string, 0, len(args)+4)
-	namedEncoder := false
-	replacedSink := false
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
+	namedEncoder := encoderName == ""
+	for _, arg := range args {
 		if arg == "--quiet" {
 			continue
 		}
 		if arg == "fdsink" {
-			result = append(result, "appsink", "name="+linkedOutputName, "sync=false", "async=false", "max-buffers=8", "drop=false")
-			replacedSink = true
-			break
+			if !namedEncoder {
+				return nil, fmt.Errorf("GStreamer graph does not contain selected encoder %q", encoderName)
+			}
+			return append(result, "appsink", "name="+sinkName, "sync=false", "async=false", "max-buffers=8", "drop=false", "wait-on-eos=false"), nil
 		}
 		result = append(result, arg)
-		if arg == encoderName {
+		if arg == encoderName && !namedEncoder {
 			result = append(result, "name="+linkedEncoderName)
 			namedEncoder = true
 		}
 	}
-	if !namedEncoder {
-		return nil, fmt.Errorf("GStreamer graph does not contain selected encoder %q", encoderName)
+	return nil, fmt.Errorf("GStreamer graph is missing its output")
+}
+
+func hasGstElement(name string) bool { return hasGstProperty(name, "") }
+
+func hasGstProperty(name, property string) bool {
+	if initializeGStreamer() != nil {
+		return false
 	}
-	if !replacedSink {
-		return nil, fmt.Errorf("GStreamer graph does not end in fdsink")
+	factory := C.CString(name)
+	defer C.free(unsafe.Pointer(factory))
+	var field *C.char
+	if property != "" {
+		field = C.CString(property)
+		defer C.free(unsafe.Pointer(field))
 	}
-	return result, nil
+	return C.dt_gst_has_element(factory, field) != 0
 }
 
 func replacePipelineFD(args []string, inheritedFD, linkedFD int) []string {
@@ -407,142 +389,140 @@ func cError(message *C.char) error {
 	return fmt.Errorf("%s", C.GoString(message))
 }
 
-func newLinkedGStreamerPipeline(ctx context.Context, args []string, encoder encoderResult, extraFiles []*os.File) (*linkedGStreamerPipeline, error) {
-	linkedArgs, err := linkedPipelineArguments(args, encoder.name)
-	if err != nil {
+var initializeGStreamer = sync.OnceValue(func() error {
+	return cError(C.dt_gst_init())
+})
+
+func openLinkedGStreamerGraph(args []string, playback, output bool) (*C.DTGstPipeline, error) {
+	if err := initializeGStreamer(); err != nil {
 		return nil, err
 	}
-	if len(extraFiles) > 1 {
-		return nil, fmt.Errorf("linked GStreamer supports at most one inherited PipeWire descriptor")
-	}
-	if len(extraFiles) == 1 {
-		fd, err := syscall.Dup(int(extraFiles[0].Fd()))
-		if err != nil {
-			return nil, fmt.Errorf("duplicate PipeWire descriptor: %w", err)
-		}
-		// gst-launch receives the first ExtraFiles descriptor as fd 3. The
-		// in-process pipewiresrc instead owns this duplicate directly.
-		linkedArgs = replacePipelineFD(linkedArgs, 3, fd)
-	}
-
-	handle, err := openLinkedGStreamerGraph(linkedArgs, false)
-	if err != nil {
-		return nil, err
-	}
-
-	reader, writer := io.Pipe()
-	pipeline := &linkedGStreamerPipeline{
-		handle: handle, reader: reader, writer: writer,
-		wait: make(chan error, 1), done: make(chan struct{}), encoder: encoder.name,
-	}
-	go pipeline.run()
-	go func() {
-		select {
-		case <-ctx.Done():
-			pipeline.stop()
-		case <-pipeline.done:
-		}
-	}()
-	return pipeline, nil
-}
-
-func openLinkedGStreamerGraph(args []string, playback bool) (*C.DTGstPipeline, error) {
 	cArgs := make([]*C.char, len(args)+1)
 	for index, arg := range args {
 		cArgs[index] = C.CString(arg)
+		defer C.free(unsafe.Pointer(cArgs[index]))
 	}
-	defer func() {
-		for _, arg := range cArgs[:len(args)] {
-			C.free(unsafe.Pointer(arg))
-		}
-	}()
-	var playbackFlag C.gboolean
+	var playbackFlag, outputFlag C.gboolean
 	if playback {
 		playbackFlag = 1
 	}
-	var message *C.char
-	handle := C.dt_gst_pipeline_new((**C.char)(unsafe.Pointer(&cArgs[0])), playbackFlag, &message)
-	if handle == nil {
-		if err := cError(message); err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("create linked GStreamer pipeline")
+	if output {
+		outputFlag = 1
 	}
-
+	var message *C.char
+	handle := C.dt_gst_pipeline_new((**C.char)(unsafe.Pointer(&cArgs[0])), playbackFlag, outputFlag, &message)
+	if handle == nil {
+		return nil, cError(message)
+	}
 	return handle, nil
 }
 
-func launchLinkedMediaGraph(ctx context.Context, args []string, encoder encoderResult, video, videoWriter, audio, audioWriter *os.File) (*runningGStreamerPipeline, error) {
-	handle, err := openLinkedGStreamerGraph(args, true)
+func probeGstPipeline(ctx context.Context, args []string) error {
+	handle, err := openLinkedGStreamerGraph(args, false, false)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("start GStreamer source probe: %w", err)
 	}
-	p := &linkedGStreamerPipeline{handle: handle, encoder: encoder.name}
-	finished := make(chan struct{})
-	wait := make(chan error, 1)
-	go func() {
-		var message *C.char
-		C.dt_gst_playback_wait(handle, &message)
-		if message != nil {
-			_ = video.Close()
-			_ = audio.Close()
-		}
-		p.mu.Lock()
-		p.handle = nil
-		p.mu.Unlock()
-		C.dt_gst_pipeline_free(handle)
-		_ = videoWriter.Close()
-		_ = audioWriter.Close()
-		wait <- cError(message)
-		close(finished)
-	}()
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = video.Close()
-			_ = audio.Close()
-			p.stop()
-		case <-finished:
-		}
-	}()
-	return &runningGStreamerPipeline{stdout: video, waitResult: wait, runtime: p}, nil
+	p := &linkedGStreamerPipeline{handle: handle, wait: make(chan error, 1)}
+	p.run(ctx, handle)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return <-p.wait
 }
 
-func (p *linkedGStreamerPipeline) run() {
-	var result error
-	defer func() {
-		p.mu.Lock()
-		handle := p.handle
-		p.handle = nil
-		p.mu.Unlock()
-		if handle != nil {
-			C.dt_gst_pipeline_free(handle)
-		}
-		_ = p.writer.CloseWithError(result)
-		close(p.done)
-		p.wait <- result
-		close(p.wait)
-	}()
+func startLinkedGraph(ctx context.Context, handle *C.DTGstPipeline, encoder string, audio bool, cleanup func()) (*runningGStreamerPipeline, io.ReadCloser) {
+	reader, writer := io.Pipe()
+	p := &linkedGStreamerPipeline{handle: handle, video: writer, encoder: encoder, wait: make(chan error, 1), cleanup: cleanup}
+	var pcm io.ReadCloser
+	if audio {
+		pcm, p.audio = io.Pipe()
+	}
+	go p.run(ctx, handle)
+	return &runningGStreamerPipeline{stdout: reader, waitResult: p.wait, runtime: p}, pcm
+}
 
+func launchLinkedMediaGraph(ctx context.Context, uri string, encoder encoderResult, videoArgs, audioArgs []string) (*runningGStreamerPipeline, io.ReadCloser, error) {
+	video, err := linkedPipelineArguments(videoArgs, encoder.name)
+	if err != nil {
+		return nil, nil, err
+	}
+	audio, err := linkedOutputArguments(audioArgs, "", "doubletake-audio-output")
+	if err != nil {
+		return nil, nil, err
+	}
+	handle, err := openLinkedGStreamerGraph(mediaGraphArgs(uri, video, audio), true, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	pipeline, pcm := startLinkedGraph(ctx, handle, encoder.name, true, nil)
+	return pipeline, pcm, nil
+}
+
+func (p *linkedGStreamerPipeline) run(ctx context.Context, handle *C.DTGstPipeline) {
+	stop := context.AfterFunc(ctx, p.stop)
+	defer stop()
+	ended := make(chan struct{})
+	var pumps sync.WaitGroup
+	if p.video != nil {
+		pumps.Go(func() { p.pump(handle.sink, p.video, ended) })
+	}
+	if p.audio != nil {
+		pumps.Go(func() { p.pump(handle.audio_sink, p.audio, ended) })
+	}
+	var message *C.char
+	C.dt_gst_wait(handle, &message)
+	err := cError(message)
+	if err != nil {
+		p.abort(err)
+	}
+	close(ended)
+	pumps.Wait()
+	p.mu.Lock()
+	p.handle = nil
+	p.mu.Unlock()
+	C.dt_gst_pipeline_free(handle)
+	if p.cleanup != nil {
+		p.cleanup()
+	}
+	p.wait <- err
+	close(p.wait)
+}
+
+func (p *linkedGStreamerPipeline) pump(sink *C.GstAppSink, writer *io.PipeWriter, ended <-chan struct{}) {
+	defer writer.Close()
+	received := false
 	for {
-		var data *C.uchar
-		var size C.size_t
-		var message *C.char
-		status := C.dt_gst_pipeline_pull(p.handle, (**C.uchar)(unsafe.Pointer(&data)), &size, &message)
-		if status < 0 {
-			result = cError(message)
+		var sample *C.GstSample
+		var mapped C.GstMapInfo
+		switch C.dt_gst_pull(sink, &sample, &mapped) {
+		case -1:
+			p.abort(fmt.Errorf("map GStreamer appsink buffer"))
 			return
-		}
-		if status == 0 {
-			return
-		}
-		payload := C.GoBytes(unsafe.Pointer(data), C.int(size))
-		C.dt_gst_pipeline_release_sample(p.handle)
-		if len(payload) == 0 {
-			continue
-		}
-		if _, err := p.writer.Write(payload); err != nil {
-			return
+		case 0:
+			select {
+			case <-ended:
+				return
+			default:
+			}
+			if received && C.gst_app_sink_is_eos(sink) != 0 {
+				return
+			}
+			// An inactive playbin sink can appear to be at EOS before
+			// track selection and return immediately without a sample.
+			if !received && C.gst_app_sink_is_eos(sink) != 0 {
+				time.Sleep(2 * time.Millisecond)
+			}
+		case 1:
+			received = true
+			payload := C.GoBytes(unsafe.Pointer(mapped.data), C.int(mapped.size))
+			C.dt_gst_release(sample, &mapped)
+			if len(payload) == 0 {
+				continue
+			}
+			if _, err := writer.Write(payload); err != nil {
+				p.stop()
+				return
+			}
 		}
 	}
 }
@@ -613,8 +593,16 @@ func (p *linkedGStreamerPipeline) requestKeyFrame() error {
 	})
 }
 
-func (p *linkedGStreamerPipeline) stop() {
+func (p *linkedGStreamerPipeline) stop() { p.abort(nil) }
+
+func (p *linkedGStreamerPipeline) abort(err error) {
 	p.stopOnce.Do(func() {
+		if p.video != nil {
+			_ = p.video.CloseWithError(err)
+		}
+		if p.audio != nil {
+			_ = p.audio.CloseWithError(err)
+		}
 		p.mu.Lock()
 		if p.handle != nil {
 			C.dt_gst_pipeline_stop(p.handle)
@@ -623,12 +611,46 @@ func (p *linkedGStreamerPipeline) stop() {
 	})
 }
 
-func launchLinkedGStreamerPipeline(ctx context.Context, args []string, encoder encoderResult, extraFiles []*os.File) (*runningGStreamerPipeline, bool, error) {
-	pipeline, err := newLinkedGStreamerPipeline(ctx, args, encoder, extraFiles)
+func launchGStreamerPipeline(ctx context.Context, args []string, encoder encoderResult, portal *os.File) (*runningGStreamerPipeline, error) {
+	linked, err := linkedPipelineArguments(args, encoder.name)
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
-	return &runningGStreamerPipeline{
-		stdout: pipeline.reader, waitResult: pipeline.wait, runtime: pipeline,
-	}, true, nil
+	var cleanup func()
+	if portal != nil {
+		linked, cleanup, err = linkedPortalArguments(linked, portal)
+		if err != nil {
+			return nil, err
+		}
+	}
+	handle, err := openLinkedGStreamerGraph(linked, false, true)
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, fmt.Errorf("start GStreamer pipeline: %w", err)
+	}
+	pipeline, _ := startLinkedGraph(ctx, handle, encoder.name, false, cleanup)
+	return pipeline, nil
+}
+
+func launchAudioPipeline(ctx context.Context, args []string, native bool) (*runningGStreamerPipeline, error) {
+	linked, err := linkedPipelineArguments(args, "")
+	if err != nil {
+		return nil, err
+	}
+	handle, err := openLinkedGStreamerGraph(linked, false, true)
+	if err != nil {
+		return nil, err
+	}
+	var cleanup func()
+	if native {
+		cleanup, err = startSystemAudio(unsafe.Pointer(handle.pipeline))
+		if err != nil {
+			C.dt_gst_pipeline_free(handle)
+			return nil, err
+		}
+	}
+	pipeline, _ := startLinkedGraph(ctx, handle, "", false, cleanup)
+	return pipeline, nil
 }

@@ -11,7 +11,6 @@ import (
 	"log"
 	"math"
 	"net"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -117,7 +116,6 @@ type AudioCapture struct {
 	encodedFrames   audioEncodedFrameReader
 	outputVolume    *capturedOutputVolume
 	stopShared      func()
-	gstCmd          *exec.Cmd
 	pcmPipe         io.ReadCloser
 	pcmFrames       audioPCMFrameReader
 	finite          bool
@@ -296,11 +294,11 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 			cancel()
 			return nil, fmt.Errorf("macOS desktop audio uses the monitor route")
 		}
-		srcArgs = []string{"fdsrc", "fd=0", "do-timestamp=true", "blocksize=8192", "!",
-			"rawaudioparse", "pcm-format=f32le", "sample-rate=48000", "num-channels=2"}
+		srcArgs = []string{"appsrc", "name=doubletake-system-audio", "is-live=true", "format=time", "do-timestamp=true",
+			"caps=audio/x-raw,format=F32LE,rate=48000,channels=2,layout=interleaved"}
 	} else {
-		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
-		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil
+		hasPipeWireSource := hasGstElement("pipewiresrc")
+		hasPulseSource := hasGstElement("pulsesrc")
 		monitor := ""
 		if source == AudioSourceOutput {
 			if !hasPulseSource {
@@ -357,59 +355,21 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 		})
 	}
 	gstArgs := audioCapturePipelineArgs(srcArgs, codec, timestamped)
-	dbg("[AUDIO] PCM capture pipeline: gst-launch-1.0 %s", strings.Join(gstArgs, " "))
-
-	gstCmd := exec.CommandContext(captureCtx, "gst-launch-1.0", gstArgs...)
-	gstStdout, err := gstCmd.StdoutPipe()
+	dbg("[AUDIO] PCM capture graph: %s", strings.Join(gstArgs, " "))
+	pipeline, err := launchAudioPipeline(captureCtx, gstArgs, !testTone && runtime.GOOS == "darwin")
 	if err != nil {
 		if ac.eld != nil {
 			ac.eld.Close()
-			ac.eld = nil
 		}
 		cancel()
-		return nil, fmt.Errorf("gst stdout pipe: %w", err)
+		return nil, fmt.Errorf("start audio capture: %w", err)
 	}
-	gstStderr, _ := gstCmd.StderrPipe()
-	var nativeWait <-chan error
-	if !testTone && runtime.GOOS == "darwin" {
-		reader, wait, err := startMacOSAudio(captureCtx)
-		if err != nil {
-			_ = gstStdout.Close()
-			_ = gstStderr.Close()
-			if ac.eld != nil {
-				ac.eld.Close()
-			}
-			cancel()
-			return nil, err
-		}
-		defer reader.Close()
-		gstCmd.Stdin, nativeWait = reader, wait
-	}
-
-	waitResult, err := startGStreamerCommand(gstCmd)
-	if err != nil {
-		if ac.eld != nil {
-			ac.eld.Close()
-			ac.eld = nil
-		}
-		cancel()
-		return nil, fmt.Errorf("start audio capture pipeline: %w", err)
-	}
-	go logStderr("AUDIO-GST", gstStderr)
-
-	ac.gstCmd = gstCmd
-	ac.pcmPipe = gstStdout
+	ac.pcmPipe = pipeline.stdout
 	if timestamped {
-		ac.pcmFrames = newRTPL16PCMFrameReader(gstStdout)
+		ac.pcmFrames = newRTPL16PCMFrameReader(pipeline.stdout)
 	}
 	go func() {
-		ac.waitErr = <-waitResult
-		if nativeWait != nil {
-			cancel()
-			if err := <-nativeWait; err != nil {
-				ac.waitErr = err
-			}
-		}
+		ac.waitErr = <-pipeline.waitResult
 		if releaseOutput != nil {
 			releaseOutput()
 		}
@@ -619,17 +579,7 @@ func (ac *AudioCapture) stop() {
 	if ac.pcmPipe != nil {
 		ac.pcmPipe.Close()
 	}
-	if ac.gstCmd != nil && ac.gstCmd.Process != nil {
-		ac.gstCmd.Process.Kill()
-	}
-	select {
-	case <-ac.waitCh:
-	case <-time.After(2 * time.Second):
-		if ac.gstCmd != nil && ac.gstCmd.Process != nil {
-			ac.gstCmd.Process.Kill()
-		}
-		<-ac.waitCh
-	}
+	<-ac.waitCh
 	ac.eldMu.Lock()
 	if ac.eld != nil {
 		ac.eld.Close()

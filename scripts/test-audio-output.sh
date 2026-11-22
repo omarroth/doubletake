@@ -33,7 +33,7 @@ until pactl info >/dev/null 2>&1; do
     sleep 0.1
 done
 
-CGO_ENABLED=1 go test -count=1 -tags "${BUILD_TAGS:-gstreamer_cgo fdk_aac}" ./internal/airplay \
+CGO_ENABLED=1 go test -count=1 -tags "${BUILD_TAGS-fdk_aac}" ./internal/airplay \
     -run '^Test(AudioOutputOwnerExitIntegration|DedicatedAudioOutput.*Integration|SharedAudioOutputIntegration)$'
 
 if pactl list short modules | grep -Fq doubletake.generation=; then

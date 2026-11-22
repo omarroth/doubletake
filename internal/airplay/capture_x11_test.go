@@ -39,7 +39,7 @@ func TestProbeX11CaptureSourceUsesRealXHandshake(t *testing.T) {
 	if err == nil {
 		t.Fatal("stale X11 display passed the source probe")
 	}
-	for _, want := range []string{display, "GStreamer stderr"} {
+	for _, want := range []string{display, "GStreamer"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("stale X11 source error %q is missing %q", err, want)
 		}
@@ -76,7 +76,7 @@ func TestX11CaptureValidatesAndRetainsLiveXvfbPipeline(t *testing.T) {
 	if !ok || len(prefetched.units) < 2 {
 		t.Fatalf("validated X11 capture retained %#v, want prefetched live access units", capture.frames)
 	}
-	if (capture.cmd == nil || capture.cmd.Process == nil) && capture.runtime == nil {
+	if capture.runtime == nil {
 		t.Fatal("validated X11 capture did not retain its production pipeline")
 	}
 	select {

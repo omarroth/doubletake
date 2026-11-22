@@ -112,7 +112,7 @@ func newReceiverPlayback(cfg receiverPlaybackConfig) (*receiverPlayback, error) 
 		cfg.NetworkNow = bootRelativeNow
 	}
 	if !receiverDecoderAvailable() {
-		return nil, fmt.Errorf("headless playback requires make doubletake-test-receiver (gstreamer_cgo)")
+		return nil, fmt.Errorf("headless playback requires make doubletake-test-receiver")
 	}
 	if cfg.AudioDropEvery < 0 || cfg.AudioDropEvery == 1 {
 		return nil, fmt.Errorf("audio loss interval must be 0 or at least 2")

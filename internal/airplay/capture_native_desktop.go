@@ -32,9 +32,10 @@ func startNativeDesktopCapture(startup, lifetime context.Context, cfg CaptureCon
 		return nil, err
 	}
 	capture := &ScreenCapture{
-		cmd: pipeline.cmd, stdout: pipeline.stdout, cancel: cancel, runtime: pipeline.runtime,
-		waitCh: make(chan struct{}), stderr: pipeline.stderr, format: captureFormat(cfg, encoder),
+		stdout: pipeline.stdout, cancel: cancel, runtime: pipeline.runtime,
+		waitCh: make(chan struct{}), format: captureFormat(cfg, encoder),
 	}
+	capture.enableAutomaticVideoRateControl(cfg)
 	if timestamped {
 		capture.frames = newRTPVideoAccessUnitReader(pipeline.stdout, encoder.codec)
 	}
@@ -46,10 +47,7 @@ func startNativeDesktopCapture(startup, lifetime context.Context, cfg CaptureCon
 	defer stopProbe()
 	if err := probeVideoCaptureStartup(probeCtx, capture, encoder.codec, timestamped); err != nil {
 		capture.Stop()
-		if diagnostic := capture.stderrText(); diagnostic != "" {
-			return nil, fmt.Errorf("desktop capture: %w; GStreamer stderr: %s", err, diagnostic)
-		}
-		return nil, fmt.Errorf("desktop capture: %w", err)
+		return nil, fmt.Errorf("desktop capture: %w", capture.withPipelineError(err))
 	}
 	return capture, nil
 }

@@ -1,4 +1,4 @@
-//go:build gstreamer_cgo && cgo && linux
+//go:build cgo && (linux || darwin || windows)
 
 package airplay
 
@@ -27,7 +27,7 @@ func TestLinkedPipelineArgumentsNameControllableElements(t *testing.T) {
 	if !strings.Contains(pipeline, "x264enc name="+linkedEncoderName+" bitrate=1000") {
 		t.Fatalf("encoder was not named in %q", pipeline)
 	}
-	if !strings.HasSuffix(pipeline, "appsink name="+linkedOutputName+" sync=false async=false max-buffers=8 drop=false") {
+	if !strings.HasSuffix(pipeline, "appsink name="+linkedOutputName+" sync=false async=false max-buffers=8 drop=false wait-on-eos=false") {
 		t.Fatalf("fdsink was not replaced in %q", pipeline)
 	}
 	if strings.Contains(pipeline, "fd=1") || strings.Contains(pipeline, "--quiet") {

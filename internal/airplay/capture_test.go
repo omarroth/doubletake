@@ -1531,9 +1531,7 @@ func closedCaptureForStartupTest(stderr string) *ScreenCapture {
 	close(waitCh)
 	capture := &ScreenCapture{waitCh: waitCh}
 	if stderr != "" {
-		capture.stderr = newCaptureStderrTail()
-		capture.stderr.append(stderr)
-		capture.stderr.finish()
+		capture.waitErr = errors.New(stderr)
 	}
 	return capture
 }

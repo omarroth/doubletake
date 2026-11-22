@@ -1,4 +1,4 @@
-//go:build gstreamer_cgo && cgo && linux
+//go:build cgo && (linux || darwin || windows)
 
 package airplay
 
@@ -14,7 +14,7 @@ import (
 )
 
 func TestReceiverHeadlessPlaybackProfiles(t *testing.T) {
-	if !hasGstElement("x264enc") || !receiverHasDecoder("avdec_h264") || !receiverHasDecoder("avdec_alac") {
+	if !hasGstElement("x264enc") || !hasGstElement("avdec_h264") || !hasGstElement("avdec_alac") {
 		t.Skip("requires x264 and GStreamer libav decoders")
 	}
 	for _, test := range []struct {
@@ -49,7 +49,7 @@ func TestReceiverHeadlessPlaybackProfiles(t *testing.T) {
 			}
 			codec := VideoCodecH264
 			if test.hevc {
-				if !hasGstElement("x265enc") || (!receiverHasDecoder("avdec_h265") && !receiverHasDecoder("libde265dec")) {
+				if !hasGstElement("x265enc") || (!hasGstElement("avdec_h265") && !hasGstElement("libde265dec")) {
 					t.Skip("HEVC encoder/decoder unavailable")
 				}
 				codec = VideoCodecHEVC
@@ -168,7 +168,7 @@ func TestReceiverHeadlessPlaybackProfiles(t *testing.T) {
 }
 
 func TestReceiverHeadlessALACIsLosslessAcrossReorderAndWrap(t *testing.T) {
-	if !receiverHasDecoder("avdec_alac") {
+	if !hasGstElement("avdec_alac") {
 		t.Skip("requires GStreamer ALAC decoder")
 	}
 	for _, mode := range []string{"plaintext", "AES", "ChaCha"} {

@@ -1,3 +1,5 @@
+//go:build cgo && (linux || darwin || windows)
+
 package daemon
 
 import (
