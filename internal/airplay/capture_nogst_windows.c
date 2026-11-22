@@ -8,11 +8,14 @@
 #include <mfidl.h>
 #include <mftransform.h>
 #include <icodecapi.h>
-#include <wmcodecdsp.h>
 #include <codecapi.h>
 #include <oleauto.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+// CLSID_CMSH264EncoderMFT from wmcodecdsp.h. That header pulls in legacy
+// DirectShow declarations that clash with icodecapi.h in newer MinGW headers.
+static const GUID dt_CMSH264EncoderMFT = {0x6ca50344, 0x051a, 0x4ded, {0x97, 0x79, 0xa4, 0x33, 0x05, 0x16, 0x5e, 0x35}};
 
 static const GUID dt_AVEncCommonMeanBitRate = {STATIC_CODECAPI_AVEncCommonMeanBitRate};
 static const GUID dt_AVEncVideoForceKeyFrame = {STATIC_CODECAPI_AVEncVideoForceKeyFrame};
@@ -114,7 +117,7 @@ DTWinVideo *dt_win_video_open(int width, int height, int fps, int bitrate,
     hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
     if (FAILED(hr)) goto fail;
     video->mf_started = TRUE;
-    hr = CoCreateInstance(&CLSID_CMSH264EncoderMFT, NULL, CLSCTX_INPROC_SERVER,
+    hr = CoCreateInstance(&dt_CMSH264EncoderMFT, NULL, CLSCTX_INPROC_SERVER,
         &IID_IMFTransform, (void **)&video->encoder);
     if (FAILED(hr)) goto fail;
     IMFTransform_QueryInterface(video->encoder, &IID_ICodecAPI, (void **)&video->controls);
