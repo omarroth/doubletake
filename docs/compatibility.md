@@ -97,10 +97,22 @@ appropriate display and audio permissions.
 
 ## Builds without GStreamer
 
-Run `make doubletake-native` on the target platform. On macOS and Windows,
-a C compiler and the OS SDK are required at build time. With cgo enabled,
-`go build -tags no_gstreamer -o bin/native/ ./cmd/doubletake` is equivalent.
-The Linux target builds with cgo disabled.
+Run `make doubletake-native` to build with Go's `no_gstreamer` tag. The build
+writes `bin/native/TARGET/doubletake` or `doubletake.exe` on Windows. `TARGET`
+comes from `GOOS` and `GOARCH`, with `amd64` written as `x86_64`. Linux builds
+with cgo disabled. macOS and Windows use cgo and require a C compiler and the
+OS SDK at build time.
+
+The Make target builds one architecture. To combine Apple silicon and Intel
+builds into a universal executable on macOS:
+
+```sh
+MACOSX_DEPLOYMENT_TARGET=13.0 make doubletake-native GOARCH=arm64
+MACOSX_DEPLOYMENT_TARGET=13.0 make doubletake-native GOARCH=amd64
+mkdir -p bin/native/macos-universal
+xcrun lipo -create bin/native/darwin-arm64/doubletake bin/native/darwin-x86_64/doubletake \
+  -output bin/native/macos-universal/doubletake
+```
 
 | Platform | Desktop video | System audio |
 | --- | --- | --- |

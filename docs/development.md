@@ -9,8 +9,11 @@ and FDK-AAC are required. Runtime packages are listed in the [README](../README.
 ```sh
 make test             # test the default linked GStreamer backend
 make test-go          # test Go code without linking GStreamer
-make test-gstreamer   # explicit alias for the linked tests
 ```
+
+`make clean` removes `bin/`, `dist/`, and older build outputs in the project
+root. With custom build, release, or distribution directories, it removes
+the generated doubletake files and preserves unrelated contents.
 
 The diagnostic receiver is for developer testing only:
 
@@ -113,7 +116,7 @@ make release VERSION=vX.Y.Z
 (cd dist && sha256sum -c SHA256SUMS)
 ```
 
-`make release` builds stripped binaries in `bin/release/TARGET/` and writes
+`make release` builds stripped binaries in `BUILD_DIR/release/TARGET/` and writes
 `dist/doubletake-VERSION-TARGET.tar.gz` and `dist/SHA256SUMS`. `TARGET` defaults
 to `linux-x86_64` or `linux-arm64` according to the Go target architecture.
 Build on Ubuntu 20.04 to retain the supported glibc and GStreamer baseline;
