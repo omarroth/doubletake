@@ -71,6 +71,12 @@ type ReceiverConfig struct {
 	AudioProbe func(pcmHash uint64, deadline, presentedAt time.Time)
 	// RAOPAuthSetup requires the classic preliminary auth-setup request.
 	RAOPAuthSetup bool
+	// RAOPSenderTiming waits for timing requests from the classic sender.
+	RAOPSenderTiming bool
+	// RealtimeAudio exercises the AirPlay 2 media pairing and stream layout.
+	RealtimeAudio    bool
+	realtimePTPStart func(uint64) error
+	realtimePTPNow   func() time.Duration
 	// ForceNTP exercises CoreUtils media independently of PTP advertisement.
 	ForceNTP bool
 	// HidePasswordStatus keeps configured password/Digest authentication active
@@ -268,6 +274,25 @@ func NewReceiverServer(cfg ReceiverConfig) (*ReceiverServer, error) {
 	profile, err := receiverProfile(cfg.Profile)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.RealtimeAudio {
+		profile.features = 1<<featureUnifiedMedia | FeatureTransientPairing
+		profile.pairing = receiverPairingModern
+		profile.setupOrder = receiverSetupSessionFirst
+		profile.timingProtocol = timingProtocolNTP
+		profile.ntpInitiator = receiverNTPReceiver
+		profile.audioConnectionsWithHAP = false
+		profile.audioResponseConnections = false
+		profile.audioCodec = AudioCodecALAC
+		profile.audioSHKWithHAP = true
+		profile.displayWidth, profile.displayHeight = 0, 0
+		cfg.AcceptEarlyRecord = true
+		if cfg.realtimePTPStart != nil {
+			profile.features |= 1 << featurePTP
+			profile.sourceVersion = airPlaySourceVersion
+			profile.timingProtocol = timingProtocolPTP
+			profile.ntpInitiator = 0
+		}
 	}
 	if cfg.ForceNTP {
 		profile.features &^= uint64(1) << featurePTP
@@ -604,6 +629,8 @@ type receiverConnection struct {
 	legacyFairPlaySet bool
 	sessionState      receiverSessionState
 	raopAnnounced     bool
+	mediaClockID      uint64
+	mediaPeersSet     bool
 	raopAuthSetup     bool
 	raopVolume        float64
 	recorded          bool
@@ -650,6 +677,7 @@ func (s *ReceiverServer) serveControlConnection(conn net.Conn) error {
 			return fmt.Errorf("initialize receiver FPSAP: %w", err)
 		}
 	}
+	pairing.mediaTransient = s.cfg.RealtimeAudio
 	state := &receiverConnection{
 		server:   s,
 		conn:     conn,
@@ -811,7 +839,11 @@ func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse
 			s.logf("pair-setup rejected: %v", err)
 			return receiverError(400, err), nil
 		}
-		return receiverOK(body, "application/octet-stream"), nil
+		response := receiverOK(body, "application/octet-stream")
+		if keys, verified := c.pairing.sessionKeys(); verified && keys.encrypted && c.hap == nil {
+			return response, &keys
+		}
+		return response, nil
 
 	case request.method == "POST" && path == "/pair-verify":
 		s.stats.pairVerify.Add(1)
@@ -866,6 +898,20 @@ func (c *receiverConnection) dispatch(request receiverRequest) (receiverResponse
 	case request.method == "RECORD":
 		s.stats.recordRequests.Add(1)
 		return c.handleRecord(), nil
+	case request.method == "SETPEERS" && s.cfg.realtimePTPStart != nil:
+		if c.hap == nil || c.sessionState != receiverSessionReady || c.mediaClockID == 0 || c.mediaPeersSet {
+			return c.invalidSessionState(request.method), nil
+		}
+		var addresses []string
+		if _, err := plist.Unmarshal(request.body, &addresses); err != nil || len(addresses) != 2 ||
+			addresses[0] != controlLocalIP(c.conn) || addresses[1] != c.conn.RemoteAddr().(*net.TCPAddr).IP.String() {
+			return receiverError(400, errors.New("invalid realtime PTP peers")), nil
+		}
+		if err := s.cfg.realtimePTPStart(c.mediaClockID); err != nil {
+			return receiverError(500, err), nil
+		}
+		c.mediaPeersSet = true
+		return receiverOK(nil, ""), nil
 	case request.method == "SET_PARAMETER":
 		s.stats.parameterRequests.Add(1)
 		if c.sessionState != receiverSessionReady {
@@ -1110,7 +1156,7 @@ func (c *receiverConnection) handleSetup(request receiverRequest) receiverRespon
 	result := c.setupPlistResponse(response)
 	if result.status == 200 {
 		c.sessionState = nextState
-		if kind == receiverSetupVideo && c.recorded {
+		if c.recorded && (kind == receiverSetupVideo || c.server.cfg.RealtimeAudio && kind == receiverSetupAudio) {
 			c.sessionState = receiverSessionReady
 		}
 	}
@@ -1172,6 +1218,14 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 			}
 			if peers, ok := setup["timingPeerList"].([]any); !ok || len(peers) == 0 {
 				return fmt.Errorf("PTP SETUP omitted timingPeerList")
+			}
+			if c.server.cfg.realtimePTPStart != nil {
+				peer := setup["timingPeerInfo"].(map[string]any)
+				c.mediaClockID = plistUint64(peer["ClockID"])
+				groupID, _ := setup["groupUUID"].(string)
+				if c.mediaClockID == 0 || groupID == "" || setup["timingPort"] != nil {
+					return errors.New("realtime PTP session omitted its clock or group identity")
+				}
 			}
 		default:
 			return fmt.Errorf("receiver has invalid timing protocol %q", profile.timingProtocol)
@@ -1238,6 +1292,12 @@ func (c *receiverConnection) validateSetup(setup map[string]any, streams []map[s
 	}
 	if profile.audioSHKWithHAP && c.hap != nil && len(plistBytes(stream["shk"])) != chacha20poly1305.KeySize {
 		return fmt.Errorf("encrypted audio descriptor omitted 32-byte shk")
+	}
+	if c.server.cfg.RealtimeAudio {
+		if media, _ := stream["isMedia"].(bool); !media || !c.recorded {
+			return fmt.Errorf("realtime media audio requires isMedia and prior RECORD")
+		}
+		return nil
 	}
 	if got := plistInt(stream["redundantAudio"]); got != audioRedundancyCount {
 		return fmt.Errorf("screen audio redundantAudio is %d, want %d", got, audioRedundancyCount)
@@ -1359,12 +1419,16 @@ func (c *receiverConnection) ensureMedia() error {
 		playback = &receiverPlaybackConfig{NetworkNow: now, Timing: c.timingProtocol, Timeline: 0x4454424c54414b45,
 			AudioDropEvery: c.server.cfg.AudioDropEvery, AudioJitter: c.server.cfg.AudioJitter,
 			VideoProbe: c.server.cfg.VideoProbe, AudioProbe: c.server.cfg.AudioProbe}
+		if c.timingProtocol == timingProtocolPTP && c.server.cfg.realtimePTPNow != nil {
+			playback.NetworkNow = c.server.cfg.realtimePTPNow
+			playback.Timeline = c.mediaClockID
+		}
 	}
 	media, err := newReceiverMediaSession(c.server.ctx, receiverMediaConfig{
 		BindIP:            controlLocalIP(c.conn),
 		EventEncrypted:    c.hap != nil,
 		EventSharedSecret: keys.sharedSecret,
-		TimingResponder:   c.server.profile.ntpInitiator == receiverNTPSender,
+		TimingResponder:   c.server.profile.ntpInitiator == receiverNTPSender || c.server.cfg.RAOPSenderTiming,
 		MaxVideoPayload:   32 * 1024 * 1024,
 		Playback:          playback,
 	})

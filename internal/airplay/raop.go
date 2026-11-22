@@ -22,33 +22,40 @@ import (
 // separate low-latency budget.
 const DefaultRAOPPlayoutLatency = 2 * time.Second
 
-// RAOPConfig controls an audio-only session on the advertised _raop endpoint.
-type RAOPConfig struct {
+// AudioOnlyConfig controls a direct audio session.
+type AudioOnlyConfig struct {
 	Password         string
 	PortMin, PortMax int
 	PlayoutLatency   time.Duration // zero uses the application override or media-audio default
+	ptpPool          *ptpClockPool
 }
 
-// RAOPSession is a classic audio-only RTSP and RTP session.
-type RAOPSession struct {
+// AudioOnlySession holds the control and media channels for direct audio.
+type AudioOnlySession struct {
 	client   *AirPlayClient
 	stream   *AudioStream
 	timing   net.PacketConn
+	event    net.Conn
+	airPlay2 bool
 	uri      string
 	headers  map[string]string
 	playback audioPlayback
 
-	stopTiming  context.CancelFunc
-	timingDone  <-chan struct{}
-	closeOnce   sync.Once
-	closeErr    error
-	mu          sync.Mutex
-	restore     *float64
-	rtspTimeout time.Duration
+	stopTiming     context.CancelFunc
+	releaseClock   func()
+	timingDone     <-chan struct{}
+	closeOnce      sync.Once
+	closeErr       error
+	mu             sync.Mutex
+	restore        *float64
+	matchedVolume  float64
+	volumeMatched  bool
+	canMatchVolume bool
+	rtspTimeout    time.Duration
 }
 
 // OpenRAOP negotiates ALAC and the advertised classic UDP transport.
-func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg RAOPConfig) (*RAOPSession, error) {
+func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg AudioOnlyConfig) (*AudioOnlySession, error) {
 	ctx, cancelSetup := context.WithTimeout(ctx, 15*time.Second)
 	defer cancelSetup()
 	if device.RAOP == nil {
@@ -114,9 +121,9 @@ func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg RAOPConfig) (*RAOPS
 	if local.To4() == nil {
 		addressFamily = "IP6"
 	}
-	hostName := client.sessionPeerHost()
-	if strings.Contains(hostName, ":") {
-		hostName = "[" + strings.ReplaceAll(hostName, "%", "%25") + "]"
+	hostName := remote.String()
+	if remote.To4() == nil {
+		hostName = "[" + hostName + "]"
 	}
 	uri := fmt.Sprintf("rtsp://%s/%d", hostName, sessionID)
 	_, options, err := client.rtspRequest("OPTIONS", "*", "", nil, headers)
@@ -163,9 +170,10 @@ func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg RAOPConfig) (*RAOPS
 	timing, control, data := ports[0], ports[1], ports[2]
 	timingCtx, stopTiming := context.WithCancel(context.Background())
 	timingDone := make(chan struct{})
+	nowNTP := func() uint64 { return wallNTPTimestamp(time.Now()) }
 	go func() {
 		defer close(timingDone)
-		respondToNTPTiming(timingCtx, timing, func() uint64 { return wallNTPTimestamp(time.Now()) }, remote)
+		respondToNTPTiming(timingCtx, timing, nowNTP, remote)
 	}()
 	defer func() {
 		if !owned {
@@ -198,9 +206,12 @@ func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg RAOPConfig) (*RAOPS
 			_, _, _ = client.rtspRequest("TEARDOWN", uri, "", nil, headers)
 		}
 	}()
-	remoteData, remoteControl, err := parseRAOPTransport(reply["transport"])
+	remoteData, remoteControl, remoteTiming, err := parseRAOPTransport(reply["transport"])
 	if err != nil {
 		return nil, err
+	}
+	if remoteTiming != 0 {
+		go sendNTPTimingProbesWithClock(timingCtx, timing, client.sessionPeerHost(), remoteTiming, nowNTP)
 	}
 	record := withHeader(headers, "Range", "npt=0-")
 	record["RTP-Info"] = fmt.Sprintf("seq=%d;rtptime=%d", initialSeq, initialRTP)
@@ -216,6 +227,13 @@ func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg RAOPConfig) (*RAOPS
 		samples = int64(minimum)
 	}
 
+	canSetVolume := raopTXTContains(options["public"], "SET_PARAMETER")
+	if canSetVolume {
+		if err := initializeRAOPVolume(client, uri, headers, raopTXTContains(options["public"], "GET_PARAMETER")); err != nil {
+			return nil, err
+		}
+	}
+
 	stream, err := client.setupAudioStream(remoteData, remoteControl, aesKey, aesIV, nil,
 		mediaSecurityLegacyAES, byte(ct), uint32(samples), false, nil, control, data)
 	if err != nil {
@@ -228,9 +246,9 @@ func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg RAOPConfig) (*RAOPS
 		return nil, ctx.Err()
 	}
 	owned = true
-	return &RAOPSession{
+	return &AudioOnlySession{
 		client: client, stream: stream, timing: timing, uri: uri, headers: headers,
-		stopTiming: stopTiming, timingDone: timingDone, rtspTimeout: 2 * time.Second,
+		stopTiming: stopTiming, timingDone: timingDone, rtspTimeout: 2 * time.Second, canMatchVolume: canSetVolume,
 		playback: audioPlayback{
 			now: time.Now, timingProtocol: timingProtocolNTP,
 			clockAt: func(t time.Time) (uint64, uint64) {
@@ -242,6 +260,36 @@ func OpenRAOP(ctx context.Context, device AirPlayDevice, cfg RAOPConfig) (*RAOPS
 			initialRTP: initialRTP, initialSeq: initialSeq, singleSend: true,
 		},
 	}, nil
+}
+
+// Send the current volume after RECORD, before the first media packet.
+// A receiver reporting the mute sentinel keeps that setting.
+func initializeRAOPVolume(client *AirPlayClient, uri string, headers map[string]string, canReadVolume bool) error {
+	volume, source := airPlayDefaultVolumeDB, "fallback"
+	if canReadVolume {
+		body, _, err := client.rtspRequest("GET_PARAMETER", uri, "text/parameters", []byte("volume\r\n"), headers)
+		if err != nil {
+			var status *HTTPStatusError
+			if !errors.As(err, &status) || status.StatusCode == 401 {
+				return fmt.Errorf("read RAOP initial volume: %w", err)
+			}
+		} else if current, err := parseReceiverVolume(body); err == nil {
+			volume = normalizeOutgoingVolume(current)
+			if volume == current {
+				source = "receiver"
+			}
+		}
+	}
+	dbg("[RAOP] initializing playback volume at %.1f dB (%s)", volume, source)
+	if _, _, err := client.rtspRequest("SET_PARAMETER", uri, "text/parameters", audioVolumeBody(volume), headers); err != nil {
+		var status *HTTPStatusError
+		if errors.As(err, &status) && (status.StatusCode == 405 || status.StatusCode == 451 || status.StatusCode == 501) {
+			dbg("[RAOP] receiver declined initial volume: %v", err)
+			return nil
+		}
+		return fmt.Errorf("set RAOP initial volume: %w", err)
+	}
+	return nil
 }
 
 func wallNTPTimestamp(t time.Time) uint64 {
@@ -257,10 +305,10 @@ func raopTXTContains(list, value string) bool {
 	return false
 }
 
-func parseRAOPTransport(header string) (data, control int, err error) {
+func parseRAOPTransport(header string) (data, control, timing int, err error) {
 	protocol, fields, _ := strings.Cut(header, ";")
 	if !strings.EqualFold(strings.TrimSpace(protocol), "RTP/AVP/UDP") {
-		return 0, 0, fmt.Errorf("unsupported RAOP transport %q", protocol)
+		return 0, 0, 0, fmt.Errorf("unsupported RAOP transport %q", protocol)
 	}
 	for _, field := range strings.Split(fields, ";") {
 		key, value, _ := strings.Cut(field, "=")
@@ -270,12 +318,14 @@ func parseRAOPTransport(header string) (data, control int, err error) {
 			data = int(port)
 		case "control_port":
 			control = int(port)
+		case "timing_port":
+			timing = int(port)
 		}
 	}
 	if data == 0 || control == 0 {
-		return 0, 0, fmt.Errorf("RAOP SETUP omitted valid UDP ports (data=%d control=%d)", data, control)
+		return 0, 0, 0, fmt.Errorf("RAOP SETUP omitted valid UDP ports (data=%d control=%d)", data, control)
 	}
-	return data, control, nil
+	return data, control, timing, nil
 }
 
 func wrapRAOPAESKey(key []byte) ([]byte, error) {
@@ -294,23 +344,41 @@ func wrapRAOPAESKey(key []byte) ([]byte, error) {
 }
 
 // PlayoutLatency reports the negotiated capture-to-playout lead.
-func (s *RAOPSession) PlayoutLatency() time.Duration {
+func (s *AudioOnlySession) PlayoutLatency() time.Duration {
 	return audioLatencyDuration(s.stream.currentLatencySamples())
 }
 
 // Stream consumes one ALAC tap. Joining another session on the same timestamped
 // capture keeps both mappings aligned at capture PTS plus the common lead.
-func (s *RAOPSession) Stream(ctx context.Context, capture *AudioCapture) error {
+func (s *AudioOnlySession) Stream(ctx context.Context, capture *AudioCapture) error {
 	if capture.codec != AudioCodecALAC {
-		return errors.New("RAOP requires an ALAC audio capture")
+		return errors.New("direct audio requires an ALAC audio capture")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stopCapture := context.AfterFunc(ctx, capture.Stop)
 	defer stopCapture()
+	var volumeTicks <-chan time.Time
+	updateVolume := func() {
+		if volume, ok := capture.outputVolume.read(ctx); ok {
+			if err := s.matchOutputVolume(volume); err != nil && ctx.Err() == nil {
+				dbg("[AUDIO] matching receiver volume: %v", err)
+			}
+		}
+	}
+	if s.canMatchVolume && capture.outputVolume != nil {
+		updateVolume()
+		volumeTicker := time.NewTicker(volumeSampleInterval)
+		defer volumeTicker.Stop()
+		volumeTicks = volumeTicker.C
+	}
 	mediaDone := make(chan error, 1)
 	go func() { mediaDone <- s.stream.play(ctx, capture, s.playback) }()
-	ticker := time.NewTicker(20 * time.Second)
+	interval := 20 * time.Second
+	if s.airPlay2 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -320,31 +388,54 @@ func (s *RAOPSession) Stream(ctx context.Context, capture *AudioCapture) error {
 			capture.Stop()
 			<-mediaDone
 			return ctx.Err()
+		case <-volumeTicks:
+			updateVolume()
 		case <-ticker.C:
-			if _, err := s.request("OPTIONS", "*", "", nil); err != nil {
+			method, uri := "OPTIONS", "*"
+			if s.airPlay2 {
+				method, uri = "POST", "/feedback"
+			}
+			if _, err := s.request(method, uri, "", nil); err != nil {
 				cancel()
 				capture.Stop()
 				<-mediaDone
-				return fmt.Errorf("RAOP keepalive: %w", err)
+				return fmt.Errorf("audio session keepalive: %w", err)
 			}
 		}
 	}
 }
 
-func (s *RAOPSession) request(method, uri, contentType string, body []byte) ([]byte, error) {
+func (s *AudioOnlySession) request(method, uri, contentType string, body []byte) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.requestLocked(method, uri, contentType, body)
 }
 
-func (s *RAOPSession) requestLocked(method, uri, contentType string, body []byte) ([]byte, error) {
+func (s *AudioOnlySession) requestLocked(method, uri, contentType string, body []byte) ([]byte, error) {
 	timer := time.AfterFunc(s.rtspTimeout, func() { _ = s.client.Close() })
 	defer timer.Stop()
 	response, _, err := s.client.rtspRequest(method, uri, contentType, body, s.headers)
 	return response, err
 }
 
-func (s *RAOPSession) SetAudioMuted(muted bool) error {
+func (s *AudioOnlySession) matchOutputVolume(volume float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.volumeMatched && volume == s.matchedVolume {
+		return nil
+	}
+	if s.restore != nil {
+		// A daemon mute remains active even when the local volume changes.
+		*s.restore = volume
+	} else if _, err := s.requestLocked("SET_PARAMETER", s.uri, "text/parameters", audioVolumeBody(volume)); err != nil {
+		return err
+	}
+	s.matchedVolume, s.volumeMatched = volume, true
+	dbg("[AUDIO] matched receiver volume to local output at %.1f dB", volume)
+	return nil
+}
+
+func (s *AudioOnlySession) SetAudioMuted(muted bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if muted {
@@ -375,14 +466,20 @@ func (s *RAOPSession) SetAudioMuted(muted bool) error {
 	return nil
 }
 
-func (s *RAOPSession) Close() error {
+func (s *AudioOnlySession) Close() error {
 	s.closeOnce.Do(func() {
 		s.stopTiming()
 		_ = s.timing.Close()
 		<-s.timingDone
+		if s.event != nil {
+			_ = s.event.Close()
+		}
 		s.stream.Close()
 		_, s.closeErr = s.request("TEARDOWN", s.uri, "", nil)
 		_ = s.client.Close()
+		if s.releaseClock != nil {
+			s.releaseClock()
+		}
 	})
 	return s.closeErr
 }

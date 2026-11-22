@@ -22,12 +22,12 @@ _doubletake_complete_value()
     case $option in
         hwaccel) _doubletake_complete_words 'auto nvenc vaapi v4l2 openh264 none' ;;
         video-codec) _doubletake_complete_words 'auto h264 hevc' ;;
-        audio-source) _doubletake_complete_words 'output monitor' ;;
+        audio-sink|audio-source) _doubletake_complete_words 'output monitor' ;;
         cred-backend) _doubletake_complete_words 'file keyring' ;;
         resolution|s) _doubletake_complete_words 'max 1280x720 1920x1080 2560x1440 3840x2160' ;;
         creds|socket) _filedir ;;
         target|port|code|device-id|fps|bitrate|target-latency-ms|port-range|x11-window-id|x11-window-name) ;;
-        pair|test|no-audio|debug|daemonize|no-cursor|version)
+        pair|test|no-audio|no-video|debug|daemonize|no-cursor|version)
             if [[ $assigned != true ]]; then return 1; fi
             _doubletake_complete_words 'true false'
             ;;
@@ -47,7 +47,7 @@ _doubletake()
     for ((i = 1; i < cword; i++)); do
         case ${words[i]} in
             --) return ;;
-            -audio-source|--audio-source|-bitrate|--bitrate|-code|--code|\
+            -audio-sink|--audio-sink|-audio-source|--audio-source|-bitrate|--bitrate|-code|--code|\
             -cred-backend|--cred-backend|-creds|--creds|-device-id|--device-id|\
             -fps|--fps|-hwaccel|--hwaccel|-port|--port|-port-range|--port-range|\
             -resolution|--resolution|-s|--s|-socket|--socket|-target|--target|\
@@ -70,8 +70,8 @@ _doubletake()
     if [[ $assigned == true ]]; then return; fi
 
     _doubletake_complete_flags \
-        -audio-source -bitrate -code -cred-backend -creds -daemonize -debug \
-        -device-id -fps -h -help -hwaccel -no-audio -no-cursor -pair -port \
+        -audio-sink -audio-source -bitrate -code -cred-backend -creds -daemonize -debug \
+        -device-id -fps -h -help -hwaccel -no-audio -no-video -no-cursor -pair -port \
         -port-range -resolution -s -socket -target -target-latency-ms -test \
         -version -video-codec -x11-window-id -x11-window-name
 }

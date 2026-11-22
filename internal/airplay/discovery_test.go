@@ -15,7 +15,7 @@ func TestConsumeAirPlayEntriesCancellationDoesNotWaitForChannelClose(t *testing.
 	entries := make(chan *zeroconf.ServiceEntry)
 	done := make(chan error, 1)
 	go func() {
-		done <- consumeAirPlayEntries(ctx, entries, nil, nil)
+		done <- consumeAirPlayEntries(ctx, entries, nil, nil, nil)
 	}()
 
 	cancel()
@@ -42,7 +42,7 @@ func TestConsumeAirPlayEntriesReportsParsedDevices(t *testing.T) {
 	devices := make(chan AirPlayDevice, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- consumeAirPlayEntries(ctx, entries, nil, func(device AirPlayDevice) {
+		done <- consumeAirPlayEntries(ctx, entries, nil, nil, func(device AirPlayDevice) {
 			devices <- device
 		})
 	}()
@@ -157,8 +157,9 @@ func TestMDNSAddressFamilies(t *testing.T) {
 			wantIPv6: true,
 		},
 		{
-			name:  "link local addresses are ignored",
-			addrs: []net.Addr{testIPNet("169.254.1.2"), testIPNet("fe80::1")},
+			name:     "link local IPv6 supports scoped mDNS",
+			addrs:    []net.Addr{testIPNet("169.254.1.2"), testIPNet("fe80::1")},
+			wantIPv6: true,
 		},
 		{
 			name:  "loopback and unspecified addresses are ignored",
@@ -274,7 +275,7 @@ func TestParseServiceEntryPreservesCapabilityAdvertisement(t *testing.T) {
 		"vv=1",
 	}
 
-	device := parseServiceEntry(entry)
+	device := parseServiceEntry(entry, nil)
 	if device == nil {
 		t.Fatal("parseServiceEntry returned nil")
 	}
@@ -420,7 +421,7 @@ func TestDiscoveryKeepsAirPlayAndRAOPServiceCapabilitiesSeparate(t *testing.T) {
 	screen := make(chan *zeroconf.ServiceEntry)
 	audio := make(chan *zeroconf.ServiceEntry)
 	updates := make(chan AirPlayDevice, 3)
-	go consumeAirPlayEntries(ctx, screen, audio, func(device AirPlayDevice) { updates <- device })
+	go consumeAirPlayEntries(ctx, screen, audio, nil, func(device AirPlayDevice) { updates <- device })
 
 	next := func(entries chan<- *zeroconf.ServiceEntry, entry *zeroconf.ServiceEntry) AirPlayDevice {
 		t.Helper()
@@ -459,5 +460,88 @@ func TestDiscoveryKeepsAirPlayAndRAOPServiceCapabilitiesSeparate(t *testing.T) {
 	other.AddrIPv4, other.Port = []net.IP{net.ParseIP("192.0.2.2")}, 5001
 	if device := next(audio, other); !device.RAOPOnly || device.Port != 5001 {
 		t.Fatalf("merged addresses based on advertised ID alone: %+v", device)
+	}
+}
+
+func TestDiscoveryCombinesTwoServiceIDsForOneSpeaker(t *testing.T) {
+	screenEntry := zeroconf.NewServiceEntry("Kitchen", "_airplay._tcp", "local.")
+	screenEntry.HostName, screenEntry.Port = "kitchen.local.", 7000
+	screenEntry.AddrIPv6 = []net.IP{net.ParseIP("2001:db8::1")}
+	screenEntry.Text = []string{"deviceid=12:34:56:78:AB:CD", "features=0x400"}
+	audioEntry := zeroconf.NewServiceEntry("0123456789ab@Kitchen", "_raop._tcp", "local.")
+	audioEntry.HostName, audioEntry.Port = "KITCHEN.local.", 5000
+	audioEntry.AddrIPv4 = []net.IP{net.ParseIP("192.0.2.1")}
+	audioEntry.Text = []string{"et=0", "cn=1"}
+	screen := *parseServiceEntry(screenEntry, nil)
+	audio := *parseRAOPServiceEntry(audioEntry, nil)
+
+	for _, order := range [][2]AirPlayDevice{{screen, audio}, {audio, screen}} {
+		devices, index := UpdateDiscoveredDevices([]AirPlayDevice{order[0]}, order[1])
+		if len(devices) != 1 || index != 0 {
+			t.Fatalf("speaker shown more than once: %+v", devices)
+		}
+		device := devices[0]
+		if device.RAOPOnly || !device.UsesClassicRAOP() || device.DeviceID != screen.DeviceID ||
+			device.RAOP.DeviceID != audio.DeviceID || device.RAOP.IP != audio.IP {
+			t.Fatalf("combined advertisement: %+v", device)
+		}
+		devices, index = UpdateDiscoveredDevices(devices, audio)
+		if len(devices) != 1 || index != 0 || devices[0].DeviceID != screen.DeviceID {
+			t.Fatalf("repeated RAOP advertisement replaced the AirPlay record: %+v", devices)
+		}
+	}
+
+	audio.HostName = "other.local."
+	devices, _ := UpdateDiscoveredDevices([]AirPlayDevice{screen}, audio)
+	if len(devices) != 2 {
+		t.Fatalf("merged two devices with the same display name: %+v", devices)
+	}
+}
+
+func TestDiscoveryPreservesLinkLocalIPv6Interface(t *testing.T) {
+	entry := zeroconf.NewServiceEntry("Speaker", "_airplay._tcp", "local.")
+	entry.Port = 7000
+	entry.AddrIPv6 = []net.IP{net.ParseIP("fe80::1234")}
+	entry.ReceivedIfIndex = 7
+	zones := map[int]string{3: "eth0", 7: "wlan0"}
+	if device := parseServiceEntry(entry, zones); device == nil || device.IP != "fe80::1234%wlan0" {
+		t.Fatalf("scoped receiver = %+v", device)
+	}
+	if device := parseServiceEntry(entry, nil); device != nil {
+		t.Fatalf("advertised a link-local receiver without a usable scope: %+v", device)
+	}
+	entry.AddrIPv6 = append(entry.AddrIPv6, net.ParseIP("fd00::1234"))
+	if device := parseServiceEntry(entry, zones); device == nil || device.IP != "fd00::1234" {
+		t.Fatalf("did not prefer the routable address: %+v", device)
+	}
+}
+
+func TestDiscoveryKeepsDistinctReceiversWithoutIDs(t *testing.T) {
+	first := AirPlayDevice{Name: "Display", HostName: "display-one.local.", IP: "192.0.2.1", Port: 7000}
+	second := AirPlayDevice{Name: "Display", HostName: "display-two.local.", IP: "192.0.2.2", Port: 7000}
+	if devices, _ := UpdateDiscoveredDevices([]AirPlayDevice{first}, second); len(devices) != 2 {
+		t.Fatalf("merged separate addresses with no receiver ID: %+v", devices)
+	}
+}
+
+func TestDirectAudioUsesMediaProtocolWithSupportedTiming(t *testing.T) {
+	device := AirPlayDevice{
+		Port: 7000, Features: 1<<featureUnifiedMedia | FeatureTransientPairing,
+		RAOP: &RAOPAdvertisement{Port: 5000},
+	}
+	if device.AudioOnlyPort() != 7000 || !device.UsesAudioOnly() {
+		t.Fatalf("expected the AirPlay 2 media endpoint: %+v", device)
+	}
+	device.Features |= 1 << featurePTP
+	if device.AudioOnlyPort() != 7000 || !device.UsesAudioOnly() {
+		t.Fatalf("expected the AirPlay 2 endpoint for PTP media: %+v", device)
+	}
+	device.Features &^= 1 << featureUnifiedMedia
+	if device.AudioOnlyPort() != 5000 {
+		t.Fatalf("expected the classic endpoint for non-unified media: %+v", device)
+	}
+	device.Features |= FeatureScreen
+	if device.UsesAudioOnly() {
+		t.Fatal("a display must keep mirroring by default")
 	}
 }

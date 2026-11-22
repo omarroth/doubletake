@@ -100,6 +100,7 @@ type receiverPairingState struct {
 	transientControllers map[string]ed25519.PublicKey
 	session              receiverPairingSessionKeys
 	verified             bool
+	mediaTransient       bool
 }
 
 type receiverSRPSetupState struct {
@@ -202,7 +203,11 @@ func (s *receiverPairingState) beginSRPSetup(message map[byte][]byte) ([]byte, e
 
 	transient := false
 	if flags, ok := message[tlvFlags]; ok {
-		if len(flags) != 4 || binary.LittleEndian.Uint32(flags) != pairingFlagTransient {
+		if s.mediaTransient {
+			if !bytes.Equal(flags, []byte{0x10}) {
+				return receiverPairingTLVError(2), nil
+			}
+		} else if len(flags) != 4 || binary.LittleEndian.Uint32(flags) != pairingFlagTransient {
 			return receiverPairingTLVError(2), nil
 		}
 		transient = true
@@ -232,6 +237,9 @@ func (s *receiverPairingState) beginSRPSetup(message map[byte][]byte) ([]byte, e
 	pin := s.pin
 	if transient {
 		pin = ""
+		if s.mediaTransient {
+			pin = "3939"
+		}
 	}
 	x := receiverSRPX(salt, pin)
 	v := new(big.Int).Exp(srpG, x, srpN)
@@ -296,6 +304,10 @@ func (s *receiverPairingState) verifySRPProof(message map[byte][]byte) ([]byte, 
 
 	setup.sharedKey = append([]byte(nil), sharedKey...)
 	serverProof := receiverPairingHash(clientPublic.Bytes(), wantProof, sharedKey)
+	if s.mediaTransient && setup.transient {
+		s.enableControl(sharedKey)
+		s.setup = nil
+	}
 	return tlv8EncodeOrdered([]tlv8Item{
 		{Tag: tlvState, Value: []byte{4}},
 		{Tag: tlvProof, Value: serverProof},
@@ -506,7 +518,13 @@ func (s *receiverPairingState) finishHAPVerify(message map[byte][]byte) ([]byte,
 		return receiverPairingTLVError(4), nil
 	}
 
-	shared := append([]byte(nil), verify.sharedSecret...)
+	s.enableControl(verify.sharedSecret)
+	s.verify = nil
+	return tlv8EncodeOrdered([]tlv8Item{{Tag: tlvState, Value: []byte{4}}}), nil
+}
+
+func (s *receiverPairingState) enableControl(secret []byte) {
+	shared := append([]byte(nil), secret...)
 	s.session = receiverPairingSessionKeys{
 		sharedSecret: shared,
 		// The sender writes with Control-Write and reads with Control-Read,
@@ -526,8 +544,6 @@ func (s *receiverPairingState) finishHAPVerify(message map[byte][]byte) ([]byte,
 		encrypted: true,
 	}
 	s.verified = true
-	s.verify = nil
-	return tlv8EncodeOrdered([]tlv8Item{{Tag: tlvState, Value: []byte{4}}}), nil
 }
 
 func receiverLooksLikeRawVerifyV1(body []byte) bool {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"sort"
@@ -109,7 +110,7 @@ func main() {
 		return
 	}
 	showVersion := flag.Bool("version", false, "Show version and exit")
-	target := flag.String("target", "", "AirPlay receiver IP address or hostname (skip discovery)")
+	target := flag.String("target", "", "AirPlay receiver IP address or hostname")
 	port := flag.Int("port", 7000, "AirPlay port")
 	code := flag.String("code", "", "Pairing code shown on the receiver; prefer $DOUBLETAKE_CODE")
 	credFile := flag.String("creds", airplay.DefaultCredentialsPath(), "Path to saved pairing credentials")
@@ -121,12 +122,15 @@ func main() {
 	flag.StringVar(&resolution, "resolution", "max", "Target video canvas: max or WIDTHxHEIGHT[@REFRESH] (highest usable receiver mode by default)")
 	flag.StringVar(&resolution, "s", "max", "Alias for -resolution")
 	bitrate := flag.Int("bitrate", 0, "Video bitrate in kbps (0 = automatic adaptive budget)")
-	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon mirrors use 250 ms and classic RAOP uses 2 s)")
+	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon mirrors use 250 ms and direct audio uses 2 s)")
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
-	audioSource := flag.String("audio-source", "output", "Audio route: output (selectable doubletake sink) or monitor (copy default output)")
+	audioSink := string(airplay.DefaultAudioSource)
+	flag.StringVar(&audioSink, "audio-sink", audioSink, "Audio route: monitor (copy default output) or output (selectable doubletake sink)")
+	flag.StringVar(&audioSink, "audio-source", audioSink, "Deprecated alias for -audio-sink")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
+	noVideo := flag.Bool("no-video", false, "Stream audio only to a receiver with a supported audio endpoint")
 	portRange := flag.String("port-range", "", "Local UDP port range for receiver timing/audio (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 3 ports.")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging")
 	daemonize := flag.Bool("daemonize", false, "Run as background daemon with Unix socket control interface")
@@ -139,7 +143,10 @@ func main() {
 		fmt.Printf("doubletake %s\n", version.String())
 		return
 	}
-	if !airplay.HasInProcessGStreamer() {
+	if *noVideo && *noAudio {
+		log.Fatal("-no-video and -no-audio cannot be used together")
+	}
+	if !*noVideo && !airplay.HasInProcessGStreamer() {
 		log.Println("warning: build without in-process GStreamer uses gst-launch-1.0 for video; adaptive stream quality is unavailable")
 	}
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
@@ -148,8 +155,8 @@ func main() {
 	if err := airplay.ValidateVideoCodec(*videoCodec); err != nil {
 		log.Fatalf("invalid -video-codec: %v", err)
 	}
-	if err := airplay.ValidateAudioSource(*audioSource); err != nil {
-		log.Fatalf("invalid -audio-source: %v", err)
+	if err := airplay.ValidateAudioSource(audioSink); err != nil {
+		log.Fatalf("invalid -audio-sink: %v", err)
 	}
 	targetVideo, err := parseVideoTarget(resolution)
 	if err != nil {
@@ -192,7 +199,8 @@ func main() {
 			Debug:        *debug,
 			TestMode:     *testMode,
 			NoAudio:      *noAudio,
-			AudioSource:  airplay.AudioSource(*audioSource),
+			NoVideo:      *noVideo,
+			AudioSource:  airplay.AudioSource(audioSink),
 			ShowCursor:   !*noCursor,
 			Code:         credential,
 		})
@@ -229,6 +237,21 @@ func main() {
 	var advertisement *airplay.AirPlayDevice
 	if *target != "" {
 		addr = *target
+		if *noVideo {
+			var requestedPort int
+			flag.Visit(func(f *flag.Flag) {
+				if f.Name == "port" {
+					requestedPort = *port
+				}
+			})
+			advertisement, err = discoverAudioTarget(ctx, addr, requestedPort)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Fatal(err)
+			}
+		}
 	} else {
 		device, err := selectDevice(ctx)
 		if err != nil {
@@ -239,31 +262,35 @@ func main() {
 		}
 		addr = device.IP
 		*port = device.Port
-		if device.UsesClassicRAOP() {
-			*port = device.RAOP.Port
-		}
 		advertisement = device
-		fmt.Printf("selected: %s (%s:%d)\n", device.Name, device.IP, device.Port)
 	}
 
-	if advertisement != nil && advertisement.UsesClassicRAOP() {
-		if *noAudio || *forcePair {
-			log.Fatal("classic RAOP requires audio and does not support PIN pairing")
+	if advertisement != nil && (*noVideo || advertisement.UsesAudioOnly()) {
+		if advertisement.AudioOnlyPort() == 0 {
+			log.Fatalf("%s does not advertise a supported audio-only endpoint", advertisement.Name)
 		}
+		if *noAudio || *forcePair {
+			log.Fatal("direct audio requires audio enabled and does not support forced pairing")
+		}
+		host := advertisement.IP
+		if !advertisement.SupportsAirPlay2Audio() {
+			host = advertisement.RAOP.IP
+		}
+		fmt.Printf("selected: %s (%s)\n", advertisement.Name, net.JoinHostPort(host, strconv.Itoa(advertisement.AudioOnlyPort())))
 		store, err := newCredentialStore(*credBackend, *credFile)
 		if err != nil {
 			log.Fatalf("failed to load credentials: %v", err)
 		}
-		if err := store.CheckRAOPReceiver(*expectedDeviceID, advertisement.DeviceID); err != nil {
-			log.Fatal(err)
-		}
-		config := airplay.RAOPConfig{Password: credential, PortMin: portMin, PortMax: portMax}
-		if err := streamRAOP(ctx, *advertisement, config, *testMode, airplay.AudioSource(*audioSource)); err != nil && ctx.Err() == nil {
+		config := airplay.AudioOnlyConfig{Password: credential, PortMin: portMin, PortMax: portMax}
+		if err := streamAudioOnly(ctx, *advertisement, config, *testMode, airplay.AudioSource(audioSink), store, *expectedDeviceID); err != nil && ctx.Err() == nil {
 			log.Fatal(err)
 		}
 		return
 	}
 
+	if advertisement != nil {
+		fmt.Printf("selected: %s (%s)\n", advertisement.Name, net.JoinHostPort(advertisement.IP, strconv.Itoa(advertisement.Port)))
+	}
 	newClient := func() *airplay.AirPlayClient {
 		if advertisement != nil {
 			device := *advertisement
@@ -646,7 +673,7 @@ func main() {
 
 	// Start audio capture and streaming unless disabled.
 	if !*noAudio && session.HasAudio() {
-		audioCapture, err := airplay.StartAudioCaptureWithSource(ctx, *testMode, session.AudioCodec(), airplay.AudioSource(*audioSource))
+		audioCapture, err := airplay.StartAudioCaptureWithSource(ctx, *testMode, session.AudioCodec(), airplay.AudioSource(audioSink))
 		if err != nil {
 			log.Printf("warning: audio capture failed: %v (continuing without audio)", err)
 		} else {
@@ -678,19 +705,41 @@ func main() {
 	log.Println("stream ended")
 }
 
-// credentialOrPrompt returns a supplied credential or makes one pairing-display
-// request and prompts once. expectPIN is true only when the receiver advertised
-// an on-screen PIN (or the user explicitly requested fresh pairing). A successful
-// /pair-pin-start response alone cannot distinguish a PIN from a fixed password,
-// so an unadvertised fallback keeps its prompt deliberately generic.
-func streamRAOP(ctx context.Context, device airplay.AirPlayDevice, config airplay.RAOPConfig, testMode bool, route airplay.AudioSource) error {
-	session, err := airplay.OpenRAOP(ctx, device, config)
+// discoverAudioTarget looks up the advertised audio port and formats even
+// when the user supplies a direct address instead of opening the picker.
+func discoverAudioTarget(ctx context.Context, target string, port int) (*airplay.AirPlayDevice, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	hosts, err := net.DefaultResolver.LookupHost(ctx, target)
+	if err != nil {
+		return nil, fmt.Errorf("resolve audio target: %w", err)
+	}
+	devices, err := airplay.DiscoverAirPlayDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, device := range devices {
+		audioPort := device.AudioOnlyPort()
+		if audioPort == 0 || port != 0 && port != audioPort {
+			continue
+		}
+		for _, host := range hosts {
+			if sameTargetIP(host, device.IP) || device.RAOP != nil && sameTargetIP(host, device.RAOP.IP) {
+				return &device, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no supported audio-only endpoint discovered for %s", target)
+}
+
+func streamAudioOnly(ctx context.Context, device airplay.AirPlayDevice, config airplay.AudioOnlyConfig, testMode bool, route airplay.AudioSource, store *airplay.CredentialStore, expectedID string) error {
+	session, err := airplay.OpenAudioOnly(ctx, device, config, store, expectedID)
 	if errors.Is(err, airplay.ErrCredentialsRequired) && config.Password == "" && ctx.Err() == nil {
 		config.Password = readCredential(bufio.NewReader(os.Stdin), "Enter the receiver's configured password: ")
 		if config.Password == "" {
 			return errors.New("password cannot be empty")
 		}
-		session, err = airplay.OpenRAOP(ctx, device, config)
+		session, err = airplay.OpenAudioOnly(ctx, device, config, store, expectedID)
 	}
 	if err != nil {
 		return err
@@ -699,13 +748,18 @@ func streamRAOP(ctx context.Context, device airplay.AirPlayDevice, config airpla
 	var shared airplay.SharedAudioCapture
 	capture, err := shared.Acquire(ctx, testMode, airplay.AudioCodecALAC, route)
 	if err != nil {
-		return fmt.Errorf("RAOP audio capture: %w", err)
+		return fmt.Errorf("audio-only capture: %w", err)
 	}
 	defer capture.Stop()
-	log.Printf("streaming RAOP audio to %s (%s)", device.Name, device.IP)
+	log.Printf("streaming audio to %s (%s)", device.Name, device.IP)
 	return session.Stream(ctx, capture)
 }
 
+// credentialOrPrompt returns a supplied credential or makes one pairing-display
+// request and prompts once. expectPIN is true only when the receiver advertised
+// an on-screen PIN (or the user explicitly requested fresh pairing). A successful
+// /pair-pin-start response alone cannot distinguish a PIN from a fixed password,
+// so an unadvertised fallback keeps its prompt deliberately generic.
 func credentialOrPrompt(value string, client *airplay.AirPlayClient, expectPIN bool) string {
 	if value != "" {
 		return value
@@ -781,7 +835,7 @@ func selectDevice(ctx context.Context) (*airplay.AirPlayDevice, error) {
 func promptForDeviceSelection(devices []airplay.AirPlayDevice) (*airplay.AirPlayDevice, error) {
 	fmt.Println("available devices:")
 	for i, d := range devices {
-		printDiscoveredDevice(os.Stdout, i, d, false)
+		printDiscoveredDevice(os.Stdout, i, d)
 	}
 	return readDeviceSelection(devices)
 }
@@ -849,30 +903,26 @@ func discoverDevicesUntilFound(ctx context.Context, scanWindow, minimumRetryInte
 	}
 }
 
-// compareIPs compares two IP address strings numerically.
+func sameTargetIP(target, advertised string) bool {
+	a, errA := netip.ParseAddr(target)
+	b, errB := netip.ParseAddr(advertised)
+	return errA == nil && errB == nil && a.Unmap() == b.Unmap()
+}
+
+// compareIPs compares IPs numerically and uses the scope to break ties.
 func compareIPs(a, b string) int {
-	ipA := net.ParseIP(a)
-	ipB := net.ParseIP(b)
-	if ipA == nil && ipB == nil {
+	ipA, _ := netip.ParseAddr(a)
+	ipB, _ := netip.ParseAddr(b)
+	if !ipA.IsValid() && !ipB.IsValid() {
 		return strings.Compare(a, b)
 	}
-	if ipA == nil {
+	if !ipA.IsValid() {
 		return 1
 	}
-	if ipB == nil {
+	if !ipB.IsValid() {
 		return -1
 	}
-	aBytes := ipA.To16()
-	bBytes := ipB.To16()
-	for i := range aBytes {
-		if aBytes[i] < bBytes[i] {
-			return -1
-		}
-		if aBytes[i] > bBytes[i] {
-			return 1
-		}
-	}
-	return 0
+	return ipA.Compare(ipB)
 }
 
 func runDaemon(cfg daemon.Config) {

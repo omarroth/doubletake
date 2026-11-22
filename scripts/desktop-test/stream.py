@@ -73,7 +73,7 @@ with receiver_log.open("w") as output:
             source = subprocess.Popen(
                 [sender, "-target", "127.0.0.1", "-port", match[1],
                  "-creds", str(Path(work) / "credentials.json"),
-                 "-audio-source", "monitor", "-hwaccel", "none",
+                 "-audio-sink", "monitor", "-hwaccel", "none",
                  "-video-codec", "h264", "-resolution", "640x360",
                  "-fps", str(fps), "-bitrate", "1500", "-no-cursor",
                  "-target-latency-ms", "300"], stdout=log, stderr=subprocess.STDOUT,

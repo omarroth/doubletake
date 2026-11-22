@@ -49,44 +49,44 @@ func TestDeviceSelectionIndex(t *testing.T) {
 }
 
 func TestStableDeviceListPreservesFirstSeenOrderAndUpdatesInPlace(t *testing.T) {
-	var list stableDeviceList
-	list.upsert(airplay.AirPlayDevice{
+	var devices []airplay.AirPlayDevice
+	devices, _ = airplay.UpdateDiscoveredDevices(devices, airplay.AirPlayDevice{
 		Name:     "Living Room",
 		DeviceID: "AA:BB:CC:DD:EE:01",
 		IP:       "192.0.2.10",
 		Port:     7000,
 	})
-	list.upsert(airplay.AirPlayDevice{
+	devices, _ = airplay.UpdateDiscoveredDevices(devices, airplay.AirPlayDevice{
 		Name:     "Office",
 		DeviceID: "AA:BB:CC:DD:EE:02",
 		IP:       "192.0.2.20",
 		Port:     7000,
 	})
-	list.upsert(airplay.AirPlayDevice{
+	devices, _ = airplay.UpdateDiscoveredDevices(devices, airplay.AirPlayDevice{
 		Name:     "Living Room TV",
 		DeviceID: "aa:bb:cc:dd:ee:01",
 		IP:       "192.0.2.11",
 		Port:     7000,
 	})
 
-	if len(list.devices) != 2 {
-		t.Fatalf("device count = %d, want 2", len(list.devices))
+	if len(devices) != 2 {
+		t.Fatalf("device count = %d, want 2", len(devices))
 	}
-	if list.devices[0].Name != "Living Room TV" || list.devices[0].IP != "192.0.2.11" {
-		t.Fatalf("first device = %+v, want updated Living Room device", list.devices[0])
+	if devices[0].Name != "Living Room TV" || devices[0].IP != "192.0.2.11" {
+		t.Fatalf("first device = %+v, want updated Living Room device", devices[0])
 	}
-	if list.devices[1].Name != "Office" {
-		t.Fatalf("second device = %+v, want Office", list.devices[1])
+	if devices[1].Name != "Office" {
+		t.Fatalf("second device = %+v, want Office", devices[1])
 	}
 }
 
 func TestStableDeviceListUsesServiceIdentityWithoutDeviceID(t *testing.T) {
-	var list stableDeviceList
-	list.upsert(airplay.AirPlayDevice{Name: "Kitchen", Model: "old", IP: "192.0.2.30", Port: 7000})
-	list.upsert(airplay.AirPlayDevice{Name: "kitchen", Model: "new", IP: "192.0.2.31", Port: 7000})
+	var devices []airplay.AirPlayDevice
+	devices, _ = airplay.UpdateDiscoveredDevices(devices, airplay.AirPlayDevice{Name: "Kitchen", Model: "old", IP: "192.0.2.30", Port: 7000})
+	devices, _ = airplay.UpdateDiscoveredDevices(devices, airplay.AirPlayDevice{Name: "kitchen", Model: "new", IP: "192.0.2.31", Port: 7000})
 
-	if len(list.devices) != 1 || list.devices[0].Model != "new" {
-		t.Fatalf("devices = %+v, want one updated service", list.devices)
+	if len(devices) != 1 || devices[0].Model != "new" {
+		t.Fatalf("devices = %+v, want one updated service", devices)
 	}
 }
 
@@ -118,8 +118,8 @@ func TestPrintDiscoveredDeviceUsesStableNumberAndSanitizesAdvertisement(t *testi
 		Name:  "Office\x1b[31m",
 		Model: "AppleTV\n",
 		IP:    "192.0.2.20",
-	}, true)
-	if got, want := output.String(), "  [2] Office?[31m (AppleTV?) - 192.0.2.20 (updated)\n"; got != want {
+	})
+	if got, want := output.String(), "  [2] Office?[31m (AppleTV?) - 192.0.2.20\n"; got != want {
 		t.Fatalf("printed device = %q, want %q", got, want)
 	}
 }

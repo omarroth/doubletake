@@ -37,7 +37,9 @@ Daemon mode with multi-target streaming control via
 .SH OPTIONS
 .TP
 .B \-target \fIADDRESS\fR
-Connect to a specific AirPlay receiver by IP address or hostname (skips mDNS discovery)
+Connect to a specific AirPlay receiver by IP address or hostname.
+With \fB\-no-video\fR, use mDNS to look up its advertised audio endpoint. An IPv6 link-local literal
+requires an interface suffix such as fe80::1234%eth0.
 .TP
 .B \-device-id \fIID\fR
 Expected receiver device ID. Use the saved pairing for this receiver and refuse
@@ -95,20 +97,28 @@ nonzero value disables runtime adjustment (default: 0)
 .B \-target-latency-ms \fIMS\fR
 Override both audio and video playout latency in milliseconds. Zero selects the
 automatic AirPlay policy with separate screen and audio defaults (default: 0).
-Daemon mode uses a 250 ms budget for mirror sessions. Classic RAOP playback
+Daemon mode uses a 250 ms budget for mirror sessions. Direct audio playback
 uses a 2-second audio lead. A nonzero value sets a common lead at startup,
 subject to the receiver's supported latency.
 .TP
 .B \-no-audio
 Disable audio for video-only mirroring. Audio-only receivers require audio.
 .TP
-.B \-audio-source \fISOURCE\fR
-Audio route: \fBoutput\fR (default) creates a selectable doubletake output;
-\fBmonitor\fR copies the default local output, retaining local playback.
+.B \-no-video
+Send audio using a supported classic RAOP or realtime AirPlay 2 endpoint.
+AirPlay 2 direct audio uses PTP or NTP according to receiver capabilities.
+PTP audio sessions share one sender clock. In daemon mode this option applies
+to all connections. Incompatible with \fB\-no-audio\fR.
+.TP
+.B \-audio-sink \fISOURCE\fR
+\fBmonitor\fR (default) copies the default local output and retains local
+playback. Audio-only receivers follow the output level when available.
+\fBoutput\fR creates a selectable doubletake output.
 Select doubletake in sound settings to send applications or system audio to the
 receivers. Its volume and mute controls apply to the captured audio. The daemon
 shares this output across receivers and removes it when the last audio capture
-stops. Requires pactl and GStreamer's pulsesrc with PulseAudio or pipewire-pulse.
+stops. The selectable output requires pactl and GStreamer's pulsesrc with
+PulseAudio or pipewire-pulse.
 Default routing and existing application routes are not changed automatically.
 Test mode generates a tone without creating an output.
 .TP
@@ -213,9 +223,10 @@ to submit a credential to a specific receiver.
 For each stream, doubletake binds three consecutive local UDP ports: timing at
 \fIN\fR, audio control and receiver retransmission requests at \fIN+1\fR, and
 outgoing audio data at \fIN+2\fR. Receiver-initiated NTP probes the timing port.
-PTP and sender-initiated NTP do not require a new inbound timing connection,
-but the receiver can still send audio retransmission requests to the control
-port.
+Screen mirroring with PTP and sender-initiated NTP use outbound timing.
+Direct AirPlay 2 PTP audio also requires inbound UDP ports 319 and 320 from
+the receiver. On Linux, binding these ports may require CAP_NET_BIND_SERVICE.
+The receiver can send audio retransmission requests to the control port.
 .PP
 The event and video data channels are outbound TCP connections to ports returned
 by the receiver. doubletake does not require an inbound TCP firewall rule.

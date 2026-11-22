@@ -76,9 +76,10 @@ it as `gst-plugin-va`. Older `vaapipostproc` packages do not provide that elemen
 
 ## Audio
 
-The selectable output requires `pactl`, PulseAudio or `pipewire-pulse`, and
-GStreamer's `pulsesrc`. Its volume and mute affect the captured audio; default
-routing and existing application routes are not changed automatically.
+Audio defaults to monitoring the local output. The selectable output
+(`-audio-sink output`) requires `pactl`, PulseAudio or `pipewire-pulse`, and
+GStreamer's `pulsesrc`. Use its volume and mute controls for the captured audio
+and route applications to it through your sound settings.
 
 ALAC is built in. Default builds also support AAC-ELD when the external FDK-AAC
 library is installed. Without it, audio requires a receiver offering ALAC.

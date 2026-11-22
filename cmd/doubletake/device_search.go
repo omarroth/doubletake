@@ -16,41 +16,6 @@ import (
 
 const deviceSearchRetryInterval = time.Second
 
-type stableDeviceList struct {
-	devices []airplay.AirPlayDevice
-	index   map[string]int
-}
-
-func (l *stableDeviceList) upsert(device airplay.AirPlayDevice) (index int, added, displayChanged bool) {
-	if l.index == nil {
-		l.index = make(map[string]int)
-	}
-	key := deviceSearchKey(device)
-	if index, ok := l.index[key]; ok {
-		previous := l.devices[index]
-		displayChanged = previous.Name != device.Name ||
-			previous.Model != device.Model ||
-			previous.IP != device.IP ||
-			previous.Port != device.Port || previous.UsesClassicRAOP() != device.UsesClassicRAOP()
-		l.devices[index] = device
-		return index, false, displayChanged
-	}
-	index = len(l.devices)
-	l.index[key] = index
-	l.devices = append(l.devices, device)
-	return index, true, true
-}
-
-func deviceSearchKey(device airplay.AirPlayDevice) string {
-	if id := strings.TrimSpace(device.DeviceID); id != "" {
-		return "device:" + strings.ToLower(id)
-	}
-	if name := strings.TrimSpace(device.Name); name != "" {
-		return fmt.Sprintf("service:%s:%d", strings.ToLower(name), device.Port)
-	}
-	return fmt.Sprintf("address:%s:%d", strings.ToLower(device.IP), device.Port)
-}
-
 func canUseDynamicDeviceSearch() bool {
 	stdin, stdinErr := os.Stdin.Stat()
 	stdout, stdoutErr := os.Stdout.Stat()
@@ -76,12 +41,12 @@ func selectDeviceDynamically(ctx context.Context) (*airplay.AirPlayDevice, error
 	ticker := time.NewTicker(120 * time.Millisecond)
 	defer ticker.Stop()
 
-	var devices stableDeviceList
+	var devices []airplay.AirPlayDevice
 	var lastDiscoveryWarning string
 	status := newDeviceSearchStatus(os.Stdout)
 	defer status.finish()
 	fmt.Fprintln(os.Stdout, "available devices:")
-	status.draw(0, len(devices.devices))
+	status.draw(0, len(devices))
 	frame := 0
 
 	for {
@@ -89,12 +54,14 @@ func selectDeviceDynamically(ctx context.Context) (*airplay.AirPlayDevice, error
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case device := <-updates:
-			index, added, changed := devices.upsert(device)
+			count := len(devices)
+			var index int
+			devices, index = airplay.UpdateDiscoveredDevices(devices, device)
 			lastDiscoveryWarning = ""
-			if added || changed {
+			if len(devices) > count {
 				status.clear()
-				printDiscoveredDevice(os.Stdout, index, device, !added)
-				status.draw(frame, len(devices.devices))
+				printDiscoveredDevice(os.Stdout, index, devices[index])
+				status.draw(frame, len(devices))
 			}
 		case err := <-browseErrors:
 			warning := safeTerminalText(err.Error())
@@ -104,7 +71,7 @@ func selectDeviceDynamically(ctx context.Context) (*airplay.AirPlayDevice, error
 			lastDiscoveryWarning = warning
 			status.clear()
 			fmt.Fprintf(os.Stdout, "discovery warning: %s; retrying\n", warning)
-			status.draw(frame, len(devices.devices))
+			status.draw(frame, len(devices))
 		case selection := <-selections:
 			if errors.Is(selection.err, io.EOF) {
 				return nil, context.Canceled
@@ -112,18 +79,18 @@ func selectDeviceDynamically(ctx context.Context) (*airplay.AirPlayDevice, error
 			if selection.err != nil {
 				return nil, fmt.Errorf("read device selection: %w", selection.err)
 			}
-			if len(devices.devices) == 0 {
+			if len(devices) == 0 {
 				status.clear()
 				fmt.Fprintln(os.Stdout, "no receivers are available yet; continuing to search")
 				status.draw(frame, 0)
 				readDeviceSearchSelection(input, selections)
 				continue
 			}
-			index, err := deviceSelectionIndex(selection.input, len(devices.devices))
+			index, err := deviceSelectionIndex(selection.input, len(devices))
 			if err != nil {
 				status.clear()
 				fmt.Fprintf(os.Stdout, "%v; continuing to search\n", err)
-				status.draw(frame, len(devices.devices))
+				status.draw(frame, len(devices))
 				readDeviceSearchSelection(input, selections)
 				continue
 			}
@@ -131,11 +98,11 @@ func selectDeviceDynamically(ctx context.Context) (*airplay.AirPlayDevice, error
 			cancelSearch()
 			status.clear()
 			fmt.Fprintln(os.Stdout)
-			selected := devices.devices[index]
+			selected := devices[index]
 			return &selected, nil
 		case <-ticker.C:
 			frame++
-			status.draw(frame, len(devices.devices))
+			status.draw(frame, len(devices))
 		}
 	}
 }
@@ -230,24 +197,17 @@ func (s *deviceSearchStatus) finish() {
 	fmt.Fprintln(s.out)
 }
 
-func printDiscoveredDevice(out io.Writer, index int, device airplay.AirPlayDevice, updated bool) {
+func printDiscoveredDevice(out io.Writer, index int, device airplay.AirPlayDevice) {
 	name := safeTerminalText(device.Name)
 	if name == "" {
 		name = safeTerminalText(device.IP)
 	}
 	model := safeTerminalText(device.Model)
-	suffix := ""
-	if device.UsesClassicRAOP() {
-		suffix = " [audio only]"
-	}
-	if updated {
-		suffix += " (updated)"
-	}
 	if model == "" {
-		fmt.Fprintf(out, "  [%d] %s - %s%s\n", index+1, name, safeTerminalText(device.IP), suffix)
+		fmt.Fprintf(out, "  [%d] %s - %s\n", index+1, name, safeTerminalText(device.IP))
 		return
 	}
-	fmt.Fprintf(out, "  [%d] %s (%s) - %s%s\n", index+1, name, model, safeTerminalText(device.IP), suffix)
+	fmt.Fprintf(out, "  [%d] %s (%s) - %s\n", index+1, name, model, safeTerminalText(device.IP))
 }
 
 func safeTerminalText(value string) string {

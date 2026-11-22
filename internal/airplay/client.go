@@ -524,6 +524,9 @@ func withHeader(hdrs map[string]string, key, value string) map[string]string {
 }
 
 func (c *AirPlayClient) Connect(ctx context.Context) error {
+	if ip := net.ParseIP(c.host); ip != nil && ip.To4() == nil && ip.IsLinkLocalUnicast() {
+		return fmt.Errorf("IPv6 link-local address %s needs an interface scope (for example %s%%eth0)", c.host, c.host)
+	}
 	addr := net.JoinHostPort(c.host, fmt.Sprintf("%d", c.port))
 	d := net.Dialer{Timeout: 10 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", addr)

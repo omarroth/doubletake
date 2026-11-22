@@ -23,3 +23,6 @@ require (
 	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/tools v0.28.0 // indirect
 )
+
+// Preserve the receiving interface for IPv6 link-local DNS-SD addresses (grandcat/zeroconf#117).
+replace github.com/grandcat/zeroconf v1.0.0 => github.com/jclab-joseph/zeroconf v0.0.0-20231207120421-09af95e78527

@@ -104,9 +104,10 @@ For a configured receiver password, use `DOUBLETAKE_CODE`. After resetting or
 replacing a receiver, use `-pair` to pair again. Saved pairings verify the
 receiver's identity on reconnect.
 
-Select **doubletake** in your sound settings to route applications to the
-receiver. Use `-audio-source monitor` to copy your local output instead, or
-`-no-audio` for video only.
+By default, doubletake streams audio from your default local output while it
+continues playing locally. With `-audio-sink output`, select **doubletake**
+in your sound settings to route audio to the receiver. Use `-no-audio` for
+video only or `-no-video` for audio-only playback.
 
 Resolution defaults to the highest usable receiver mode. Video bitrate and frame
 rate adapt to network conditions unless you set a fixed `-bitrate`.
@@ -122,15 +123,16 @@ Common options:
 
 | Option | Purpose |
 | --- | --- |
-| `-target ADDRESS` | Connect without discovery |
+| `-target ADDRESS` | Connect to a specific receiver |
 | `-pair` | Establish a new pairing |
 | `-resolution WIDTHxHEIGHT[@FPS]`, `-s` | Set the target canvas; default `max` |
 | `-fps FPS` | Capture frame rate; default `30` |
 | `-bitrate KBPS` | Fixed bitrate; default `0` enables adaptation |
 | `-hwaccel METHOD` | `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, or `none` |
 | `-video-codec CODEC` | `auto`, `h264`, or `hevc` |
-| `-audio-source SOURCE` | Selectable `output` or local-output `monitor` |
+| `-audio-sink SOURCE` | `monitor` (default) or selectable `output` |
 | `-no-audio` | Disable audio |
+| `-no-video` | Stream audio only to a receiver with a supported audio endpoint |
 | `-target-latency-ms MS` | Override the audio/video playout budget |
 | `-debug` | Enable diagnostic logging |
 
@@ -153,17 +155,28 @@ doubletake-ctl disconnect                # stop all streams
 The daemon shares capture and encoding where receiver formats allow it.
 Mirroring sessions default to 250 ms of playout lead.
 
-Discovered speakers that offer classic RAOP (UDP and ALAC) can stream audio
-without screen capture. Choose one from interactive discovery, or use
-`doubletake-ctl devices` and connect several in daemon mode. Classic RAOP
-sessions default to a 2-second audio lead and schedule shared audio samples on
-the same sender timeline. A common `-target-latency-ms` value can set the same
-lead for mirror and speaker sessions if both accept it. Actual output timing
-depends on receiver buffering and audio hardware.
+HomePods and other compatible AirPlay speakers can stream audio without screen
+capture. Choose one from interactive discovery, or use
+`doubletake-ctl devices` and connect several in daemon mode. Start the daemon
+with `-no-video` to request audio-only playback on all connections. With a direct
+`-target`, `-no-video` looks up the audio endpoint via mDNS. doubletake prefers
+realtime AirPlay 2 audio and shares one PTP clock across compatible speakers.
+Speakers that offer classic RAOP can also use that transport. Direct audio
+defaults to a 2-second playout lead. Use `-target-latency-ms` to set a common
+lead for mirror and speaker sessions that accept it.
+AirPlay 2 uses transient pairing or saved HomeKit credentials. Speakers that
+require a new persistent pairing cannot be enrolled in audio-only mode yet.
+
+Direct AirPlay 2 PTP audio binds UDP ports 319 and 320 independently of
+`-port-range`. If those ports are unavailable, doubletake can use a separately
+advertised classic RAOP endpoint when the receiver's pairing requirements
+allow it. On Linux systems that restrict access to these ports, grant the
+binary permission to bind them with
+`sudo setcap cap_net_bind_service=+ep "$(realpath ./bin/doubletake)"`.
 
 Classic RAOP supports clear or RSA-wrapped audio and Digest passwords.
-Speakers that require AirPlay 2 media playback or RAOP PIN pairing still need
-those protocols. See `man doubletake-ctl` for pairing and mute commands.
+Audio-only playback follows the captured output's volume and mute when the
+sound server provides those levels. See `man doubletake-ctl` for pairing and mute commands.
 
 To run the installed daemon as a systemd user service:
 
@@ -175,12 +188,14 @@ systemctl --user enable --now doubletake.service
 ## Troubleshooting
 
 - **Firewall:** use `-port-range 60000-60010` and allow inbound UDP to that range
-  from your receivers. Reserve three ports per simultaneous receiver. No router
+  from your receivers. Reserve three ports per simultaneous receiver. Allow UDP
+  ports 319 and 320 from speakers using direct AirPlay 2 PTP audio. No router
   port forwarding is needed.
 - **Capture or encoder errors:** check the [compatibility notes](docs/compatibility.md).
   `-hwaccel none` selects software encoding for comparison.
-- **Audio:** route the desired applications to the doubletake output. Receivers
-  requiring AAC-ELD need FDK-AAC installed; see [audio codecs](docs/development.md#audio-codecs).
+- **Audio:** check that audio is playing on your default local output. If using
+  `-audio-sink output`, route the desired applications to **doubletake**.
+  Receivers requiring AAC-ELD need FDK-AAC installed. See [audio codecs](docs/development.md#audio-codecs).
 
 ## Disclaimer and license
 

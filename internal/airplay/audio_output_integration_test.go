@@ -59,12 +59,12 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 	defer runPulseCommand(context.Background(), "unload-module", localModule)
 	run("set-default-sink", "local_test_output")
 	firstCtx, cancelFirst := context.WithCancel(ctx)
-	first, err := StartAudioCapture(firstCtx, false, AudioCodecALAC)
+	first, err := StartAudioCaptureWithSource(firstCtx, false, AudioCodecALAC, AudioSourceOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Stop()
-	second, err := StartAudioCapture(ctx, false, AudioCodecALAC)
+	second, err := StartAudioCaptureWithSource(ctx, false, AudioCodecALAC, AudioSourceOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 	if !aacELDEncoderAvailable {
 		// Encoder construction happens after source selection. A build missing
 		// the optional codec must roll back the output it just acquired.
-		if failed, err := StartAudioCapture(ctx, false, AudioCodecAACELD); err == nil {
+		if failed, err := StartAudioCaptureWithSource(ctx, false, AudioCodecAACELD, AudioSourceOutput); err == nil {
 			failed.Stop()
 			t.Fatal("unavailable AAC-ELD encoder unexpectedly started")
 		}
@@ -199,7 +199,7 @@ func TestDedicatedAudioOutputIntegration(t *testing.T) {
 	}
 	// Cleanup must also happen on context cancellation without an explicit Stop.
 	restartCtx, stopRestart := context.WithCancel(ctx)
-	restart, err := StartAudioCapture(restartCtx, false, AudioCodecALAC)
+	restart, err := StartAudioCaptureWithSource(restartCtx, false, AudioCodecALAC, AudioSourceOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestDedicatedAudioOutputContinuityIntegration(t *testing.T) {
 	t.Setenv("PULSE_SERVER", server)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	capture, err := StartAudioCapture(ctx, false, AudioCodecALAC)
+	capture, err := StartAudioCaptureWithSource(ctx, false, AudioCodecALAC, AudioSourceOutput)
 	if err != nil {
 		t.Fatal(err)
 	}

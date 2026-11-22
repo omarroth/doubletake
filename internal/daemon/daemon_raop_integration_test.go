@@ -17,7 +17,7 @@ import (
 )
 
 func TestDaemonRAOPSharedAudioPlayout(t *testing.T) {
-	testSharedAudioPlayout(t, false)
+	testSharedAudioPlayout(t, false, false)
 }
 
 func TestDaemonRAOPAndMirrorSharedAudioPlayout(t *testing.T) {
@@ -26,10 +26,14 @@ func TestDaemonRAOPAndMirrorSharedAudioPlayout(t *testing.T) {
 	}
 	airplay.SetTargetLatency(airplay.DefaultRAOPPlayoutLatency)
 	t.Cleanup(func() { airplay.SetTargetLatency(0) })
-	testSharedAudioPlayout(t, true)
+	testSharedAudioPlayout(t, true, false)
 }
 
-func testSharedAudioPlayout(t *testing.T, mirror bool) {
+func TestDaemonNoVideoStreamsAudioToDisplayRAOPEndpoint(t *testing.T) {
+	testSharedAudioPlayout(t, false, true)
+}
+
+func testSharedAudioPlayout(t *testing.T, mirror, noVideo bool) {
 	t.Helper()
 	if err := exec.Command("gst-inspect-1.0", "rtponviftimestamp").Run(); err != nil {
 		t.Skip("requires GStreamer ONVIF audio timestamps")
@@ -90,11 +94,14 @@ func testSharedAudioPlayout(t *testing.T, mirror bool) {
 			devices[i].RAOPOnly = false
 			devices[i].Port = 7000
 			devices[i].Features = airplay.FeatureTransientPairing
+			if noVideo {
+				devices[i].Features |= airplay.FeatureScreen
+			}
 		}
 	}
 	// Deliberately do not run background mDNS or start a desktop session.
 	d, err := New(Config{
-		CredFile: filepath.Join(t.TempDir(), "credentials.json"), TestMode: true, FPS: 10, Bitrate: 500, HWAccel: "openh264",
+		CredFile: filepath.Join(t.TempDir(), "credentials.json"), TestMode: true, NoVideo: noVideo, FPS: 10, Bitrate: 500, HWAccel: "openh264",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,13 +200,18 @@ func testSharedAudioPlayout(t *testing.T, mirror bool) {
 		t.Fatalf("expected at least 20 common frames aligned across both rooms")
 	}
 	if !mirror {
+		firstBefore := receivers[0].Stats().ParameterRequests
+		secondBefore := receivers[1].Stats().ParameterRequests
+		if firstBefore != 2 || secondBefore != 2 {
+			t.Fatal("both speakers must initialize playback with their current volume")
+		}
 		if response := d.handleSetMute(Request{Target: devices[1].IP}, true); !response.OK {
 			t.Fatalf("mute: %+v", response)
 		}
 		if response := d.handleSetMute(Request{Target: devices[1].IP}, false); !response.OK {
 			t.Fatalf("unmute: %+v", response)
 		}
-		if receivers[0].Stats().ParameterRequests != 0 || receivers[1].Stats().ParameterRequests != 3 {
+		if receivers[0].Stats().ParameterRequests != firstBefore || receivers[1].Stats().ParameterRequests != secondBefore+3 {
 			t.Fatal("targeted mute must read, mute and restore only the second room")
 		}
 	}

@@ -66,6 +66,22 @@ func acquireSharedTestCapture(t *testing.T, h *SharedAudioCapture) *AudioCapture
 	return c
 }
 
+func TestSharedAudioDefaultSharesCaptureWithExplicitMonitor(t *testing.T) {
+	h, _, starts := newSharedAudioTestHub(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, route := range []AudioSource{"", AudioSourceMonitor} {
+		capture, err := h.Acquire(ctx, true, AudioCodecALAC, route)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer capture.Stop()
+	}
+	if *starts != 1 {
+		t.Fatalf("started %d captures, want 1", *starts)
+	}
+}
+
 func TestSharedAudioEncodesOnePayloadForMultipleReceivers(t *testing.T) {
 	h, input, starts := newSharedAudioTestHub(t)
 	a, b := acquireSharedTestCapture(t, h), acquireSharedTestCapture(t, h)

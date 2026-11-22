@@ -56,8 +56,10 @@ expect nvenc
 complete_line _doubletake 'doubletake --video-codec=h' doubletake --video-codec = h
 expect h264
 expect hevc
-complete_line _doubletake 'doubletake -audio-source m' doubletake -audio-source m
+complete_line _doubletake 'doubletake -audio-sink m' doubletake -audio-sink m
 expect monitor
+complete_line _doubletake 'doubletake --no-v' doubletake --no-v
+expect --no-video
 complete_line _doubletake 'doubletake -cred-backend k' doubletake -cred-backend k
 expect keyring
 complete_line _doubletake 'doubletake -s ma' doubletake -s ma

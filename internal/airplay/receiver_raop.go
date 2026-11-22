@@ -91,17 +91,23 @@ func (c *receiverConnection) dispatchClassicAudio(request receiverRequest) recei
 				return receiverError(500, err)
 			}
 		}
-		remote := c.conn.RemoteAddr().(*net.TCPAddr)
-		ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-		defer cancel()
-		if err := c.media.ProbeLegacyTiming(ctx, &net.UDPAddr{IP: remote.IP, Zone: remote.Zone, Port: timingPort}, 3); err != nil {
-			return receiverError(500, err)
+		if !s.cfg.RAOPSenderTiming {
+			remote := c.conn.RemoteAddr().(*net.TCPAddr)
+			ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+			defer cancel()
+			if err := c.media.ProbeLegacyTiming(ctx, &net.UDPAddr{IP: remote.IP, Zone: remote.Zone, Port: timingPort}, 3); err != nil {
+				return receiverError(500, err)
+			}
 		}
 		c.sessionState = receiverSessionAudioPrepared
 		ports := c.media.Endpoints()
+		transport := fmt.Sprintf("RTP/AVP/UDP;unicast;server_port=%d;control_port=%d", ports.AudioRTPPort, ports.AudioRTCPPort)
+		if s.cfg.RAOPSenderTiming {
+			transport += fmt.Sprintf(";timing_port=%d", ports.TimingPort)
+		}
 		return receiverResponse{status: 200, headers: map[string]string{
 			"Session":   id + ";timeout=60",
-			"Transport": fmt.Sprintf("RTP/AVP/UDP;unicast;server_port=%d;control_port=%d;timing_port=%d", ports.AudioRTPPort, ports.AudioRTCPPort, ports.TimingPort),
+			"Transport": transport,
 		}}
 	case "RECORD":
 		s.stats.recordRequests.Add(1)

@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -608,8 +607,11 @@ func pairingErrorName(code int) string {
 	}
 }
 
-// completeSRPExchange finishes SRP from M3 onward (shared by PIN and transient flows).
-func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, salt, serverPubB []byte) error {
+// completeSRPProof sends M3, validates M4, and returns the shared secret.
+func (c *AirPlayClient) completeSRPProof(ctx context.Context, pin string, salt, serverPubB []byte, requireMediaProof bool) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	username := []byte("Pair-Setup")
 	password := []byte(pin)
 
@@ -627,7 +629,7 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 
 	aBytes := make([]byte, 32)
 	if _, err := rand.Read(aBytes); err != nil {
-		return fmt.Errorf("generate SRP private key: %w", err)
+		return nil, fmt.Errorf("generate SRP private key: %w", err)
 	}
 	a := new(big.Int).SetBytes(aBytes)
 	if a.Sign() == 0 {
@@ -638,7 +640,7 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 
 	B := new(big.Int).SetBytes(serverPubB)
 	if B.Sign() <= 0 || B.Cmp(srpN) >= 0 {
-		return fmt.Errorf("M2: invalid server public key")
+		return nil, fmt.Errorf("M2: invalid server public key")
 	}
 	serverPublic := B.Bytes()
 
@@ -683,29 +685,46 @@ func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, sal
 		{Tag: tlvPublicKey, Value: padTo(clientPublic, 384)},
 		{Tag: tlvProof, Value: m1Proof[:]},
 	})
-	m4Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m3, c.pairHeaders())
+	headers := c.pairHeaders()
+	if requireMediaProof {
+		headers["X-Apple-HKP"] = strconv.Itoa(pairingTypeTransient)
+	}
+	m4Bytes, err := c.httpRequest("POST", "/pair-setup", "application/octet-stream", m3, headers)
 	if err != nil {
-		return fmt.Errorf("M3: %w", err)
+		return nil, fmt.Errorf("M3: %w", err)
 	}
 
 	m4 := tlv8Decode(m4Bytes)
 	if err := pairingResponseError("pair-setup M4", m4); err != nil {
-		return err
+		return nil, err
+	}
+
+	if requireMediaProof && !bytes.Equal(m4[tlvState], []byte{4}) {
+		return nil, fmt.Errorf("media pair-setup M4 has an invalid state")
 	}
 
 	// Verify server proof: H(A, M1, K) — A unpadded
 	m2ProofInput := bytes.Join([][]byte{clientPublic, m1Proof[:], K}, nil)
 	m2ProofExpected := sha512.Sum512(m2ProofInput)
 	serverProof, hasProof := m4[tlvProof]
-	if !hasProof && pin != "" {
+	if !hasProof && (pin != "" || requireMediaProof) {
 		// The proof is how the receiver shows it knows the PIN. A long-term
 		// pairing that does without it has not authenticated the receiver at
 		// all. Transient pairing uses a published PIN and proves nothing
 		// either way, so it is left as it was.
-		return fmt.Errorf("%w: pair-setup M4 carried no SRP proof", ErrReceiverNotAuthenticated)
+		return nil, fmt.Errorf("%w: pair-setup M4 carried no SRP proof", ErrReceiverNotAuthenticated)
 	}
 	if hasProof && !bytes.Equal(serverProof, m2ProofExpected[:]) {
-		return fmt.Errorf("server proof mismatch")
+		return nil, fmt.Errorf("server proof mismatch")
+	}
+
+	return K, nil
+}
+
+func (c *AirPlayClient) completeSRPExchange(ctx context.Context, pin string, salt, serverPubB []byte) error {
+	K, err := c.completeSRPProof(ctx, pin, salt, serverPubB, false)
+	if err != nil {
+		return err
 	}
 
 	// M5: Exchange Ed25519 keys over encrypted channel
@@ -953,14 +972,22 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	// After pair-verify, the AirPlay control channel is encrypted using HAP framing.
 	// Derive channel encryption keys from the X25519 shared secret.
 	c.PairKeys.SharedSecret = shared
-	c.encWriteKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Write-Encryption-Key"), 32)
-	c.encReadKey = hkdfSHA512(shared, []byte("Control-Salt"), []byte("Control-Read-Encryption-Key"), 32)
+	if err := c.enableHAPControlEncryption(shared); err != nil {
+		return err
+	}
+	// Record the transformation requested on the wire, not the framing format.
+	c.PairKeys.MixFairPlayKey = verifyHeaders["X-Apple-PD"] == "1"
+	c.pairingProtocol = pairingProtocolHAP
+	dbg("[PAIR-VERIFY] encryption ENABLED (HAP framing, nonces at 0)")
+
+	return nil
+}
+
+func (c *AirPlayClient) enableHAPControlEncryption(secret []byte) error {
+	c.encWriteKey = hkdfSHA512(secret, []byte("Control-Salt"), []byte("Control-Write-Encryption-Key"), 32)
+	c.encReadKey = hkdfSHA512(secret, []byte("Control-Salt"), []byte("Control-Read-Encryption-Key"), 32)
 	c.PairKeys.WriteKey = c.encWriteKey
 	c.PairKeys.ReadKey = c.encReadKey
-
-	dbg("[PAIR-VERIFY] shared secret: %s...", hex.EncodeToString(shared[:16]))
-	dbg("[PAIR-VERIFY] writeKey: %s...", hex.EncodeToString(c.encWriteKey[:8]))
-	dbg("[PAIR-VERIFY] readKey:  %s...", hex.EncodeToString(c.encReadKey[:8]))
 
 	writeCipher, err := chacha20poly1305.New(c.encWriteKey)
 	if err != nil {
@@ -970,11 +997,39 @@ func (c *AirPlayClient) hapPairVerify(ctx context.Context) error {
 	c.encWriteNonce = 0
 	c.encReadNonce = 0
 	c.encrypted = true
-	// Record the transformation requested on the wire, not the framing format.
-	c.PairKeys.MixFairPlayKey = verifyHeaders["X-Apple-PD"] == "1"
-	c.pairingProtocol = pairingProtocolHAP
-	dbg("[PAIR-VERIFY] encryption ENABLED (HAP framing, nonces at 0)")
+	return nil
+}
 
+// pairAudioTransient establishes the ephemeral media-playback HAP channel
+// directly from the SRP secret after authenticating M4.
+func (c *AirPlayClient) pairAudioTransient(ctx context.Context) error {
+	c.pairType = pairingTypeTransient
+	c.pairingProtocol = pairingProtocolUnknown
+	headers := c.pairHeaders()
+	headers["X-Apple-HKP"] = strconv.Itoa(pairingTypeTransient)
+	m1 := tlv8EncodeOrdered([]tlv8Item{
+		{Tag: tlvMethod, Value: []byte{0}},
+		{Tag: tlvState, Value: []byte{1}},
+		{Tag: tlvFlags, Value: []byte{byte(pairingFlagTransient)}},
+	})
+	m2, err := exchangePairSetupM1(ctx, func() ([]byte, error) {
+		return c.httpRequest("POST", "/pair-setup", "application/octet-stream", m1, headers)
+	})
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(m2[tlvState], []byte{2}) || len(m2[tlvSalt]) == 0 || len(m2[tlvPublicKey]) > 384 {
+		return errors.New("invalid media pair-setup M2")
+	}
+	secret, err := c.completeSRPProof(ctx, "3939", m2[tlvSalt], m2[tlvPublicKey], true)
+	if err != nil {
+		return err
+	}
+	c.PairKeys = &PairKeys{SharedSecret: secret}
+	if err := c.enableHAPControlEncryption(secret); err != nil {
+		return err
+	}
+	c.pairingProtocol = pairingProtocolHAP
 	return nil
 }
 

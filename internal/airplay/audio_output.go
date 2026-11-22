@@ -19,6 +19,7 @@ type AudioSource string
 const (
 	AudioSourceOutput     AudioSource = "output"
 	AudioSourceMonitor    AudioSource = "monitor"
+	DefaultAudioSource                = AudioSourceMonitor
 	stableAudioOutputName             = "doubletake"
 )
 

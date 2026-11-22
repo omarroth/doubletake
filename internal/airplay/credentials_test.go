@@ -235,4 +235,7 @@ func TestRAOPDoesNotBypassSavedPairing(t *testing.T) {
 	if err := store.CheckRAOPReceiver("", advertised); !errors.Is(err, ErrReceiverNotAuthenticated) {
 		t.Fatalf("saved lowercase ID must prevent classic playback: %v", err)
 	}
+	if err := store.CheckRAOPReceiver("12345678ABCD", "12:34:56:78:AB:CE", advertised); !errors.Is(err, ErrReceiverNotAuthenticated) {
+		t.Fatalf("saved service alias must prevent classic playback: %v", err)
+	}
 }

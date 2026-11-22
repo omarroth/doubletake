@@ -239,7 +239,7 @@ func (h *SharedAudioCapture) Acquire(ctx context.Context, testTone bool, codec A
 		return nil, err
 	}
 	if route == "" {
-		route = AudioSourceOutput
+		route = DefaultAudioSource
 	}
 	gen := h.active
 	if gen != nil && (gen.route != route || gen.testTone != testTone) {
@@ -279,7 +279,7 @@ func (h *SharedAudioCapture) Acquire(ctx context.Context, testTone bool, codec A
 	sink := newSharedAudioSink(codec)
 	group.sinks[sink] = struct{}{}
 	gen.users++
-	capture := &AudioCapture{codec: codec, encodedFrames: sink}
+	capture := &AudioCapture{codec: codec, encodedFrames: sink, outputVolume: gen.source.outputVolume}
 	capture.stopShared = func() {
 		sink.abort()
 		h.mu.Lock()

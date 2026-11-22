@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -209,24 +210,32 @@ func (cs *CredentialStore) LookupReceiver(expectedID, reportedID string) (*Saved
 
 // CheckRAOPReceiver prevents an advertisement from bypassing the saved
 // receiver identity. Classic RAOP media setup cannot verify an AirPlay pairing.
-func (cs *CredentialStore) CheckRAOPReceiver(expectedID, advertisedID string) error {
-	if expectedID != "" && !strings.EqualFold(expectedID, advertisedID) {
-		return fmt.Errorf("%w: expected %q, discovered %q", ErrReceiverNotAuthenticated, expectedID, advertisedID)
+func (cs *CredentialStore) CheckRAOPReceiver(expectedID, advertisedID string, serviceIDs ...string) error {
+	advertisedIDs := append([]string{advertisedID}, serviceIDs...)
+	if expectedID != "" {
+		matched := slices.ContainsFunc(advertisedIDs, func(id string) bool {
+			return discoveryDeviceID(id) == discoveryDeviceID(expectedID)
+		})
+		if !matched {
+			return fmt.Errorf("%w: expected %q, discovered %q", ErrReceiverNotAuthenticated, expectedID, advertisedID)
+		}
 	}
 	// Saved AirPlay IDs predate RAOP discovery and are stored as reported.
 	// Check both MAC address casings before using an unauthenticated endpoint.
 	checked := make(map[string]struct{})
-	for _, id := range []string{advertisedID, expectedID, strings.ToLower(advertisedID), strings.ToUpper(advertisedID)} {
-		if _, present := checked[id]; id == "" || present {
-			continue
-		}
-		checked[id] = struct{}{}
-		saved, err := cs.lookup(id)
-		if err != nil {
-			return err
-		}
-		if saved.HasPairingCredentials() {
-			return fmt.Errorf("%w: classic RAOP cannot verify the saved pairing for %s", ErrReceiverNotAuthenticated, advertisedID)
+	for _, reported := range append(advertisedIDs, expectedID) {
+		for _, id := range []string{reported, strings.ToLower(reported), strings.ToUpper(reported)} {
+			if _, present := checked[id]; id == "" || present {
+				continue
+			}
+			checked[id] = struct{}{}
+			saved, err := cs.lookup(id)
+			if err != nil {
+				return err
+			}
+			if saved.HasPairingCredentials() {
+				return fmt.Errorf("%w: classic RAOP cannot verify the saved pairing for %s", ErrReceiverNotAuthenticated, id)
+			}
 		}
 	}
 	return nil

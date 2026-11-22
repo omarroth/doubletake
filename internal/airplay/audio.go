@@ -114,6 +114,7 @@ func audioLatencySamplesForCodec(ct byte, override uint32) uint32 {
 // AudioCapture manages audio capture via GStreamer and local ALAC encoding.
 type AudioCapture struct {
 	encodedFrames   audioEncodedFrameReader
+	outputVolume    *capturedOutputVolume
 	stopShared      func()
 	gstCmd          *exec.Cmd
 	pcmPipe         io.ReadCloser
@@ -245,17 +246,20 @@ func audioTestToneSourceArgs(codecSPF int64) []string {
 	}
 }
 
-// StartAudioCapture captures the dedicated doubletake audio output. Test mode
+// StartAudioCapture monitors the default local audio output. Test mode
 // generates a tone without creating or connecting to a sound-server output.
 func StartAudioCapture(ctx context.Context, testTone bool, codec AudioCodec) (*AudioCapture, error) {
-	return StartAudioCaptureWithSource(ctx, testTone, codec, AudioSourceOutput)
+	return StartAudioCaptureWithSource(ctx, testTone, codec, DefaultAudioSource)
 }
 
-// StartAudioCaptureWithSource optionally retains default-output monitoring for
-// users who want local playback as well as the remote stream.
+// StartAudioCaptureWithSource captures the selected audio route. An empty
+// source monitors the default local output.
 func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec AudioCodec, source AudioSource) (*AudioCapture, error) {
 	if err := ValidateAudioSource(string(source)); err != nil {
 		return nil, err
+	}
+	if source == "" {
+		source = DefaultAudioSource
 	}
 	captureCtx, cancel := context.WithCancel(ctx)
 	if codec != AudioCodecALAC && codec != AudioCodecAACELD {
@@ -273,6 +277,7 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 	}()
 	// Detect audio source
 	var srcArgs []string
+	var outputVolume *capturedOutputVolume
 	if testTone {
 		srcArgs = audioTestToneSourceArgs(codecSPF)
 		dbg("[AUDIO] using test tone (440 Hz sine wave, volume=%s, live, spf=%d)", audioTestToneVolume, codecSPF)
@@ -280,7 +285,7 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
 		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil
 		monitor := ""
-		if source == "" || source == AudioSourceOutput {
+		if source == AudioSourceOutput {
 			if !hasPulseSource {
 				cancel()
 				return nil, fmt.Errorf("dedicated audio output requires GStreamer pulsesrc")
@@ -298,6 +303,7 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 		srcArgs, backend = selectAudioMonitorSource(hasPulseSource, monitor, hasPipeWireSource, codec)
 		switch backend {
 		case "pulse":
+			outputVolume = &capturedOutputVolume{sink: strings.TrimSuffix(monitor, ".monitor"), alreadyApplied: source == AudioSourceOutput}
 			fragmentTime := audioCaptureFragmentTime(codec)
 			dbg("[AUDIO] using pulsesrc device=%s (buffer=%s fragment=%s)",
 				monitor, audioPulseDeviceBuffer, fragmentTime)
@@ -310,9 +316,10 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 	}
 
 	ac := &AudioCapture{
-		cancel: cancel,
-		waitCh: make(chan struct{}),
-		codec:  codec,
+		cancel:       cancel,
+		waitCh:       make(chan struct{}),
+		codec:        codec,
+		outputVolume: outputVolume,
 	}
 	if codec == AudioCodecALAC {
 		ac.alac = &alacEncoder{}
@@ -736,6 +743,7 @@ type AudioStream struct {
 	historyMu          sync.RWMutex
 	markFirstPacket    bool
 	announceFlags      uint16
+	directPlayout      bool
 	packetHistory      [audioRetransmitHistoryPackets]audioPacketHistoryEntry
 }
 
@@ -1313,6 +1321,9 @@ func (as *AudioStream) sendSyncPacketAt(timingProtocol string, networkTime, time
 		packet[1] = audioSyncPayloadTypeNTP
 		binary.BigEndian.PutUint32(packet[4:8], playheadRTP)
 		binary.BigEndian.PutUint64(packet[8:16], networkTime)
+		if as.directPlayout {
+			rtpNow = playheadRTP
+		}
 		binary.BigEndian.PutUint32(packet[16:20], rtpNow)
 	}
 

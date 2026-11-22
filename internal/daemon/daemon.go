@@ -125,6 +125,7 @@ type Config struct {
 	Debug        bool
 	TestMode     bool
 	NoAudio      bool
+	NoVideo      bool
 	AudioSource  airplay.AudioSource
 	ShowCursor   bool
 	Code         string // default pairing/Digest credential; request Pin overrides it
@@ -235,7 +236,7 @@ type activeStream struct {
 	state          State
 	audioMuted     bool
 	session        *airplay.MirrorSession
-	raop           *airplay.RAOPSession
+	audioOnly      *airplay.AudioOnlySession
 	client         *airplay.AirPlayClient
 	sink           *airplay.BroadcastSink // fan-out video sink (nil when no broadcast)
 	captureGroup   *videoCaptureGroup     // encoder group selected from the resolved nominal canvas
@@ -292,9 +293,9 @@ func (cleanup *daemonCleanup) addStream(entry *activeStream) {
 		cleanup.sessions = append(cleanup.sessions, entry.session)
 		entry.session = nil
 	}
-	if entry.raop != nil {
-		cleanup.sessions = append(cleanup.sessions, entry.raop)
-		entry.raop = nil
+	if entry.audioOnly != nil {
+		cleanup.sessions = append(cleanup.sessions, entry.audioOnly)
+		entry.audioOnly = nil
 	}
 	if entry.client != nil {
 		cleanup.clients = append(cleanup.clients, entry.client)
@@ -366,6 +367,9 @@ type Daemon struct {
 
 // New creates a new Daemon with the given configuration.
 func New(cfg Config) (*Daemon, error) {
+	if cfg.NoVideo && cfg.NoAudio {
+		return nil, errors.New("audio and video cannot both be disabled")
+	}
 	if err := airplay.ValidateAudioSource(string(cfg.AudioSource)); err != nil {
 		return nil, fmt.Errorf("audio source: %w", err)
 	}
@@ -548,6 +552,12 @@ func (d *Daemon) backgroundDiscover(ctx context.Context) {
 				}
 			}
 			for ip, dev := range seen {
+				for oldIP, old := range known {
+					if oldIP != ip && dev.SameDiscoveredReceiver(old) {
+						delete(d.deviceLastSeen, oldIP)
+						delete(known, oldIP)
+					}
+				}
 				d.deviceLastSeen[ip] = now
 				known[ip] = dev
 			}
@@ -663,16 +673,16 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 			source = s.captureGroup.source
 		}
 		var audioLeadMS int64
-		if s.raop != nil {
-			audioLeadMS = s.raop.PlayoutLatency().Milliseconds()
+		if s.audioOnly != nil {
+			audioLeadMS = s.audioOnly.PlayoutLatency().Milliseconds()
 		}
 		streams = append(streams, StreamInfo{
-			AudioOnly:              s.raop != nil,
+			AudioOnly:              s.audioOnly != nil,
 			AudioLeadMS:            audioLeadMS,
 			Device:                 s.device,
 			DeviceIP:               s.deviceIP,
 			State:                  s.state,
-			HasAudio:               s.raop != nil || s.session != nil && s.session.HasAudio(),
+			HasAudio:               s.audioOnly != nil || s.session != nil && s.session.HasAudio(),
 			AudioMuted:             s.audioMuted,
 			CredentialKind:         waitingCredentialKind(s),
 			Width:                  format.Width,
@@ -772,7 +782,7 @@ func (d *Daemon) handleDiscover() Response {
 	return Response{
 		OK:      true,
 		State:   d.overallStateLocked(),
-		Devices: toDeviceInfos(d.devices),
+		Devices: toDeviceInfos(d.devices, d.cfg.NoVideo),
 	}
 }
 
@@ -782,7 +792,7 @@ func (d *Daemon) handleDevices() Response {
 	return Response{
 		OK:      true,
 		State:   d.overallStateLocked(),
-		Devices: toDeviceInfos(d.devices),
+		Devices: toDeviceInfos(d.devices, d.cfg.NoVideo),
 	}
 }
 
@@ -869,10 +879,16 @@ func (d *Daemon) handleConnect(req Request) Response {
 
 	var audioDevice *airplay.AirPlayDevice
 	for _, device := range d.devices {
-		if device.IP == target && device.UsesClassicRAOP() && (req.Port == 0 || device.RAOP.Port == port) {
+		if device.IP == target && device.AudioOnlyPort() != 0 && (d.cfg.NoVideo || device.UsesAudioOnly()) && (req.Port == 0 || device.AudioOnlyPort() == port) {
 			audioDevice = &device
 			break
 		}
+	}
+
+	if d.cfg.NoVideo && audioDevice == nil {
+		resp := d.statusResponseLocked(false, "no supported audio-only endpoint for "+target)
+		d.mu.Unlock()
+		return resp
 	}
 
 	// Create the context before publishing the entry so a concurrent disconnect
@@ -929,6 +945,9 @@ func (d *Daemon) clearLastErrorForTargetLocked(target string) {
 // Must be called with d.mu held.
 func (d *Daemon) pickFreeDeviceLocked(preferredPort int) (string, int) {
 	for _, dev := range d.devices {
+		if d.cfg.NoVideo && (dev.AudioOnlyPort() == 0 || preferredPort != 0 && dev.AudioOnlyPort() != preferredPort) {
+			continue
+		}
 		if _, inUse := d.streams[dev.IP]; !inUse {
 			p := dev.Port
 			if preferredPort != 0 {
@@ -976,7 +995,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 		credential = suppliedCredential
 	}
 	if audioDevice != nil {
-		err := d.streamRAOP(ctx, entry, *audioDevice, credential, expectedDeviceID)
+		err := d.streamAudioOnly(ctx, entry, *audioDevice, credential, expectedDeviceID)
 		if err != nil && ctx.Err() == nil {
 			removeStream(err.Error())
 		} else {
@@ -1471,14 +1490,11 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	log.Printf("[daemon] stream ended for %s", target)
 }
 
-func (d *Daemon) streamRAOP(ctx context.Context, entry *activeStream, device airplay.AirPlayDevice, credential, expectedID string) error {
+func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, device airplay.AirPlayDevice, credential, expectedID string) error {
 	if d.cfg.NoAudio {
 		return errors.New("the receiver is audio-only and audio is disabled")
 	}
-	if err := d.credStore.CheckRAOPReceiver(expectedID, device.DeviceID); err != nil {
-		return err
-	}
-	config := airplay.RAOPConfig{Password: credential, PortMin: d.cfg.PortMin, PortMax: d.cfg.PortMax}
+	config := airplay.AudioOnlyConfig{Password: credential, PortMin: d.cfg.PortMin, PortMax: d.cfg.PortMax}
 	d.mu.Lock()
 	if d.streams[device.IP] != entry {
 		d.mu.Unlock()
@@ -1486,14 +1502,14 @@ func (d *Daemon) streamRAOP(ctx context.Context, entry *activeStream, device air
 	}
 	entry.device, entry.deviceID = device.Name, device.DeviceID
 	for _, destination := range d.streams {
-		if destination.raop != nil {
-			config.PlayoutLatency = destination.raop.PlayoutLatency()
+		if destination.audioOnly != nil {
+			config.PlayoutLatency = destination.audioOnly.PlayoutLatency()
 			break
 		}
 	}
 	d.mu.Unlock()
 
-	session, err := airplay.OpenRAOP(ctx, device, config)
+	session, err := airplay.OpenAudioOnly(ctx, device, config, d.credStore, expectedID)
 	if errors.Is(err, airplay.ErrCredentialsRequired) && credential == "" {
 		d.mu.Lock()
 		if d.streams[device.IP] != entry {
@@ -1508,7 +1524,7 @@ func (d *Daemon) streamRAOP(ctx context.Context, entry *activeStream, device air
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		session, err = airplay.OpenRAOP(ctx, device, config)
+		session, err = airplay.OpenAudioOnly(ctx, device, config, d.credStore, expectedID)
 	}
 	if err != nil {
 		return err
@@ -1516,7 +1532,7 @@ func (d *Daemon) streamRAOP(ctx context.Context, entry *activeStream, device air
 	defer session.Close()
 	capture, err := d.audioCapture.Acquire(ctx, d.cfg.TestMode, airplay.AudioCodecALAC, d.cfg.AudioSource)
 	if err != nil {
-		return fmt.Errorf("RAOP audio capture: %w", err)
+		return fmt.Errorf("audio-only capture: %w", err)
 	}
 	defer capture.Stop()
 
@@ -1528,19 +1544,19 @@ func (d *Daemon) streamRAOP(ctx context.Context, entry *activeStream, device air
 	// A concurrent SETUP may have finished while this one was negotiating.
 	// Keep the established lead so existing rooms can play continuously.
 	for _, destination := range d.streams {
-		if destination.raop != nil {
-			activeLead := destination.raop.PlayoutLatency()
+		if destination.audioOnly != nil {
+			activeLead := destination.audioOnly.PlayoutLatency()
 			if activeLead != session.PlayoutLatency() {
 				d.mu.Unlock()
-				return fmt.Errorf("RAOP playout lead differs from the active rooms (%v versus %v)", session.PlayoutLatency(), activeLead)
+				return fmt.Errorf("audio playout lead differs from the active rooms (%v versus %v)", session.PlayoutLatency(), activeLead)
 			}
 		}
 	}
-	entry.raop = session
+	entry.audioOnly = session
 	entry.state = StateStreaming
 	d.mu.Unlock()
 
-	log.Printf("[daemon] streaming RAOP audio to %s (%s)", device.Name, device.IP)
+	log.Printf("[daemon] streaming audio to %s (%s)", device.Name, device.IP)
 	return session.Stream(ctx, capture)
 }
 
@@ -2047,8 +2063,8 @@ func (d *Daemon) handleSetMute(req Request, muted bool) Response {
 
 	sessions := make([]interface{ SetAudioMuted(bool) error }, 0, len(targets))
 	for _, t := range targets {
-		if t.raop != nil {
-			sessions = append(sessions, t.raop)
+		if t.audioOnly != nil {
+			sessions = append(sessions, t.audioOnly)
 		} else if t.session != nil && (d.cfg.NoAudio || t.session.HasAudio()) {
 			sessions = append(sessions, t.session)
 		}
@@ -2093,12 +2109,12 @@ func (d *Daemon) detachAllLocked() daemonCleanup {
 	return cleanup
 }
 
-func toDeviceInfos(devices []airplay.AirPlayDevice) []DeviceInfo {
+func toDeviceInfos(devices []airplay.AirPlayDevice, noVideo bool) []DeviceInfo {
 	infos := make([]DeviceInfo, len(devices))
 	for i, d := range devices {
 		port := d.Port
-		if d.UsesClassicRAOP() {
-			port = d.RAOP.Port
+		if d.AudioOnlyPort() != 0 && (noVideo || d.UsesAudioOnly()) {
+			port = d.AudioOnlyPort()
 		}
 		infos[i] = DeviceInfo{
 			Name:      d.Name,
@@ -2106,7 +2122,7 @@ func toDeviceInfos(devices []airplay.AirPlayDevice) []DeviceInfo {
 			IP:        d.IP,
 			Port:      port,
 			DeviceID:  d.DeviceID,
-			AudioOnly: d.UsesClassicRAOP(),
+			AudioOnly: d.UsesAudioOnly(),
 		}
 	}
 	return infos

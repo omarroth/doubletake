@@ -810,7 +810,11 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	// Use streamConnectionID as the RTSP URI path. Control, audio, RECORD, and
 	// SET_PARAMETER share the audio URI; video uses a separate URI with its own
 	// streamConnectionID.
-	audioURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, audioStreamConnectionID)
+	// The receiving interface is local to this host and belongs on the dial
+	// address only. The RTSP authority brackets IPv6 without that scope.
+	wireHost, _, _ := strings.Cut(c.host, "%")
+	rtspAuthority := net.JoinHostPort(wireHost, strconv.Itoa(c.port))
+	audioURI := fmt.Sprintf("rtsp://%s/%d", rtspAuthority, audioStreamConnectionID)
 	audioMode := policy.mediaSecurity
 	var audioKey, audioIV, audioChaChaKey []byte
 	if audioMode == mediaSecurityChaCha {
@@ -1305,7 +1309,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	// Video SETUP uses the same sessionUUID but a different streamConnectionID.
 	// The receiver attaches this video stream to the existing session.
 	videoStreamConnectionID := int64(time.Now().UnixNano() & 0x7FFFFFFFFFFFFFFF)
-	videoURI := fmt.Sprintf("rtsp://%s:%d/%d", c.host, c.port, videoStreamConnectionID)
+	videoURI := fmt.Sprintf("rtsp://%s/%d", rtspAuthority, videoStreamConnectionID)
 
 	videoStreamDesc := map[string]interface{}{
 		"type":               int64(110),
@@ -2679,6 +2683,10 @@ func isNTPTimingRequest(packet []byte) bool {
 // timingPort instead of probing the sender's advertised port. The responder on
 // conn consumes and ignores the corresponding 0xd3 packets.
 func sendNTPTimingProbes(ctx context.Context, conn net.PacketConn, host string, port int) {
+	sendNTPTimingProbesWithClock(ctx, conn, host, port, ntpBootTimestamp)
+}
+
+func sendNTPTimingProbesWithClock(ctx context.Context, conn net.PacketConn, host string, port int, clock func() uint64) {
 	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		dbg("[NTP] resolve receiver timing port: %v", err)
@@ -2688,7 +2696,7 @@ func sendNTPTimingProbes(ctx context.Context, conn net.PacketConn, host string, 
 		request := make([]byte, 32)
 		request[0], request[1] = 0x80, 0xd2
 		binary.BigEndian.PutUint16(request[2:4], sequence)
-		binary.BigEndian.PutUint64(request[24:32], ntpBootTimestamp())
+		binary.BigEndian.PutUint64(request[24:32], clock())
 		if _, err := conn.WriteTo(request, addr); err != nil {
 			dbg("[NTP] send timing probe to %s: %v", addr, err)
 			return
