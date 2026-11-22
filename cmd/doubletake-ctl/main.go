@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"doubletake/internal/airplay"
 	"doubletake/internal/daemon"
 	"doubletake/internal/daemon/daemonclient"
 	"doubletake/internal/version"
@@ -59,6 +60,21 @@ func main() {
 			pin = args[2]
 		}
 		resp, err = client.Connect(target, 0, pin)
+	case "play":
+		if len(args) < 2 || len(args) > 3 {
+			fmt.Fprintln(os.Stderr, "Usage: doubletake-ctl play SOURCE [target]")
+			os.Exit(1)
+		}
+		source, resolveErr := airplay.ResolveMediaSource(args[1])
+		if resolveErr != nil {
+			err = resolveErr
+			break
+		}
+		target := ""
+		if len(args) == 3 {
+			target = args[2]
+		}
+		resp, err = client.Play(source, target)
 	case "pin":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl pin <PIN-or-password>\n")
@@ -104,5 +120,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl [-socket path] <command> [args]\n\nCommands:\n  status                              Show daemon state and all active streams\n  discover                            Discover AirPlay devices on the network\n  devices                             List cached discovered devices\n  connect [target] [PIN-or-password]   Start streaming (to target IP, or first free device)\n  pin <PIN-or-password>                Submit pairing credentials for a waiting device\n  disconnect [target]                  Stop streaming (all streams, or only the given IP)\n  mute [target]                        Mute receiver audio (all streams, or only the given IP)\n  unmute [target]                      Unmute receiver audio (all streams, or only the given IP)\n\nFlags:\n  -socket path                        Override daemon socket path (default: %s)\n  -version                            Show version and exit\n  -help, -h                           Show command-line help\n", daemon.DefaultSocketPath())
+	fmt.Fprintf(os.Stderr, "Usage: doubletake-ctl [-socket path] <command> [args]\n\nCommands:\n  status                              Show daemon state and all active streams\n  discover                            Discover AirPlay devices on the network\n  devices                             List cached discovered devices\n  connect [target] [PIN-or-password]   Start streaming (to target IP, or first free device)\n  play SOURCE [target]                  Play media from a file or HTTP(S) URL\n  pin <PIN-or-password>                Submit pairing credentials for a waiting device\n  disconnect [target]                  Stop streaming (all streams, or only the given IP)\n  mute [target]                        Mute receiver audio (all streams, or only the given IP)\n  unmute [target]                      Unmute receiver audio (all streams, or only the given IP)\n\nFlags:\n  -socket path                        Override daemon socket path (default: %s)\n  -version                            Show version and exit\n  -help, -h                           Show command-line help\n", daemon.DefaultSocketPath())
 }

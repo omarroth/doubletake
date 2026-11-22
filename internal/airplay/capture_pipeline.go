@@ -36,13 +36,22 @@ func launchGStreamerPipeline(ctx context.Context, args []string, encoder encoder
 		}
 		return pipeline, nil
 	}
+	return launchGStreamerProcess(ctx, args, extraFiles, len(args) > 2 && args[1] == "fdsrc" && args[2] == "fd=0")
+}
 
+func launchGStreamerProcess(ctx context.Context, args []string, extraFiles []*os.File, stdin bool) (*runningGStreamerPipeline, error) {
 	cmd := exec.CommandContext(ctx, "gst-launch-1.0", args...)
 	cmd.ExtraFiles = extraFiles
-	stdout, err := cmd.StdoutPipe()
+	if stdin {
+		cmd.Stdin = os.Stdin
+	}
+	// Keep the read end after Wait so a finite source can drain buffered frames.
+	stdout, writer, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
+	defer writer.Close()
+	cmd.Stdout = writer
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		_ = stdout.Close()

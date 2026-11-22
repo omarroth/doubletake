@@ -41,10 +41,11 @@ type audioPCMFramePositionReader interface {
 // rtpL16PCMFrameReader consumes RFC4571-framed RTP/L16 produced by GStreamer.
 // RTP packet boundaries do not need to match AirPlay codec-frame boundaries.
 type rtpL16PCMFrameReader struct {
-	reader io.Reader
-	now    func() time.Time
-	packet []byte
-	pcm    []byte
+	padFinal bool
+	reader   io.Reader
+	now      func() time.Time
+	packet   []byte
+	pcm      []byte
 
 	haveTimeline    bool
 	timelinePTS     time.Time
@@ -93,6 +94,10 @@ func (r *rtpL16PCMFrameReader) ReadPCMFramePosition(dst []byte) (audioPCMFramePo
 	for len(r.pcm) < len(dst) {
 		if err := r.readPacket(); err != nil {
 			if err == io.EOF && len(r.pcm) != 0 {
+				if r.padFinal {
+					r.pcm = append(r.pcm, make([]byte, len(dst)-len(r.pcm))...)
+					break
+				}
 				return audioPCMFramePosition{}, io.ErrUnexpectedEOF
 			}
 			return audioPCMFramePosition{}, err

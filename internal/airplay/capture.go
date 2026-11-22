@@ -27,10 +27,11 @@ import (
 
 // CaptureConfig holds screen capture settings.
 type CaptureConfig struct {
-	FPS        int
-	Bitrate    int        // Video bitrate in kbps (0 = auto)
-	HWAccel    string     // "auto", "nvenc", "vaapi", "openh264", or "none"
-	VideoCodec VideoCodec // empty/h264, auto (resolved before Start), or hevc
+	FPS         int
+	Bitrate     int        // Video bitrate in kbps (0 = auto)
+	HWAccel     string     // "auto", "nvenc", "vaapi", "openh264", or "none"
+	VideoCodec  VideoCodec // empty/h264, auto (resolved before Start), or hevc
+	MediaSource string     // local media path, HTTP(S) URL, or "-" for stdin; empty selects the desktop
 
 	// MaxWidth/MaxHeight select the encoded canvas advertised by the receiver.
 	// The captured image is aspect-fitted into it. Zero leaves the capture at
@@ -131,6 +132,8 @@ type ScreenCapture struct {
 	// Synthetic relays have no process exit status. Their readers own terminal
 	// errors even after waitCh closes; treating that channel as EOF loses them.
 	streamOnly bool
+	finite     bool // media input can end normally and must drain buffered output
+	mediaAudio *mediaAudioPlayback
 }
 
 type pipeWirePortalSession interface {
@@ -144,6 +147,7 @@ const (
 	capturePreparationX11 capturePreparationKind = iota
 	capturePreparationWayland
 	capturePreparationTest
+	capturePreparationMedia
 )
 
 // CapturePreparation performs the potentially interactive part of screen
@@ -272,7 +276,9 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		return nil, err
 	}
 	kind := capturePreparationX11
-	if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
+	if cfg.MediaSource != "" {
+		kind = capturePreparationMedia
+	} else if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
 		kind = capturePreparationX11
 	} else if os.Getenv("WAYLAND_DISPLAY") != "" {
 		kind = capturePreparationWayland
@@ -308,6 +314,12 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	}
 	if cfg.VideoCodec == VideoCodecHEVC && !hasGstElement("h265parse") {
 		return nil, fmt.Errorf("HEVC capture requires GStreamer h265parse")
+	}
+	if kind == capturePreparationMedia {
+		if !preparation.timestampedOutput {
+			return nil, fmt.Errorf("video sources require GStreamer RTP/ONVIF timestamps")
+		}
+		return preparation, nil
 	}
 	if !preparation.timestampedOutput {
 		log.Printf("[CAPTURE] warning: GStreamer RTP/ONVIF timestamp elements are unavailable; video will use output-time timestamps")
@@ -390,7 +402,7 @@ func PrepareTestCapture(ctx context.Context, cfg CaptureConfig) (*CapturePrepara
 // Start launches the prepared encoder using the supplied nominal receiver
 // canvas. Zero dimensions leave the captured source at its native size.
 func (p *CapturePreparation) Start(width, height int) (*ScreenCapture, error) {
-	return p.startWithContextAndCodec(nil, width, height, "")
+	return p.startWithContextAndCodec(nil, width, height, "", nil)
 }
 
 // StartWithContext is Start with an optional lifetime context for the launched
@@ -398,23 +410,23 @@ func (p *CapturePreparation) Start(width, height int) (*ScreenCapture, error) {
 // daemon capture groups use an independent context so the encoder can outlive
 // the receiver which happened to create that shared group.
 func (p *CapturePreparation) StartWithContext(lifetime context.Context, width, height int) (*ScreenCapture, error) {
-	return p.startWithContextAndCodec(lifetime, width, height, "")
+	return p.startWithContextAndCodec(lifetime, width, height, "", nil)
 }
 
 // StartWithCodec launches an automatic preparation after receiver negotiation
 // has selected one concrete codec. Explicit preparations accept only their
 // configured codec, preventing the capture and AirPlay framing from diverging.
 func (p *CapturePreparation) StartWithCodec(width, height int, codec VideoCodec) (*ScreenCapture, error) {
-	return p.startWithContextAndCodec(nil, width, height, codec)
+	return p.startWithContextAndCodec(nil, width, height, codec, nil)
 }
 
 // StartWithContextAndCodec combines StartWithContext and StartWithCodec for
 // daemon capture groups whose encoder may outlive the receiver that created it.
 func (p *CapturePreparation) StartWithContextAndCodec(lifetime context.Context, width, height int, codec VideoCodec) (*ScreenCapture, error) {
-	return p.startWithContextAndCodec(lifetime, width, height, codec)
+	return p.startWithContextAndCodec(lifetime, width, height, codec, nil)
 }
 
-func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, width, height int, selected VideoCodec) (*ScreenCapture, error) {
+func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, width, height int, selected VideoCodec, audio *MirrorSession) (*ScreenCapture, error) {
 	if p == nil {
 		return nil, fmt.Errorf("capture preparation is nil")
 	}
@@ -511,6 +523,8 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 		return startPreparedX11Capture(startupCtx, captureCtx, cfg, encoder, timestampedOutput)
 	case capturePreparationTest:
 		return startPreparedTestCapture(captureCtx, cfg, encoder, timestampedOutput)
+	case capturePreparationMedia:
+		return startPreparedMediaCapture(captureCtx, cfg, encoder, audio)
 	default:
 		if pwFd != nil {
 			_ = pwFd.Close()
@@ -2001,6 +2015,21 @@ func (sc *ScreenCapture) ReadVideoAccessUnit() (VideoAccessUnit, error) {
 	if sc.streamOnly {
 		return sc.frames.ReadVideoAccessUnit()
 	}
+	if sc.finite {
+		unit, err := sc.frames.ReadVideoAccessUnit()
+		if err == io.EOF {
+			<-sc.waitCh
+			if sc.waitErr != nil {
+				return unit, fmt.Errorf("video input failed: %w", sc.waitErr)
+			}
+		}
+		if err != nil && err != io.EOF {
+			if diagnostics := sc.stderrText(); diagnostics != "" {
+				return unit, fmt.Errorf("%w; GStreamer stderr: %s", err, diagnostics)
+			}
+		}
+		return unit, err
+	}
 	if prefetched, ok := sc.frames.(*prefetchedVideoAccessUnitReader); ok && prefetched.hasPrefetchedUnit() {
 		return prefetched.ReadVideoAccessUnit()
 	}
@@ -2021,6 +2050,10 @@ func (sc *ScreenCapture) Stop() {
 	}
 	sc.stopOnce.Do(func() {
 		sc.stopped = true
+		if sc.mediaAudio != nil {
+			_ = sc.mediaAudio.capture.pcmPipe.Close()
+			_ = sc.stdout.Close()
+		}
 		if sc.runtime != nil {
 			sc.runtime.stop()
 		}
@@ -2049,6 +2082,9 @@ func (sc *ScreenCapture) Stop() {
 			case <-sc.waitCh:
 			case <-time.After(2 * time.Second):
 			}
+		}
+		if sc.mediaAudio != nil {
+			sc.mediaAudio.capture.Stop()
 		}
 
 		// Keep the portal session alive until its consumer has stopped, then

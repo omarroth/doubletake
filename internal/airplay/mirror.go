@@ -1726,6 +1726,7 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 
 	packetizer := mirrorVideoPacketizer{codec: codec}
 	frameCount := 0
+	var lastMediaPTS time.Time
 	var lastProgress time.Time
 	var maximumWriteDuration time.Duration
 	nextTransportSample := time.Now()
@@ -1789,6 +1790,9 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 					}
 				}
 				frameCount++
+				if capture.finite {
+					lastMediaPTS = unit.PTS
+				}
 				if frameCount <= 12 {
 					dbg("[STREAM] %s frame %d key=%v bytes=%d", codec, frameCount, frame.keyframe, len(payload))
 				}
@@ -1811,6 +1815,29 @@ func (s *MirrorSession) StreamFrames(ctx context.Context, capture *ScreenCapture
 			if readErr == io.EOF {
 				if ctx.Err() != nil {
 					return ctx.Err()
+				}
+				if capture.finite {
+					if frameCount == 0 {
+						return fmt.Errorf("video source ended without producing a playable picture")
+					}
+					// The receiver still has the last pictures queued by PTS.
+					lead := s.timestampBias
+					if lead <= 0 {
+						lead = videoTimestampBias()
+					}
+					if fps := capture.Format().FPS; fps > 0 {
+						lead += time.Second / time.Duration(fps)
+					}
+					timer := time.NewTimer(time.Until(lastMediaPTS.Add(lead)))
+					defer timer.Stop()
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-s.streamDone:
+						return s.streamFailure()
+					case <-timer.C:
+						return nil
+					}
 				}
 				return fmt.Errorf("capture process exited unexpectedly (EOF)")
 			}

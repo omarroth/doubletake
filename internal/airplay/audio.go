@@ -119,6 +119,7 @@ type AudioCapture struct {
 	gstCmd          *exec.Cmd
 	pcmPipe         io.ReadCloser
 	pcmFrames       audioPCMFrameReader
+	finite          bool
 	cancel          context.CancelFunc
 	waitCh          chan struct{}
 	waitErr         error
@@ -188,20 +189,23 @@ func selectAudioMonitorSource(hasPulse bool, monitor string, hasPipeWire bool, c
 	return nil, ""
 }
 
-func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bool) []string {
-	_, codecSPF, _, _, _, _ := codec.Info()
+func appendPCMConversion(args []string, timestamped bool) []string {
 	format := "S16LE"
 	if timestamped {
 		// RTP L16 is network byte order. The framed reader restores S16LE before
 		// handing samples to either local AirPlay encoder.
 		format = "S16BE"
 	}
-	args := append([]string{"--quiet"}, srcArgs...)
-	args = append(args,
+	return append(args,
 		"!", "audioconvert",
 		"!", "audioresample",
 		"!", fmt.Sprintf("audio/x-raw,rate=%d,channels=%d,format=%s,layout=interleaved", audioSampleRate, audioChannels, format),
 	)
+}
+
+func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bool) []string {
+	_, codecSPF, _, _, _, _ := codec.Info()
+	args := appendPCMConversion(append([]string{"--quiet"}, srcArgs...), timestamped)
 	if timestamped {
 		// The real-time sender is normally driven by one source callback per
 		// codec frame. Give the Go side that same boundary instead of splitting a
@@ -210,24 +214,7 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 			"!", "audiobuffersplit", fmt.Sprintf("output-buffer-duration=%d/%d", codecSPF, audioSampleRate),
 			"strict-buffer-size=true",
 		)
-		// Preserve complete source samples through short CPU/GPU scheduling stalls.
-		// The timestamp-aware Go reader can then discard only codec frames whose
-		// negotiated playout deadline has actually passed.
-		args = append(args,
-			"!", "queue", "max-size-buffers=0", "max-size-bytes=0",
-			fmt.Sprintf("max-size-time=%d", audioCaptureStallBuffer), "leaky=no",
-		)
-		// ceil(SPF / sampleRate) keeps a normal codec frame within one packet,
-		// while the Go reader remains correct if GStreamer splits or combines it.
-		maxPacketTime := (codecSPF*int64(time.Second) + audioSampleRate - 1) / audioSampleRate
-		args = append(args,
-			"!", "rtpL16pay", "pt=96", "mtu=60000", "timestamp-offset=0", "seqnum-offset=0",
-			// Generate capture RTP from the number of PCM samples, not wall time.
-			// The ONVIF extension independently preserves the matching source PTS.
-			"perfect-rtptime=true", fmt.Sprintf("max-ptime=%d", maxPacketTime),
-			"!", "rtponviftimestamp", "ntp-offset=-1", "set-e-bit=false", "set-t-bit=false",
-			"!", "rtpstreampay",
-		)
+		return appendTimestampedPCMOutput(args, codecSPF)
 	} else {
 		// The compatibility fallback has no source PTS with which to recognize a
 		// backlog. Retain its small downstream-leaky queue so a stalled reader
@@ -237,6 +224,22 @@ func audioCapturePipelineArgs(srcArgs []string, codec AudioCodec, timestamped bo
 		)
 	}
 	return append(args, "!", "fdsink", "fd=1", "sync=false", "async=false")
+}
+
+func appendTimestampedPCMOutput(args []string, codecSPF int64) []string {
+	// Bound PCM retained during encoder or network stalls and keep a normal
+	// codec frame within one packet. The reader also handles partial packets.
+	maxPacketTime := (codecSPF*int64(time.Second) + audioSampleRate - 1) / audioSampleRate
+	return append(args,
+		"!", "queue", "max-size-buffers=0", "max-size-bytes=0",
+		fmt.Sprintf("max-size-time=%d", audioCaptureStallBuffer), "leaky=no",
+		"!", "rtpL16pay", "pt=96", "mtu=60000", "timestamp-offset=0", "seqnum-offset=0",
+		// RTP follows the number of PCM samples. ONVIF preserves source PTS.
+		"perfect-rtptime=true", fmt.Sprintf("max-ptime=%d", maxPacketTime),
+		"!", "rtponviftimestamp", "ntp-offset=-1", "set-e-bit=false", "set-t-bit=false",
+		"!", "rtpstreampay",
+		"!", "fdsink", "fd=1", "sync=false", "async=false",
+	)
 }
 
 func audioTestToneSourceArgs(codecSPF int64) []string {
@@ -423,13 +426,15 @@ func (ac *AudioCapture) readFramePosition(buf []byte) (int, audioPCMFramePositio
 }
 
 func (ac *AudioCapture) readPCMFramePosition(pcm []byte) (audioPCMFramePosition, error) {
-	select {
-	case <-ac.waitCh:
-		if ac.waitErr != nil {
-			return audioPCMFramePosition{}, fmt.Errorf("audio capture exited: %w", ac.waitErr)
+	if !ac.finite {
+		select {
+		case <-ac.waitCh:
+			if ac.waitErr != nil {
+				return audioPCMFramePosition{}, fmt.Errorf("audio capture exited: %w", ac.waitErr)
+			}
+			return audioPCMFramePosition{}, io.EOF
+		default:
 		}
-		return audioPCMFramePosition{}, io.EOF
-	default:
 	}
 
 	var position audioPCMFramePosition
@@ -1441,8 +1446,12 @@ func (s *MirrorSession) StreamAudio(ctx context.Context, capture *AudioCapture, 
 	if now == nil {
 		now = time.Now
 	}
+	ready := s.firstFrameSent
+	if capture.finite {
+		ready = nil // The file's preroll samples are part of the content.
+	}
 	return stream.play(ctx, capture, audioPlayback{
-		ready: s.firstFrameSent, now: now, clockAt: s.audioClockAt,
+		ready: ready, now: now, clockAt: s.audioClockAt,
 		timingProtocol: s.timingProtocol, initialSeq: 1, initialRTP: uint32(stream.spf),
 	})
 }

@@ -126,6 +126,7 @@ func main() {
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
 	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
+	videoSource := flag.String("source", "", "Play media from a file, HTTP(S) URL, or - for stdin")
 	audioSink := string(airplay.DefaultAudioSource)
 	flag.StringVar(&audioSink, "audio-sink", audioSink, "Audio route: monitor (copy default output) or output (selectable doubletake sink)")
 	flag.StringVar(&audioSink, "audio-source", audioSink, "Deprecated alias for -audio-sink")
@@ -145,6 +146,25 @@ func main() {
 	}
 	if *noVideo && *noAudio {
 		log.Fatal("-no-video and -no-audio cannot be used together")
+	}
+	if *videoSource != "" {
+		if *daemonize {
+			log.Fatal("use doubletake-ctl play SOURCE [target] with daemon mode")
+		}
+		if *noVideo || *testMode || *x11WindowID != "" || *x11WindowName != "" {
+			log.Fatal("-source requires video and cannot be combined with -test or an X11 window selector")
+		}
+		if *videoSource == "-" {
+			if *target == "" {
+				log.Fatal("-source - requires -target because stdin carries video")
+			}
+		} else {
+			path, err := airplay.ResolveMediaSource(*videoSource)
+			if err != nil {
+				log.Fatal(err)
+			}
+			*videoSource = path
+		}
 	}
 	if !*noVideo && !airplay.HasInProcessGStreamer() {
 		log.Println("warning: build without in-process GStreamer uses gst-launch-1.0 for video; adaptive stream quality is unavailable")
@@ -177,6 +197,15 @@ func main() {
 	credential := *code
 	if env := os.Getenv("DOUBLETAKE_CODE"); env != "" {
 		credential = env
+	}
+	requirePromptInput := func() {
+		if *videoSource == "-" {
+			log.Fatal("stdin carries video; pair with the receiver first or supply DOUBLETAKE_CODE")
+		}
+	}
+	readPairingCredential := func(prompt string) string {
+		requirePromptInput()
+		return readCredential(bufio.NewReader(os.Stdin), prompt)
 	}
 
 	airplay.SetTargetLatency(time.Duration(*targetLatencyMs) * time.Millisecond)
@@ -266,6 +295,9 @@ func main() {
 	}
 
 	if advertisement != nil && (*noVideo || advertisement.UsesAudioOnly()) {
+		if *videoSource != "" {
+			log.Fatal("the selected receiver supports audio only")
+		}
 		if advertisement.AudioOnlyPort() == 0 {
 			log.Fatalf("%s does not advertise a supported audio-only endpoint", advertisement.Name)
 		}
@@ -317,7 +349,7 @@ func main() {
 		log.Printf("connected to: %s (model: %s, initialVolume: unavailable, volumeControlType: %d)", info.Name, info.Model, info.VolumeControlType)
 	}
 	if credential == "" && info.RequiresPassword() {
-		credential = readCredential(bufio.NewReader(os.Stdin), "Enter the receiver's configured password: ")
+		credential = readPairingCredential("Enter the receiver's configured password: ")
 		if credential == "" {
 			log.Fatal("password cannot be empty")
 		}
@@ -413,6 +445,9 @@ func main() {
 	}
 	pairWithCredential = func(value string, expectPIN bool) {
 		if value == "" {
+			if credential == "" {
+				requirePromptInput()
+			}
 			value = credentialOrPrompt(credential, client, expectPIN)
 		}
 		// AirPlay uses the same user-entered value for pair-setup and, on
@@ -434,13 +469,14 @@ func main() {
 			// A legacy receiver's configured pairing password.
 			code = credential
 			if code == "" {
-				code = readCredential(bufio.NewReader(os.Stdin), "Enter the receiver's pairing password: ")
+				code = readPairingCredential("Enter the receiver's pairing password: ")
 			}
 			credential = code
 			client.SetPassword(code)
 		} else {
 			// A PIN is shown afresh each time, so a preset -code cannot be it:
 			// show one and ask for it.
+			requirePromptInput()
 			code = credentialOrPrompt("", client, true)
 		}
 		if err := client.PairWithCode(ctx, code); err != nil {
@@ -528,6 +564,9 @@ func main() {
 		PortMin:      portMin,
 		PortMax:      portMax,
 	}
+	if *videoSource != "" && !*noAudio {
+		streamCfg.PlayoutLatency = airplay.SharedPlayoutLatency()
+	}
 	// Complete the potentially interactive Wayland portal request before SETUP,
 	// but delay encoder startup until control SETUP returns session-time display
 	// information. Some current receivers omit displays before that session
@@ -537,6 +576,7 @@ func main() {
 		Bitrate:       *bitrate,
 		HWAccel:       *hwaccel,
 		VideoCodec:    airplay.VideoCodec(*videoCodec),
+		MediaSource:   *videoSource,
 		X11WindowID:   xid,
 		X11WindowName: *x11WindowName,
 		ShowCursor:    !*noCursor,
@@ -549,6 +589,9 @@ func main() {
 		}
 	}
 	prepareCapture := func(cfg airplay.CaptureConfig) (*airplay.CapturePreparation, error) {
+		if cfg.MediaSource != "" {
+			return airplay.PrepareCapture(ctx, cfg)
+		}
 		if *testMode {
 			return airplay.PrepareTestCapture(ctx, cfg)
 		}
@@ -564,7 +607,7 @@ func main() {
 	}
 	capturePreparation, err := prepareCapture(captureCfg)
 	if err != nil {
-		log.Fatalf("prepare screen capture: %v", err)
+		log.Fatalf("prepare video capture: %v", err)
 	}
 	streamCfg.AutomaticHEVCAvailable = capturePreparation.AutomaticHEVCAvailable()
 	streamCfg.MeasuredVideoLatency = capturePreparation.MeasuredVideoLatency()
@@ -588,6 +631,10 @@ func main() {
 		return fmt.Errorf("%w: %v", airplay.ErrAutomaticVideoCodecUnavailable, cause)
 	}
 	prepareVideo := func(width, height int, codec airplay.VideoCodec) (airplay.VideoPreparationResult, error) {
+		if *videoSource != "" {
+			startedWidth, startedHeight, startedCodec = width, height, codec
+			return airplay.VideoPreparationResult{}, nil
+		}
 		if capture != nil {
 			if codec == startedCodec {
 				if width != startedWidth || height != startedHeight {
@@ -633,7 +680,9 @@ func main() {
 		capturePreparation.Close()
 		if capture != nil {
 			capture.Stop()
-			<-broadcastDone
+			if broadcastDone != nil {
+				<-broadcastDone
+			}
 		}
 	}()
 
@@ -643,7 +692,7 @@ func main() {
 		// /info. They reveal it only by challenging the first media SETUP. Keep
 		// the completed pairing/FairPlay state and running capture, configure the
 		// cached Digest challenge, and retry this setup exactly once.
-		credential = readCredential(bufio.NewReader(os.Stdin), "Enter the code shown on the receiver, or its configured password: ")
+		credential = readPairingCredential("Enter the code shown on the receiver, or its configured password: ")
 		if credential == "" {
 			log.Fatal("receiver code/password cannot be empty")
 		}
@@ -658,6 +707,20 @@ func main() {
 	}
 	if err != nil {
 		log.Fatalf("mirror setup failed: %v", err)
+	}
+	if *videoSource != "" {
+		defer session.Close()
+		capture, err = session.StartMediaCapture(capturePreparation, startedWidth, startedHeight, startedCodec)
+		if err == nil {
+			err = session.StreamMedia(ctx, capture)
+		}
+		if err != nil && ctx.Err() == nil {
+			// log.Fatal skips defers.
+			capture.Stop()
+			_ = session.Close()
+			log.Fatalf("play video: %v", err)
+		}
+		return
 	}
 	if capture == nil || broadcast == nil {
 		log.Fatal("mirror setup completed without preparing video capture")

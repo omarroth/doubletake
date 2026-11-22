@@ -25,7 +25,7 @@ _doubletake_complete_value()
         audio-sink|audio-source) _doubletake_complete_words 'output monitor' ;;
         cred-backend) _doubletake_complete_words 'file keyring' ;;
         resolution|s) _doubletake_complete_words 'max 1280x720 1920x1080 2560x1440 3840x2160' ;;
-        creds|socket) _filedir ;;
+        creds|socket|source) _filedir ;;
         target|port|code|device-id|fps|bitrate|target-latency-ms|port-range|x11-window-id|x11-window-name) ;;
         pair|test|no-audio|no-video|debug|daemonize|no-cursor|version)
             if [[ $assigned != true ]]; then return 1; fi
@@ -50,7 +50,7 @@ _doubletake()
             -audio-sink|--audio-sink|-audio-source|--audio-source|-bitrate|--bitrate|-code|--code|\
             -cred-backend|--cred-backend|-creds|--creds|-device-id|--device-id|\
             -fps|--fps|-hwaccel|--hwaccel|-port|--port|-port-range|--port-range|\
-            -resolution|--resolution|-s|--s|-socket|--socket|-target|--target|\
+            -resolution|--resolution|-s|--s|-socket|--socket|-source|--source|-target|--target|\
             -target-latency-ms|--target-latency-ms|-video-codec|--video-codec|\
             -x11-window-id|--x11-window-id|-x11-window-name|--x11-window-name)
                 if ((i + 1 == cword)); then option=${words[i]}; else ((i++)); fi
@@ -72,7 +72,7 @@ _doubletake()
     _doubletake_complete_flags \
         -audio-sink -audio-source -bitrate -code -cred-backend -creds -daemonize -debug \
         -device-id -fps -h -help -hwaccel -no-audio -no-video -no-cursor -pair -port \
-        -port-range -resolution -s -socket -target -target-latency-ms -test \
+        -port-range -resolution -s -socket -source -target -target-latency-ms -test \
         -version -video-codec -x11-window-id -x11-window-name
 }
 
@@ -87,14 +87,20 @@ _doubletake_ctl()
     # one argument, including paths which happen to look like command names.
     local i options_done=false option='' assigned=false
     for ((i = 1; i < cword; i++)); do
-        if [[ $options_done == true ]]; then return; fi
+        if [[ $options_done == true ]]; then
+            if [[ ${words[i]} == play ]] && ((i + 1 == cword)); then _filedir; fi
+            return
+        fi
         case ${words[i]} in
             --) options_done=true ;;
             -socket|--socket)
                 if ((i + 1 == cword)); then option=${words[i]}; else ((i++)); fi
                 ;;
             -*) ;;
-            *) return ;;
+            *)
+                if [[ ${words[i]} == play ]] && ((i + 1 == cword)); then _filedir; fi
+                return
+                ;;
         esac
     done
 
@@ -113,7 +119,7 @@ _doubletake_ctl()
     if [[ $options_done == false && $cur == -* ]]; then
         _doubletake_complete_flags -socket -version -help -h
     else
-        _doubletake_complete_words 'status discover devices connect pin disconnect mute unmute'
+        _doubletake_complete_words 'status discover devices connect play pin disconnect mute unmute'
     fi
 }
 

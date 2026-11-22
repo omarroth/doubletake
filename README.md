@@ -139,6 +139,24 @@ Common options:
 Use `doubletake -help` or `man doubletake` for all options, and
 `doubletake -version` when reporting a problem.
 
+## Play media
+
+```sh
+doubletake -target 192.168.1.77 -source ./clip.mp4
+doubletake -target 192.168.1.77 -source - < clip.mkv
+doubletake -target 192.168.1.77 -source 'https://example.net/clip.mp4'
+doubletake-ctl play ./clip.mp4 192.168.1.77
+```
+
+Custom sources play the clip's video and audio and stop at end of input.
+Use `-no-audio` to play video only. GStreamer must have decoders for the
+input tracks. Direct HTTP(S) media URLs are fetched by doubletake. For stdin,
+use a streamable container such as Matroska or MPEG-TS and pair first if the
+receiver needs an interactive PIN. For example, pipe Streamlink output with
+`streamlink --stdout URL best | doubletake -target RECEIVER_IP -source -`.
+With a running daemon, `play` accepts a file or URL and uses the first free
+display if you omit the target. Use `doubletake-ctl disconnect TARGET` to stop early.
+
 ## Multiple receivers
 
 Start the daemon, then control it from another terminal:

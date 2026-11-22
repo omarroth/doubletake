@@ -4,6 +4,7 @@ package airplay
 
 import (
 	"context"
+	"errors"
 	"os"
 )
 
@@ -13,4 +14,8 @@ func HasInProcessGStreamer() bool { return false }
 
 func launchLinkedGStreamerPipeline(context.Context, []string, encoderResult, []*os.File) (*runningGStreamerPipeline, bool, error) {
 	return nil, false, nil
+}
+
+func launchLinkedMediaGraph(context.Context, []string, encoderResult, *os.File, *os.File, *os.File, *os.File) (*runningGStreamerPipeline, error) {
+	return nil, errors.New("linked GStreamer playback unavailable")
 }

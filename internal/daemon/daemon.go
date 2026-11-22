@@ -50,7 +50,8 @@ type Request struct {
 	// applies even if the device at Target names itself differently, and such
 	// a device is refused. Without it, the ID discovery advertised for Target
 	// is used.
-	DeviceID string `json:"device_id,omitempty"`
+	DeviceID    string `json:"device_id,omitempty"`
+	MediaSource string `json:"media_source,omitempty"`
 }
 
 // StreamInfo describes one active (or connecting) mirror stream.
@@ -76,6 +77,7 @@ type StreamInfo struct {
 	EstimatedBandwidthKbps int                 `json:"estimated_bandwidth_kbps,omitempty"`
 	RateControlReceivers   int                 `json:"rate_control_receivers,omitempty"`
 	Source                 *airplay.SourceInfo `json:"source,omitempty"`
+	MediaSource            string              `json:"media_source,omitempty"`
 }
 
 // Response is returned to the caller for every request.
@@ -237,6 +239,8 @@ type activeStream struct {
 	audioMuted     bool
 	session        *airplay.MirrorSession
 	audioOnly      *airplay.AudioOnlySession
+	mediaSource    string
+	mediaCapture   *airplay.ScreenCapture
 	client         *airplay.AirPlayClient
 	sink           *airplay.BroadcastSink // fan-out video sink (nil when no broadcast)
 	captureGroup   *videoCaptureGroup     // encoder group selected from the resolved nominal canvas
@@ -613,7 +617,7 @@ func (d *Daemon) handleRequest(req Request) Response {
 		return d.handleDiscover()
 	case "devices":
 		return d.handleDevices()
-	case "connect":
+	case "connect", "play":
 		return d.handleConnect(req)
 	case "disconnect":
 		return d.handleDisconnect(req)
@@ -661,6 +665,7 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 		errMsg = d.lastError
 	}
 	streams := make([]StreamInfo, 0, len(d.streams))
+	videoEncoders := len(d.captureGroups)
 	for _, s := range d.streams {
 		format := airplay.CaptureFormat{}
 		var source *airplay.SourceInfo
@@ -671,6 +676,9 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 				format = s.captureGroup.format
 			}
 			source = s.captureGroup.source
+		} else if s.mediaCapture != nil {
+			format = s.mediaCapture.Format()
+			videoEncoders++
 		}
 		var audioLeadMS int64
 		if s.audioOnly != nil {
@@ -682,7 +690,7 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 			Device:                 s.device,
 			DeviceIP:               s.deviceIP,
 			State:                  s.state,
-			HasAudio:               s.audioOnly != nil || s.session != nil && s.session.HasAudio(),
+			HasAudio:               s.audioOnly != nil || s.mediaCapture.HasMediaAudio() || s.mediaSource == "" && s.session != nil && s.session.HasAudio(),
 			AudioMuted:             s.audioMuted,
 			CredentialKind:         waitingCredentialKind(s),
 			Width:                  format.Width,
@@ -696,6 +704,7 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 			EstimatedBandwidthKbps: format.EstimatedBandwidthKbps,
 			RateControlReceivers:   format.RateControlReceivers,
 			Source:                 source,
+			MediaSource:            s.mediaSource,
 		})
 	}
 	// Sort for deterministic output
@@ -733,7 +742,7 @@ func (d *Daemon) statusResponseLocked(ok bool, errMsg string) Response {
 
 	return Response{
 		SharedAudio:      d.audioCapture.Stats(),
-		VideoEncoders:    len(d.captureGroups),
+		VideoEncoders:    videoEncoders,
 		PlayoutLatencyMS: d.playoutLatency.Milliseconds(),
 		OK:               ok,
 		State:            overall,
@@ -797,6 +806,18 @@ func (d *Daemon) handleDevices() Response {
 }
 
 func (d *Daemon) handleConnect(req Request) Response {
+	if req.Cmd == "play" {
+		if d.cfg.NoVideo || d.cfg.TestMode {
+			return Response{OK: false, Error: "play requires a video-enabled daemon outside test mode"}
+		}
+		source, err := airplay.ResolveMediaSource(req.MediaSource)
+		if err != nil {
+			return Response{OK: false, Error: err.Error()}
+		}
+		req.MediaSource = source
+	} else {
+		req.MediaSource = ""
+	}
 	d.mu.Lock()
 	if d.shuttingDown {
 		d.mu.Unlock()
@@ -825,7 +846,7 @@ func (d *Daemon) handleConnect(req Request) Response {
 		}
 
 		if entry, ok := d.streams[target]; ok {
-			if entry.state != StatePINRequired || entry.credentialCh == nil {
+			if req.Cmd == "play" || entry.state != StatePINRequired || entry.credentialCh == nil {
 				state := d.overallStateLocked()
 				d.mu.Unlock()
 				return Response{OK: false, State: state, Error: "credential prompt is not ready for " + target}
@@ -856,7 +877,7 @@ func (d *Daemon) handleConnect(req Request) Response {
 	// If no target specified, use first cached device not already streaming.
 	port := req.Port
 	if target == "" {
-		target, port = d.pickFreeDeviceLocked(port)
+		target, port = d.pickFreeDeviceLocked(port, req.MediaSource != "")
 		if target == "" {
 			state := d.overallStateLocked()
 			d.mu.Unlock()
@@ -890,12 +911,18 @@ func (d *Daemon) handleConnect(req Request) Response {
 		d.mu.Unlock()
 		return resp
 	}
+	if req.MediaSource != "" && audioDevice != nil {
+		resp := d.statusResponseLocked(false, "the selected receiver supports audio only")
+		d.mu.Unlock()
+		return resp
+	}
 
 	// Create the context before publishing the entry so a concurrent disconnect
 	// can always cancel the connection goroutine.
 	connCtx, cancel := context.WithCancel(context.Background())
 	entry := &activeStream{
 		deviceIP:     target,
+		mediaSource:  req.MediaSource,
 		state:        StateConnecting,
 		cancelFn:     cancel,
 		credentialCh: make(chan string, 1),
@@ -943,8 +970,11 @@ func (d *Daemon) clearLastErrorForTargetLocked(target string) {
 
 // pickFreeDeviceLocked returns the first discovered device not already in d.streams.
 // Must be called with d.mu held.
-func (d *Daemon) pickFreeDeviceLocked(preferredPort int) (string, int) {
+func (d *Daemon) pickFreeDeviceLocked(preferredPort int, mediaPlayback bool) (string, int) {
 	for _, dev := range d.devices {
+		if mediaPlayback && dev.UsesAudioOnly() {
+			continue
+		}
 		if d.cfg.NoVideo && (dev.AudioOnlyPort() == 0 || preferredPort != 0 && dev.AudioOnlyPort() != preferredPort) {
 			continue
 		}
@@ -1332,7 +1362,15 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	// not start an encoder until control SETUP exposes session-time display info.
 	// This preserves the receiver deadline while avoiding the provisional 720p
 	// fallback used by receivers whose public /info omits displays.
-	capturePreparation, err := d.prepareVideoCapture(ctx, screenCastRestoreToken, deviceID)
+	var capturePreparation *airplay.CapturePreparation
+	if entry.mediaSource == "" {
+		capturePreparation, err = d.prepareVideoCapture(ctx, screenCastRestoreToken, deviceID)
+	} else {
+		capturePreparation, err = airplay.PrepareCapture(ctx, airplay.CaptureConfig{
+			FPS: d.cfg.FPS, Bitrate: d.cfg.Bitrate, HWAccel: d.cfg.HWAccel,
+			VideoCodec: d.cfg.VideoCodec, MediaSource: entry.mediaSource,
+		})
+	}
 	if err != nil {
 		removeStream(fmt.Sprintf("prepare capture failed: %v", err))
 		return
@@ -1345,6 +1383,10 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	selectedCaptureKey := videoCaptureKey{maxWidth: -1, maxHeight: -1}
 	prepareVideo := func(width, height int, codec airplay.VideoCodec) (airplay.VideoPreparationResult, error) {
 		key := normalizedVideoCaptureKey(width, height, codec)
+		if entry.mediaSource != "" {
+			selectedCaptureKey = key
+			return airplay.VideoPreparationResult{}, nil
+		}
 		if broadcast != nil {
 			if key.codec == selectedCaptureKey.codec {
 				if key.maxWidth != selectedCaptureKey.maxWidth || key.maxHeight != selectedCaptureKey.maxHeight {
@@ -1404,6 +1446,15 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	)
 	if err != nil {
 		removeStream(fmt.Sprintf("mirror setup failed: %v", err))
+		return
+	}
+	if entry.mediaSource != "" {
+		err := d.playMediaSource(ctx, entry, session, capturePreparation, selectedCaptureKey)
+		if err != nil && ctx.Err() == nil {
+			removeStream(fmt.Sprintf("play video: %v", err))
+		} else {
+			removeStream("")
+		}
 		return
 	}
 	if broadcast == nil {
@@ -1488,6 +1539,25 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	}
 
 	log.Printf("[daemon] stream ended for %s", target)
+}
+
+func (d *Daemon) playMediaSource(ctx context.Context, entry *activeStream, session *airplay.MirrorSession, preparation *airplay.CapturePreparation, key videoCaptureKey) error {
+	defer session.Close()
+	capture, err := session.StartMediaCapture(preparation, key.maxWidth, key.maxHeight, key.codec)
+	if err != nil {
+		return err
+	}
+	defer capture.Stop()
+
+	d.mu.Lock()
+	if d.streams[entry.deviceIP] != entry {
+		d.mu.Unlock()
+		return context.Canceled
+	}
+	entry.session, entry.mediaCapture, entry.state = session, capture, StateStreaming
+	d.mu.Unlock()
+
+	return session.StreamMedia(ctx, capture)
 }
 
 func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, device airplay.AirPlayDevice, credential, expectedID string) error {
@@ -2046,10 +2116,15 @@ func (d *Daemon) handleSetMute(req Request, muted bool) Response {
 			d.mu.Unlock()
 			return Response{OK: false, State: state, Error: "no active stream to " + req.Target}
 		}
+		if entry.mediaSource != "" && !entry.mediaCapture.HasMediaAudio() {
+			resp := d.statusResponseLocked(false, "media playback has no audio")
+			d.mu.Unlock()
+			return resp
+		}
 		targets = []*activeStream{entry}
 	} else {
 		for _, s := range d.streams {
-			if s.state == StateStreaming {
+			if s.state == StateStreaming && (s.mediaSource == "" || s.mediaCapture.HasMediaAudio()) {
 				targets = append(targets, s)
 			}
 		}

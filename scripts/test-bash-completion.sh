@@ -83,6 +83,8 @@ expect -hwaccel
 
 complete_line _doubletake_ctl 'doubletake-ctl con' doubletake-ctl con
 expect connect
+complete_line _doubletake_ctl 'doubletake-ctl pl' doubletake-ctl pl
+expect play
 complete_line _doubletake_ctl 'doubletake-ctl -socket connect con' doubletake-ctl -socket connect con
 expect connect
 complete_line _doubletake_ctl 'doubletake-ctl --socket=/tmp/d.sock con' doubletake-ctl --socket = /tmp/d.sock con
@@ -99,11 +101,15 @@ complete_line _doubletake_ctl 'doubletake-ctl -- -' doubletake-ctl -- -
 expect_empty
 
 cd "$scratch"
-touch 'credentials with spaces.json' 'daemon socket'
+touch 'credentials with spaces.json' 'daemon socket' 'clip with spaces.mkv'
 complete_line _doubletake 'doubletake -creds cred' doubletake -creds cred
 expect 'credentials with spaces.json'
 complete_line _doubletake_ctl 'doubletake-ctl -socket daemon' doubletake-ctl -socket daemon
 expect 'daemon socket'
+complete_line _doubletake 'doubletake -source clip' doubletake -source clip
+expect 'clip with spaces.mkv'
+complete_line _doubletake_ctl 'doubletake-ctl play clip' doubletake-ctl play clip
+expect 'clip with spaces.mkv'
 
 # Detect drift between shipped completion lists and actual command help.
 for command in "$sender" "$controller"; do

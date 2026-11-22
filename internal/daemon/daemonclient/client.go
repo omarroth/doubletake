@@ -44,6 +44,11 @@ func (c *Client) Connect(target string, port int, pin string) (*daemon.Response,
 	return c.send(daemon.Request{Cmd: "connect", Target: target, Port: port, Pin: pin})
 }
 
+// Play streams a local file or HTTP(S) URL to the specified target or first free display.
+func (c *Client) Play(source, target string) (*daemon.Response, error) {
+	return c.send(daemon.Request{Cmd: "play", MediaSource: source, Target: target})
+}
+
 // Disconnect stops all active mirroring sessions.
 func (c *Client) Disconnect() (*daemon.Response, error) {
 	return c.send(daemon.Request{Cmd: "disconnect"})
