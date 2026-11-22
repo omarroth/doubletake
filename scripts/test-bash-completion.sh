@@ -81,6 +81,10 @@ expect -hwaccel
 complete_line _doubletake 'doubletake -target -hwaccel ' doubletake -target -hwaccel ''
 expect -hwaccel
 
+complete_line _doubletake 'doubletake ct' doubletake ct
+expect ctl
+complete_line _doubletake 'doubletake ctl con' doubletake ctl con
+expect connect
 complete_line _doubletake_ctl 'doubletake-ctl con' doubletake-ctl con
 expect connect
 complete_line _doubletake_ctl 'doubletake-ctl pl' doubletake-ctl pl

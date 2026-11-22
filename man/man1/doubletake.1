@@ -4,6 +4,11 @@ doubletake \- AirPlay screen mirroring sender for Linux
 .SH SYNOPSIS
 .B doubletake
 [\fIOPTIONS\fR]
+.br
+.B doubletake ctl
+.RI [ flags ]
+.I command
+.RI [ args ]
 .SH DESCRIPTION
 .B doubletake
 is an AirPlay screen mirroring sender that streams your Linux desktop to Apple TV
@@ -33,7 +38,7 @@ ChaCha20-Poly1305 stream encryption
 mDNS discovery of AirPlay displays and classic RAOP speakers
 .IP \(bu 2
 Daemon mode with multi-target streaming control via
-.B doubletake-ctl
+.B doubletake ctl
 .SH OPTIONS
 .TP
 .B \-target \fIADDRESS\fR
@@ -107,7 +112,7 @@ Use \fB\-source \-\fR with \fB\-target\fR to
 read a streamable container from standard input. Pair first if an interactive
 PIN is required. Playback stops at the end of input. Use \fB\-no-audio\fR
 for video only.
-For daemon mode, use \fBdoubletake-ctl play\fR.
+For daemon mode, use \fBdoubletake ctl play\fR.
 .TP
 .B \-no-audio
 Disable audio for video-only mirroring. Audio-only receivers require audio.
@@ -217,15 +222,15 @@ Debug mode with verbose logging:
 .SH DAEMON MODE
 When run with \fB\-daemonize\fR, doubletake runs as a background service that can control
 multiple simultaneous connections. Use
-.B doubletake-ctl
+.B doubletake ctl
 to manage the daemon.
 .PP
 Daemon status distinguishes an on-screen PIN from a configured password so UI
 clients can present the appropriate single prompt. Both values remain
 submittable with the compatible
-.B doubletake-ctl pin
+.B doubletake ctl pin
 command when exactly one receiver is waiting. For concurrent prompts, use
-.B doubletake-ctl connect \fITARGET\fR \fIPIN-OR-PASSWORD\fR
+.B doubletake ctl connect \fITARGET\fR \fIPIN-OR-PASSWORD\fR
 to submit a credential to a specific receiver.
 .SH FIREWALL
 For each stream, doubletake binds three consecutive local UDP ports: timing at

@@ -43,6 +43,17 @@ _doubletake()
     local cur prev words cword
     _init_completion -n = || return
 
+    if ((cword == 1)) && [[ $cur != -* ]]; then
+        _doubletake_complete_words ctl
+        return
+    fi
+    if [[ ${words[1]} == ctl ]]; then
+        words=("${words[@]:1}")
+        ((cword--))
+        _doubletake_ctl_words
+        return
+    fi
+
     local assigned=false option='' i
     for ((i = 1; i < cword; i++)); do
         case ${words[i]} in
@@ -82,7 +93,11 @@ _doubletake_ctl()
     # shellcheck disable=SC2034
     local cur prev words cword
     _init_completion -n = || return
+    _doubletake_ctl_words
+}
 
+_doubletake_ctl_words()
+{
     # Go's flag parser stops at the first command. A socket option consumes
     # one argument, including paths which happen to look like command names.
     local i options_done=false option='' assigned=false

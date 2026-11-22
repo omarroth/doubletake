@@ -20,6 +20,7 @@ import (
 
 	"doubletake/internal/airplay"
 	"doubletake/internal/daemon"
+	"doubletake/internal/daemon/daemoncli"
 	"doubletake/internal/version"
 )
 
@@ -102,6 +103,13 @@ func parseVideoTarget(value string) (videoTarget, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "ctl" {
+		os.Exit(daemoncli.Run("doubletake ctl", os.Args[2:]))
+	}
+	flag.Usage = func() {
+		fmt.Fprintln(flag.CommandLine.Output(), "Usage: doubletake [flags] or doubletake ctl [flags] COMMAND")
+		flag.PrintDefaults()
+	}
 	if handled, err := airplay.RunAudioOutputGuard(os.Args[1:]); handled {
 		if err != nil {
 			log.Printf("[AUDIO] output guard: %v", err)
@@ -149,7 +157,7 @@ func main() {
 	}
 	if *videoSource != "" {
 		if *daemonize {
-			log.Fatal("use doubletake-ctl play SOURCE [target] with daemon mode")
+			log.Fatal("use doubletake ctl play SOURCE [target] with daemon mode")
 		}
 		if *noVideo || *testMode || *x11WindowID != "" || *x11WindowName != "" {
 			log.Fatal("-source requires video and cannot be combined with -test or an X11 window selector")
