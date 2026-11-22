@@ -126,6 +126,8 @@ use `-no-video` for audio-only playback, including through the daemon. These
 builds include ALAC. Receivers that require AAC-ELD need a build with an
 AAC-ELD encoder.
 
+Some layered Windows overlays may be absent from the native desktop capture.
+
 The regular build covers custom file, HTTP and stdin playback, Linux video,
 and `-audio-sink output`. It also provides the GStreamer video encoders for
 Windows hardware acceleration.

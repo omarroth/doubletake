@@ -172,7 +172,9 @@ static BOOL dt_win_screen(DTWinVideo *video) {
     else h = w * sh / sw;
     int x = (video->width - w) / 2, y = (video->height - h) / 2;
     if (x || y) PatBlt(video->target, 0, 0, video->width, video->height, BLACKNESS);
-    if (!StretchBlt(video->target, x, y, w, h, video->screen, 0, 0, sw, sh, SRCCOPY | CAPTUREBLT)) return FALSE;
+    // CAPTUREBLT can disturb the local pointer on virtual display drivers.
+    // Copy the desktop normally and draw the cursor only into our own bitmap.
+    if (!StretchBlt(video->target, x, y, w, h, video->screen, 0, 0, sw, sh, SRCCOPY)) return FALSE;
     CURSORINFO cursor = { .cbSize = sizeof(cursor) };
     if (video->cursor && GetCursorInfo(&cursor) && (cursor.flags & CURSOR_SHOWING) &&
         cursor.ptScreenPos.x >= 0 && cursor.ptScreenPos.x < sw && cursor.ptScreenPos.y >= 0 && cursor.ptScreenPos.y < sh) {
