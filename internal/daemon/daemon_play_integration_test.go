@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func testDaemonPlayMedia(t *testing.T, withAudio, overHTTP bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	clip := filepath.Join(dir, "test.mkv")
-	args := []string{"-q", "matroskamux", "name=mux", "!", "filesink", "location=" + clip,
+	args := []string{"-q", "matroskamux", "name=mux", "!", "filesink", "location=" + filepath.ToSlash(clip),
 		"videotestsrc", "num-buffers=20",
 		"!", "video/x-raw,width=320,height=180,framerate=10/1", "!", "vp8enc",
 		"!", "queue", "!", "mux."}
@@ -49,7 +50,11 @@ func testDaemonPlayMedia(t *testing.T, withAudio, overHTTP bool) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("make test clip: %v\n%s", err, output)
 	}
-	file := filepath.Join(dir, `clip ! "quoted".mkv`)
+	name := `clip ! "quoted".mkv`
+	if runtime.GOOS == "windows" {
+		name = "clip ! café.mkv"
+	}
+	file := filepath.Join(dir, name)
 	if err := os.Rename(clip, file); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +97,7 @@ func testDaemonPlayMedia(t *testing.T, withAudio, overHTTP bool) {
 	defer receiver.Close()
 	go receiver.Serve(ctx)
 	addr := receiver.Addr().(*net.TCPAddr)
-	socket := filepath.Join(dir, "daemon.sock")
+	socket := shortTestSocketPath(t)
 	d, err := New(Config{
 		SocketPath: socket, CredBackend: "file", CredFile: filepath.Join(dir, "credentials.json"),
 		FPS: 10, TargetWidth: 320, TargetHeight: 180, Bitrate: 500, HWAccel: "openh264",

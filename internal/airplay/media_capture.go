@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,11 +35,11 @@ func ResolveMediaSource(source string) (string, error) {
 			}
 			return location.String(), nil
 		case "file":
+			path = mediaFilePath(location.Path)
 			if location.Host != "" && !strings.EqualFold(location.Host, "localhost") ||
-				!filepath.IsAbs(location.Path) || location.RawQuery != "" || location.Fragment != "" {
+				!filepath.IsAbs(path) || location.RawQuery != "" || location.Fragment != "" {
 				return "", errors.New("file URI must refer to an absolute local path")
 			}
-			path = location.Path
 		default:
 			return "", fmt.Errorf("unsupported media URL scheme %q (use http, https, or file)", location.Scheme)
 		}
@@ -70,7 +69,7 @@ func mediaSourceURI(source string) string {
 	if remoteMediaSource(source) {
 		return source
 	}
-	return (&url.URL{Scheme: "file", Path: source}).String()
+	return (&url.URL{Scheme: "file", Path: mediaURIPath(source)}).String()
 }
 
 // StartMediaCapture starts decoding after the receiver has negotiated its
@@ -79,18 +78,12 @@ func (s *MirrorSession) StartMediaCapture(p *CapturePreparation, width, height i
 	if s.noAudio || !s.HasAudio() {
 		return p.StartWithCodec(width, height, codec)
 	}
-	if runtime.GOOS == "windows" {
-		return nil, errors.New("custom media audio is unavailable on Windows; start doubletake with -no-audio")
-	}
 	return p.startWithContextAndCodec(nil, width, height, codec, s)
 }
 
 func startPreparedMediaCapture(ctx context.Context, cfg CaptureConfig, encoder encoderResult, session *MirrorSession) (*ScreenCapture, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	source := gstStage{"fdsrc", "fd=0"}
-	if cfg.MediaSource != "-" {
-		source = gstStage{"filesrc", "location=" + strconv.Quote(cfg.MediaSource)}
-	}
 	fps := cfg.FPS
 	if fps <= 0 {
 		fps = 30
@@ -101,8 +94,8 @@ func startPreparedMediaCapture(ctx context.Context, cfg CaptureConfig, encoder e
 		{"decodebin"}, {"capsfilter", "caps=video/x-raw"},
 		{"videorate", "drop-only=true", "max-rate=" + strconv.Itoa(fps)},
 	}
-	if remoteMediaSource(cfg.MediaSource) {
-		source = gstStage{"uridecodebin", "uri=" + strconv.Quote(cfg.MediaSource)}
+	if cfg.MediaSource != "-" {
+		source = gstStage{"uridecodebin", "uri=" + strconv.Quote(mediaSourceURI(cfg.MediaSource))}
 		stages = stages[1:]
 	}
 	args := buildGstVideoPipeline(source, stages, nil, encoder, cfg.MaxWidth, cfg.MaxHeight, true)
@@ -237,16 +230,11 @@ func playbackSinkProperty(name string, args []string) string {
 
 func launchMediaAV(ctx context.Context, cfg CaptureConfig, encoder encoderResult, fps int, timeline *mediaPlaybackTimeline, session *MirrorSession) (*runningGStreamerPipeline, *mediaAudioPlayback, error) {
 	codec := session.AudioCodec()
-	pcm, writer, err := os.Pipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	audioCapture := &AudioCapture{codec: codec, pcmPipe: pcm, finite: true}
+	audioCapture := &AudioCapture{codec: codec, finite: true}
 	if codec == AudioCodecAACELD {
+		var err error
 		audioCapture.eld, err = newELDEncoder()
 		if err != nil {
-			_ = pcm.Close()
-			_ = writer.Close()
 			return nil, nil, err
 		}
 	}
@@ -259,15 +247,14 @@ func launchMediaAV(ctx context.Context, cfg CaptureConfig, encoder encoderResult
 	audioArgs := appendTimestampedPCMOutput(appendPCMConversion([]string{"queue"}, true), spf)
 	// playbin manages the optional audio pad and signals EOS for all tracks,
 	// including files with no audio or whose tracks end at different times.
-	pipeline, err := launchMediaGraph(ctx, uri, encoder, videoArgs, audioArgs, pcm, writer)
+	pipeline, pcm, err := launchMediaGraph(ctx, uri, encoder, videoArgs, audioArgs)
 	if err != nil {
-		_ = pcm.Close()
-		_ = writer.Close()
 		if audioCapture.eld != nil {
 			audioCapture.eld.Close()
 		}
 		return nil, nil, err
 	}
+	audioCapture.pcmPipe = pcm
 	reader := newRTPL16PCMFrameReaderWithNow(pcm, time.Now)
 	reader.padFinal = true
 	audio := &mediaAudioPlayback{capture: audioCapture, timeline: timeline, reader: reader, lead: func() time.Duration {
@@ -277,17 +264,24 @@ func launchMediaAV(ctx context.Context, cfg CaptureConfig, encoder encoderResult
 	return pipeline, audio, nil
 }
 
-func launchMediaGraph(ctx context.Context, uri string, encoder encoderResult, videoArgs, audioArgs []string, pcm, audioWriter *os.File) (*runningGStreamerPipeline, error) {
+func mediaGraphArgs(uri string, videoArgs, audioArgs []string) []string {
+	return []string{"playbin", "flags=video+audio", "uri=" + uri,
+		playbackSinkProperty("video-sink", videoArgs), playbackSinkProperty("audio-sink", audioArgs)}
+}
+
+func launchMediaGraph(ctx context.Context, uri string, encoder encoderResult, videoArgs, audioArgs []string) (*runningGStreamerPipeline, io.ReadCloser, error) {
 	if !HasInProcessGStreamer() {
-		defer audioWriter.Close()
-		audioArgs = replaceMediaSinkFD(audioArgs, 3)
-		args := []string{"--quiet", "playbin", "flags=video+audio", "uri=" + uri,
-			playbackSinkProperty("video-sink", videoArgs), playbackSinkProperty("audio-sink", audioArgs)}
-		return launchGStreamerProcess(ctx, args, []*os.File{audioWriter}, uri == "fd://0")
+		return launchMediaGraphProcess(ctx, uri, videoArgs, audioArgs)
+	}
+	pcm, audioWriter, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
 	}
 	video, videoWriter, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		_ = pcm.Close()
+		_ = audioWriter.Close()
+		return nil, nil, err
 	}
 	for i, token := range videoArgs {
 		if token == encoder.name {
@@ -298,14 +292,16 @@ func launchMediaGraph(ctx context.Context, uri string, encoder encoderResult, vi
 	}
 	videoArgs = replaceMediaSinkFD(videoArgs, int(videoWriter.Fd()))
 	audioArgs = replaceMediaSinkFD(audioArgs, int(audioWriter.Fd()))
-	args := []string{"playbin", "flags=video+audio", "uri=" + uri,
-		playbackSinkProperty("video-sink", videoArgs), playbackSinkProperty("audio-sink", audioArgs)}
+	args := mediaGraphArgs(uri, videoArgs, audioArgs)
 	pipeline, err := launchLinkedMediaGraph(ctx, args, encoder, video, videoWriter, pcm, audioWriter)
 	if err != nil {
 		_ = video.Close()
 		_ = videoWriter.Close()
+		_ = pcm.Close()
+		_ = audioWriter.Close()
+		return nil, nil, err
 	}
-	return pipeline, err
+	return pipeline, pcm, nil
 }
 
 func replaceMediaSinkFD(args []string, fd int) []string {
