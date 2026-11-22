@@ -3,10 +3,10 @@
 package airplay
 
 /*
-#cgo LDFLAGS: -lole32 -luuid
+#cgo LDFLAGS: -lole32 -luuid -lavrt
 #include <stdint.h>
 typedef struct DTLoopback DTLoopback;
-DTLoopback *dt_loopback_open(int32_t *status, const char **stage);
+DTLoopback *dt_loopback_open(int32_t *status, const char **stage, uint32_t *scheduler_error);
 int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size,
     int64_t *age, int *timestamp_valid, int *discontinuity);
 void dt_loopback_close(DTLoopback *capture);
@@ -37,12 +37,18 @@ func openWindowsMonitor(lifetime context.Context) (nativePCMInput, error) {
 
 		var status C.int32_t
 		var stage *C.char
-		capture := C.dt_loopback_open(&status, &stage)
+		var schedulerError C.uint32_t
+		capture := C.dt_loopback_open(&status, &stage, &schedulerError)
 		if capture == nil {
 			started <- fmt.Errorf("start WASAPI loopback: %s (HRESULT 0x%08x)", C.GoString(stage), uint32(status))
 			return
 		}
 		defer C.dt_loopback_close(capture)
+		if schedulerError != 0 {
+			dbg("[AUDIO] WASAPI multimedia scheduling unavailable (Windows error %d)", uint32(schedulerError))
+		} else {
+			dbg("[AUDIO] WASAPI capture registered with Windows multimedia scheduling")
+		}
 		started <- nil
 
 		var nextPTS time.Time

@@ -5,6 +5,7 @@
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <avrt.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@ typedef struct DTLoopback {
     IAudioClient *client;
     IAudioCaptureClient *reader;
     HANDLE ready;
+    HANDLE audio_task;
     BYTE *samples;
     size_t capacity;
 } DTLoopback;
@@ -23,6 +25,7 @@ void dt_loopback_close(DTLoopback *capture) {
     if (capture->reader) IAudioCaptureClient_Release(capture->reader);
     if (capture->client) IAudioClient_Release(capture->client);
     if (capture->ready) CloseHandle(capture->ready);
+    if (capture->audio_task) AvRevertMmThreadCharacteristics(capture->audio_task);
     free(capture->samples);
     free(capture);
     CoUninitialize();
@@ -60,7 +63,7 @@ static HRESULT dt_loopback_device(IMMDeviceEnumerator *enumerator, IMMDevice **d
     return hr;
 }
 
-DTLoopback *dt_loopback_open(int32_t *status, const char **stage) {
+DTLoopback *dt_loopback_open(int32_t *status, const char **stage, uint32_t *scheduler_error) {
     *stage = "initialize Windows COM";
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
@@ -105,6 +108,13 @@ DTLoopback *dt_loopback_open(int32_t *status, const char **stage) {
     *stage = "get the WASAPI capture service";
     hr = IAudioClient_GetService(capture->client, &IID_IAudioCaptureClient, (void **)&capture->reader);
     if (FAILED(hr)) goto fail;
+
+    // Keep endpoint servicing timely while desktop capture and encoding use
+    // the same CPUs. The audio service can be unavailable in some guests.
+    DWORD task_index = 0;
+    capture->audio_task = AvSetMmThreadCharacteristicsW(L"Audio", &task_index);
+    if (!capture->audio_task) *scheduler_error = GetLastError();
+
     *stage = "start WASAPI capture on the Windows playback output";
     hr = IAudioClient_Start(capture->client);
     if (FAILED(hr)) goto fail;
