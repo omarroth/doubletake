@@ -1,10 +1,10 @@
-//go:build cgo && fdk_aac
+//go:build cgo && (fdk_aac || windows)
 
 package airplay
 
 /*
 #cgo linux LDFLAGS: -ldl
-#cgo !linux pkg-config: fdk-aac
+#cgo !linux,!windows pkg-config: fdk-aac
 #include "aac_eld_fdk_loader.h"
 */
 import "C"

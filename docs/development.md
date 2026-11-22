@@ -85,14 +85,18 @@ library supports AAC-ELD, doubletake uses ALAC when the receiver offers it;
 AAC-ELD-only receivers need the library installed or `-no-audio`.
 
 Linux builds with headers outside the compiler's search path can set
-`CGO_CPPFLAGS=-I/path/to/include`. Other platforms use the `fdk-aac` pkg-config
+`CGO_CPPFLAGS=-I/path/to/include`. Windows builds with cgo, including
+`make doubletake-native`, look for an optional `libfdk-aac-2.dll` at startup.
+For x86-64, copy it from the [MSYS2 UCRT64 FDK-AAC package](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-fdk-aac)
+next to `doubletake.exe`. Use a DLL matching the executable architecture.
+Other platforms that opt in with `-tags fdk_aac` use the `fdk-aac` pkg-config
 file and link the library directly.
 
 The foreground sender prefers AAC-ELD when the receiver advertises it. The
 daemon prefers an existing shared codec or ALAC when possible. Receivers still
 select only formats they advertise.
 
-To build without FDK-AAC, retaining GStreamer and ALAC:
+On Linux, to build without FDK-AAC, retaining GStreamer and ALAC:
 
 ```sh
 make BUILD_TAGS=

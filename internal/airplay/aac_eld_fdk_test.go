@@ -1,4 +1,4 @@
-//go:build cgo && fdk_aac
+//go:build cgo && (fdk_aac || windows)
 
 package airplay
 
@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 )
 
@@ -36,6 +37,9 @@ func TestFDKUnavailableKeepsALAC(t *testing.T) {
 
 func TestFDKAACELDEncodesRawFrame(t *testing.T) {
 	if !aacELDEncoderAvailable {
+		if runtime.GOOS == "windows" {
+			t.Skip("optional FDK-AAC DLL is unavailable")
+		}
 		t.Fatal("FDK build did not advertise its AAC-ELD encoder")
 	}
 	encoder, err := newELDEncoder()
@@ -58,6 +62,9 @@ func TestFDKAACELDEncodesRawFrame(t *testing.T) {
 }
 
 func TestFDKAACELDUsesNegotiatedRedundancyFormats(t *testing.T) {
+	if runtime.GOOS == "windows" && !aacELDEncoderAvailable {
+		t.Skip("optional FDK-AAC DLL is unavailable")
+	}
 	legacyStream, legacyPackets := streamAudioPacketsForCodecTest(t, "AES", nil, 4, AudioCodecAACELD, false)
 	assertAudioPacketSequences(t, legacyPackets, []uint16{1, 2, 1, 3, 2, 1, 4, 3, 2})
 	originals := make(map[uint16][]byte)

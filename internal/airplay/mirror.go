@@ -684,6 +684,17 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		// ELD-only offer or infer support from receiver identity.
 		policy.audioCodec = AudioCodecALAC
 	}
+	if !cfg.NoAudio {
+		codec := "ALAC"
+		if policy.audioCodec == AudioCodecAACELD {
+			codec = "AAC-ELD"
+		}
+		var formats FormatMask
+		if c.info != nil {
+			formats = c.info.effectiveSupportedFormats().ScreenStream
+		}
+		dbg("[SETUP] screen audio codec=%s (advertised formats=0x%x, AAC-ELD encoder=%t)", codec, uint64(formats), aacELDEncoderAvailable)
+	}
 	if timingOverride != "" {
 		policy.timing = timingOverride
 	}

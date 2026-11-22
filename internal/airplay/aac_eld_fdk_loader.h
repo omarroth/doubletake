@@ -1,7 +1,11 @@
 #ifndef DOUBLETAKE_AAC_ELD_FDK_LOADER_H
 #define DOUBLETAKE_AAC_ELD_FDK_LOADER_H
 
+#ifdef _WIN32
+#include "aac_eld_fdk_windows.h"
+#else
 #include <fdk-aac/aacenc_lib.h>
+#endif
 #include <stddef.h>
 #include <string.h>
 #ifdef __linux__
@@ -16,7 +20,7 @@ typedef struct {
     __typeof__(aacEncClose) *close;
 } DTAACAPI;
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
 static DTAACAPI dt_aac;
 #else
 static DTAACAPI dt_aac = {aacEncOpen, aacEncoder_SetParam, aacEncInfo, aacEncEncode, aacEncClose};
@@ -74,24 +78,45 @@ static int doubletake_eld_probe(void) {
     return err == AACENC_OK && frame_length == 480;
 }
 
-// Called once by Go package initialization, before encoder goroutines start.
-// A successful library stays loaded for the process's encoder lifetimes.
+#if defined(__linux__) || defined(_WIN32)
+#ifdef _WIN32
+typedef HMODULE DTAACLibrary;
+#define DT_AAC_SYMBOL GetProcAddress
+#else
+typedef void *DTAACLibrary;
+#define DT_AAC_SYMBOL dlsym
+#endif
+
+static int doubletake_eld_load(DTAACLibrary library) {
+    dt_aac.open = (__typeof__(dt_aac.open))DT_AAC_SYMBOL(library, "aacEncOpen");
+    dt_aac.set_param = (__typeof__(dt_aac.set_param))DT_AAC_SYMBOL(library, "aacEncoder_SetParam");
+    dt_aac.info = (__typeof__(dt_aac.info))DT_AAC_SYMBOL(library, "aacEncInfo");
+    dt_aac.encode = (__typeof__(dt_aac.encode))DT_AAC_SYMBOL(library, "aacEncEncode");
+    dt_aac.close = (__typeof__(dt_aac.close))DT_AAC_SYMBOL(library, "aacEncClose");
+    if (dt_aac.open && dt_aac.set_param && dt_aac.info && dt_aac.encode &&
+        dt_aac.close && doubletake_eld_probe()) return 1;
+    memset(&dt_aac, 0, sizeof(dt_aac));
+    return 0;
+}
+#undef DT_AAC_SYMBOL
+#endif
+
+// Called once by Go package initialization. A compatible library stays loaded
+// for the lifetime of the process so encoder instances can use its symbols.
 static int doubletake_eld_available(void) {
-#ifdef __linux__
-    const char *names[] = {"libfdk-aac.so.2", "libfdk-aac.so.1", NULL};
-    for (int i = 0; names[i] != NULL; i++) {
+#if defined(_WIN32)
+    HMODULE library = LoadLibraryExW(L"libfdk-aac-2.dll", NULL,
+        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!library) return 0;
+    if (doubletake_eld_load(library)) return 1;
+    FreeLibrary(library);
+    return 0;
+#elif defined(__linux__)
+    const char *names[] = {"libfdk-aac.so.2", "libfdk-aac.so.1"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         void *library = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
-        if (library == NULL) continue;
-        dt_aac.open = (__typeof__(dt_aac.open))dlsym(library, "aacEncOpen");
-        dt_aac.set_param = (__typeof__(dt_aac.set_param))dlsym(library, "aacEncoder_SetParam");
-        dt_aac.info = (__typeof__(dt_aac.info))dlsym(library, "aacEncInfo");
-        dt_aac.encode = (__typeof__(dt_aac.encode))dlsym(library, "aacEncEncode");
-        dt_aac.close = (__typeof__(dt_aac.close))dlsym(library, "aacEncClose");
-        if (dt_aac.open != NULL && dt_aac.set_param != NULL && dt_aac.info != NULL &&
-            dt_aac.encode != NULL && dt_aac.close != NULL && doubletake_eld_probe()) {
-            return 1;
-        }
-        memset(&dt_aac, 0, sizeof(dt_aac));
+        if (!library) continue;
+        if (doubletake_eld_load(library)) return 1;
         dlclose(library);
     }
     return 0;

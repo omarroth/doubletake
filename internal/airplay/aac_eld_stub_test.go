@@ -1,4 +1,4 @@
-//go:build !cgo || !fdk_aac
+//go:build !cgo || (!fdk_aac && !windows)
 
 package airplay
 

@@ -139,8 +139,9 @@ Audio defaults to monitoring the local output. The selectable output
 GStreamer's `pulsesrc`. Use its volume and mute controls for the captured audio
 and route applications to it through your sound settings.
 
-ALAC is built in. Default Linux builds also support AAC-ELD when the external
-FDK-AAC library is installed. With ALAC alone, the receiver must offer ALAC.
+ALAC is built in. Default Linux builds and Windows builds with cgo also support
+AAC-ELD when the external FDK-AAC library is installed. With ALAC alone, the
+receiver must offer ALAC.
 See [audio codec build options](development.md#audio-codecs).
 
 Daemon mode shares one timestamped PCM source and one encoder per audio codec.
