@@ -321,6 +321,36 @@ func TestAudioRTPClockUsesCapturedSampleClockWithoutLongTermWallDrift(t *testing
 	}
 }
 
+func TestAudioRTPClockSmoothsCaptureJitterWhileTrackingDrift(t *testing.T) {
+	const (
+		epoch = uint32(1234)
+		spf   = uint32(480)
+	)
+	base := time.Unix(1787357050, 0)
+	clock := newAudioRTPClock(epoch)
+	for i := uint32(0); i <= 1000; i++ {
+		samples := i * spf
+		nominal := audioSamplesDuration(uint64(samples))
+		hostPTS := base.Add(nominal - nominal/5000) // Audio clock runs about 200 ppm fast.
+		pts := hostPTS
+		if i > 0 && i%2 == 0 {
+			pts = pts.Add(12 * time.Millisecond)
+		} else if i%2 != 0 {
+			pts = pts.Add(-12 * time.Millisecond)
+		}
+		position := audioPCMFramePosition{PTS: pts, SourceRTP: samples, HasSourceRTP: true}
+		wantRTP := epoch + samples
+		if rtp, reset := clock.mapFramePosition(position, spf); rtp != wantRTP || reset {
+			t.Fatalf("frame %d RTP = %d, reset=%t, want %d without reset", i, rtp, reset, wantRTP)
+		}
+		announced, ok := clock.rtpAt(hostPTS)
+		errorSamples := int32(announced - wantRTP)
+		if !ok || errorSamples < -25 || errorSamples > 25 {
+			t.Fatalf("frame %d clock error = %d samples, want at most 25", i, errorSamples)
+		}
+	}
+}
+
 func TestAudioRTPClockPreservesCapturedGapsAndResetsBackwardSampleClock(t *testing.T) {
 	epoch := uint32(0x40000000)
 	base := time.Unix(1787357060, 0)
@@ -334,12 +364,18 @@ func TestAudioRTPClockPreservesCapturedGapsAndResetsBackwardSampleClock(t *testi
 	if want := first + 352 + 4410; afterGap != want || reset {
 		t.Fatalf("gap map = %#x reset=%t, want %#x false", afterGap, reset, want)
 	}
+	if at, ok := clock.rtpAt(position.PTS); !ok || at != afterGap {
+		t.Fatalf("rtpAt after gap = %#x, ok=%t, want %#x", at, ok, afterGap)
+	}
 
 	position.PTS = position.PTS.Add(audioSamplesDuration(352))
 	position.SourceRTP = 100 // capture RTP epoch restarted
 	afterReset, reset := clock.mapFramePosition(position, 352)
 	if want := afterGap + 352; afterReset != want || !reset {
 		t.Fatalf("reset map = %#x reset=%t, want continuous outgoing %#x true", afterReset, reset, want)
+	}
+	if at, ok := clock.rtpAt(position.PTS); !ok || at != afterReset {
+		t.Fatalf("rtpAt after source reset = %#x, ok=%t, want %#x", at, ok, afterReset)
 	}
 }
 

@@ -318,6 +318,8 @@ func durationToAudioSamples(delta time.Duration) int64 {
 	return whole - ((-remainder)*audioSampleRate+int64(time.Second)/2)/int64(time.Second)
 }
 
+const audioClockPhaseResetThreshold = 100 * time.Millisecond
+
 // audioRTPClock maps the source sample timebase onto the sender's random RTP
 // epoch. It is safe for the media loop and periodic TimeAnnounce loop to share.
 type audioRTPClock struct {
@@ -327,6 +329,7 @@ type audioRTPClock struct {
 	anchorPTS       time.Time
 	anchorRTP       uint32
 	lastFramePTS    time.Time
+	announcePTS     time.Time
 	lastFrameRTP    uint32
 	lastFrameCount  uint32
 	anchorSourceRTP uint32
@@ -354,6 +357,7 @@ func (c *audioRTPClock) mapFramePosition(position audioPCMFramePosition, samples
 		c.valid = true
 		c.anchorPTS = pts
 		c.lastFramePTS = pts
+		c.announcePTS = pts
 		c.lastFrameRTP = c.anchorRTP
 		c.lastFrameCount = samples
 		c.hasSourceRTP = position.HasSourceRTP
@@ -380,7 +384,7 @@ func (c *audioRTPClock) mapFramePosition(position audioPCMFramePosition, samples
 		rtp = c.anchorRTP + (position.SourceRTP - c.anchorSourceRTP)
 		// A large source-PTS phase reset needs an immediate TimeAnnounce, but it
 		// must not break otherwise continuous media RTP sample progression.
-		reset = pts.Before(c.lastFramePTS.Add(-100 * time.Millisecond))
+		reset = pts.Before(c.lastFramePTS.Add(-audioClockPhaseResetThreshold))
 	} else {
 		deltaSamples := durationToAudioSamples(pts.Sub(c.anchorPTS))
 		rtp = c.anchorRTP + uint32(deltaSamples)
@@ -392,7 +396,18 @@ func (c *audioRTPClock) mapFramePosition(position audioPCMFramePosition, samples
 			c.anchorPTS = pts
 		}
 	}
+	announcePTS := pts
+	if position.HasSourceRTP && !reset && rtp-c.lastFrameRTP == c.lastFrameCount {
+		// Track capture clock drift across contiguous samples. Smooth phase
+		// changes over roughly half a second so capture callback jitter does
+		// not become a receiver playout-clock adjustment every second.
+		expected := c.announcePTS.Add(audioSamplesDuration(uint64(c.lastFrameCount)))
+		if phase := pts.Sub(expected); phase > -audioClockPhaseResetThreshold && phase < audioClockPhaseResetThreshold {
+			announcePTS = expected.Add(phase / 64)
+		}
+	}
 	c.lastFramePTS = pts
+	c.announcePTS = announcePTS
 	c.lastFrameRTP = rtp
 	c.lastFrameCount = samples
 	c.hasSourceRTP = position.HasSourceRTP
@@ -406,9 +421,7 @@ func (c *audioRTPClock) rtpAt(localTime time.Time) (uint32, bool) {
 	if !c.valid || localTime.IsZero() {
 		return 0, false
 	}
-	// Refresh the interpolation anchor with every captured frame. This follows
-	// the source sample clock over long runs while still producing a continuous
-	// current RTP value between callbacks for TimeAnnounce.
-	deltaSamples := durationToAudioSamples(localTime.Sub(c.lastFramePTS))
+	// Interpolate from the smoothed host time of the latest sample position.
+	deltaSamples := durationToAudioSamples(localTime.Sub(c.announcePTS))
 	return c.lastFrameRTP + uint32(deltaSamples), true
 }
