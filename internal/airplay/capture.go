@@ -292,7 +292,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	}
 	if cfg.VideoCodec == VideoCodecAuto {
 		preparation.automaticHEVCAvail, preparation.measuredVideoLatency = automaticHEVCProfile(cfg.HWAccel, cfg.FPS)
-	} else if cfg.VideoCodec == VideoCodecHEVC {
+	} else if cfg.VideoCodec == VideoCodecHEVC && kind != capturePreparationMedia {
 		// Forced NVENC HEVC uses the same local pipeline and benefits from the
 		// same scheduling calibration. Explicit software x265 remains a deliberate
 		// opt-in and can be tuned with the joint latency override.
@@ -308,6 +308,10 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 		if !preparation.timestampedOutput {
 			return nil, fmt.Errorf("video sources require GStreamer RTP/ONVIF timestamps")
 		}
+		// The live HEVC probe checks encoder availability. File playback can
+		// preroll and is paced by media timestamps, so the live capture lead
+		// must not reject its playout budget.
+		preparation.measuredVideoLatency = 0
 		return preparation, nil
 	}
 	if kind == capturePreparationNativeDesktop {
