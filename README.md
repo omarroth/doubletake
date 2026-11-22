@@ -91,6 +91,19 @@ the diagnostic receiver, tests, and distribution packaging.
 Bash completion covers both commands, their options, enum values, and file
 paths. With `bash-completion` installed, open a new shell after installation.
 
+## Builds without GStreamer
+
+`make doubletake-native` builds the same CLI at `bin/native/TARGET/doubletake`
+(`doubletake.exe` on Windows).
+
+- macOS 13+ uses ScreenCaptureKit and VideoToolbox for desktop mirroring.
+- Windows uses built-in screen capture, Media Foundation H.264, and WASAPI audio.
+- Linux supports audio-only playback with PulseAudio or pipewire-pulse.
+
+Use the regular build for file, HTTP, and stdin sources, Linux desktop
+mirroring, or the selectable Linux audio output. See the
+[platform details](docs/compatibility.md#builds-without-gstreamer).
+
 ## Usage
 
 Run `doubletake` to discover receivers and select one as it appears. You can also

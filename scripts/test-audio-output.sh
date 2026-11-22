@@ -33,8 +33,12 @@ until pactl info >/dev/null 2>&1; do
     sleep 0.1
 done
 
-CGO_ENABLED=1 go test -count=1 -tags "${BUILD_TAGS-fdk_aac}" ./internal/airplay \
-    -run '^Test(AudioOutputOwnerExitIntegration|DedicatedAudioOutput.*Integration|SharedAudioOutputIntegration)$'
+if [ "${BUILD_TAGS-}" = no_gstreamer ]; then
+    CGO_ENABLED=0 go test -count=1 -tags no_gstreamer ./internal/airplay -run '^TestNativeLinuxPulseMonitor$'
+else
+    CGO_ENABLED=1 go test -count=1 -tags "${BUILD_TAGS-fdk_aac}" ./internal/airplay \
+        -run '^Test(AudioOutputOwnerExitIntegration|DedicatedAudioOutput.*Integration|SharedAudioOutputIntegration)$'
+fi
 
 if pactl list short modules | grep -Fq doubletake.generation=; then
     printf 'Audio integration tests left a doubletake output behind\n' >&2

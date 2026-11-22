@@ -41,6 +41,7 @@ jobs:
           go-version: ${{ matrix.go }}
           cache-dependency-path: go.sum
       - run: make test-go
+      - run: CGO_ENABLED=0 go test -tags no_gstreamer ./...
       - run: CGO_ENABLED=0 go vet ./...
 
   portable-media:
@@ -65,6 +66,31 @@ jobs:
         with:
           msystem: UCRT64
           install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf
+      - name: Set up the Windows C compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: (Join-Path $env:MSYS2_LOCATION 'ucrt64\bin') >> $env:GITHUB_PATH
+      - name: Enable Media Foundation on the Windows Server runner
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          if (-not (Test-Path "$env:WINDIR\System32\mfh264enc.dll")) {
+            $feature = Install-WindowsFeature Server-Media-Foundation
+            if (-not $feature.Success) { throw 'Could not install Media Foundation' }
+          }
+      - name: Build and test native capture without GStreamer
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          mkdir -p bin/native
+          go build -tags no_gstreamer -o bin/native/ ./cmd/doubletake
+          suffix=''
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          "bin/native/doubletake$suffix" -version
+          go test -tags no_gstreamer ./internal/airplay -run '^TestNativeDesktopPattern$' -count=1 -v
       - name: Install macOS GStreamer SDK and runtime
         if: runner.os == 'macOS'
         run: |
@@ -85,8 +111,6 @@ jobs:
       - name: Install Windows GStreamer SDK and runtime
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $base = "https://gstreamer.freedesktop.org/pkg/windows/$env:GST_VERSION/msvc"
           $sdk = Join-Path $env:RUNNER_TEMP 'gstreamer-sdk'
@@ -111,7 +135,6 @@ jobs:
           Get-ChildItem $lib -Recurse -Filter '*.a' -File | Remove-Item
           $gst.DirectoryName >> $env:GITHUB_PATH
           "PKG_CONFIG_LIBDIR=$(Join-Path $lib 'pkgconfig')" >> $env:GITHUB_ENV
-          (Join-Path $env:MSYS2_LOCATION 'ucrt64\bin') >> $env:GITHUB_PATH
       - name: Build and run the integrated sender
         shell: bash
         run: |
@@ -208,6 +231,7 @@ jobs:
         run: |
           scripts/test-audio-output.sh
           BUILD_TAGS='' scripts/test-audio-output.sh
+          BUILD_TAGS=no_gstreamer scripts/test-audio-output.sh
 
       - name: Build and package both commands
         run: make release TARGET=${{ matrix.target }}

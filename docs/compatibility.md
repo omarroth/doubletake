@@ -95,6 +95,29 @@ CI verifies custom media playback through a loopback receiver on both
 platforms. Desktop capture requires an interactive session with the
 appropriate display and audio permissions.
 
+## Builds without GStreamer
+
+Run `make doubletake-native` on the target platform. On macOS and Windows,
+a C compiler and the OS SDK are required at build time. With cgo enabled,
+`go build -tags no_gstreamer -o bin/native/ ./cmd/doubletake` is equivalent.
+The Linux target builds with cgo disabled.
+
+| Platform | Desktop video | System audio |
+| --- | --- | --- |
+| macOS 13+ | ScreenCaptureKit display capture and VideoToolbox. H.264 by default, with explicit HEVC available. | ScreenCaptureKit monitor route |
+| Windows 10+ | Primary-display GDI capture and Media Foundation's software H.264 encoder. | WASAPI loopback |
+| Linux | Use the regular GStreamer build for Wayland or X11. | PulseAudio or PipeWire's PulseAudio service over its Unix socket |
+
+On macOS, allow Screen & System Audio Recording. Windows editions that omit
+Media Foundation require the Windows media components for video. On Linux,
+use `-no-video` for audio-only playback, including through the daemon. These
+builds include ALAC. Receivers that require AAC-ELD need a build with an
+AAC-ELD encoder.
+
+The regular build covers custom file, HTTP and stdin playback, Linux video,
+and `-audio-sink output`. It also provides the GStreamer video encoders for
+Windows hardware acceleration.
+
 ## Audio
 
 Audio defaults to monitoring the local output. The selectable output
