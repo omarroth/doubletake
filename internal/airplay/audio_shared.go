@@ -259,7 +259,7 @@ func (h *SharedAudioCapture) Acquire(ctx context.Context, testTone bool, codec A
 	if gen == nil {
 		start := h.start
 		if start == nil {
-			if !supportsTimestampedAudioOutput() {
+			if HasInProcessGStreamer() && !supportsTimestampedAudioOutput() {
 				group.close()
 				return nil, fmt.Errorf("shared audio requires GStreamer RTP/ONVIF audio timestamps")
 			}

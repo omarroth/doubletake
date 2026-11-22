@@ -1,4 +1,4 @@
-//go:build cgo && (linux || windows)
+//go:build cgo && (linux || windows) && !no_gstreamer
 
 package airplay
 

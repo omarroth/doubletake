@@ -18,8 +18,8 @@ const (
 	maxAudioCapturePacketBytes = 65535
 )
 
-// audioPCMFrameReader is the timestamp-preserving boundary between the
-// GStreamer capture process and the AirPlay audio encoder. The destination is
+// audioPCMFrameReader is the timestamp-preserving boundary between a
+// capture backend and the AirPlay audio encoder. The destination is
 // always interleaved stereo S16LE PCM and PTS identifies its first sample.
 type audioPCMFrameReader interface {
 	ReadPCMFrame(dst []byte) (pts time.Time, err error)

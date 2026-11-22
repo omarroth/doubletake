@@ -268,6 +268,13 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 		cancel()
 		return nil, fmt.Errorf("unsupported audio codec %d", codec)
 	}
+	if !HasInProcessGStreamer() {
+		capture, err := startNativeAudio(captureCtx, cancel, testTone, codec, source)
+		if err != nil {
+			cancel()
+		}
+		return capture, err
+	}
 	_, codecSPF, _, _, _, _ := codec.Info()
 
 	var releaseOutput func()

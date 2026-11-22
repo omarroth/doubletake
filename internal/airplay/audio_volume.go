@@ -19,6 +19,7 @@ const volumeSampleInterval = 500 * time.Millisecond
 type capturedOutputVolume struct {
 	sink           string
 	alreadyApplied bool
+	readLevel      func(context.Context) (float64, bool)
 
 	mu          sync.Mutex
 	nextSample  time.Time
@@ -45,6 +46,9 @@ func (v *capturedOutputVolume) read(ctx context.Context) (float64, bool) {
 }
 
 func (v *capturedOutputVolume) sample(ctx context.Context) (float64, bool) {
+	if v.readLevel != nil {
+		return v.readLevel(ctx)
+	}
 	if !v.serverKnown {
 		info, err := runPulseCommand(ctx, "info")
 		if err != nil {

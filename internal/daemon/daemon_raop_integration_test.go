@@ -1,4 +1,4 @@
-//go:build cgo && (linux || darwin || windows)
+//go:build cgo && (linux || darwin || windows) && !no_gstreamer
 
 package daemon
 

@@ -1,4 +1,4 @@
-.PHONY: all build doubletake doubletake-ctl doubletake-gstreamer-cgo doubletake-test-receiver release doubletake-release doubletake-ctl-release package-release install install-prebuilt install-bin install-man install-systemd install-completion install-license uninstall test test-go test-gstreamer clean
+.PHONY: all build doubletake doubletake-native doubletake-ctl doubletake-gstreamer-cgo doubletake-test-receiver release doubletake-release doubletake-ctl-release package-release install install-prebuilt install-bin install-man install-systemd install-completion install-license uninstall test test-go test-gstreamer clean
 
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
@@ -23,6 +23,10 @@ build: all
 
 doubletake:
 	CGO_ENABLED=1 go build -tags '$(BUILD_TAGS)' -ldflags='$(VERSION_FLAGS)' -o '$(BUILD_DIR)/doubletake$(EXE)' ./cmd/doubletake
+
+# Native desktop capture on macOS/Windows, audio-only on Linux.
+doubletake-native:
+	CGO_ENABLED=$(if $(filter linux,$(GOOS)),0,1) go build -trimpath -tags no_gstreamer -ldflags='$(VERSION_FLAGS)' -o '$(BUILD_DIR)/native/$(TARGET)/doubletake$(EXE)' ./cmd/doubletake
 
 doubletake-ctl:
 	CGO_ENABLED=0 go build -ldflags='$(VERSION_FLAGS)' -o '$(BUILD_DIR)/doubletake-ctl$(EXE)' ./cmd/doubletake-ctl

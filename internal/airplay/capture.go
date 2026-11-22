@@ -110,7 +110,7 @@ const (
 	testCaptureHeight = 1080
 )
 
-// ScreenCapture manages screen capture via GStreamer.
+// ScreenCapture manages a desktop or media capture backend.
 type ScreenCapture struct {
 	stdout   io.ReadCloser
 	frames   videoAccessUnitReader
@@ -256,6 +256,12 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if err := ValidateHWAccel(cfg.HWAccel); err != nil {
 		return nil, err
 	}
+	if !HasInProcessGStreamer() {
+		if cfg.MediaSource != "" {
+			return nil, fmt.Errorf("file, HTTP and stdin playback require a GStreamer build")
+		}
+		return prepareNativeVideo(ctx, cfg, false)
+	}
 	kind := capturePreparationX11
 	if cfg.MediaSource != "" {
 		kind = capturePreparationMedia
@@ -356,7 +362,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 }
 
 // PrepareTestCapture validates a synthetic capture without starting its
-// GStreamer process. It mirrors PrepareCapture for callers that negotiate the
+// encoder. It mirrors PrepareCapture for callers that negotiate the
 // receiver canvas between preparation and encoder startup.
 func PrepareTestCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation, error) {
 	if err := ValidateVideoCodec(string(cfg.VideoCodec)); err != nil {
@@ -364,6 +370,9 @@ func PrepareTestCapture(ctx context.Context, cfg CaptureConfig) (*CapturePrepara
 	}
 	if err := ValidateHWAccel(cfg.HWAccel); err != nil {
 		return nil, err
+	}
+	if !HasInProcessGStreamer() {
+		return prepareNativeVideo(ctx, cfg, true)
 	}
 	validationCfg := cfg
 	if validationCfg.VideoCodec == VideoCodecAuto {
@@ -476,6 +485,10 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 	pwFd := p.pwFd
 	portal := p.portal
 	streamSize := p.streamSize
+	if !HasInProcessGStreamer() && openNativeVideo != nil {
+		p.mu.Unlock()
+		return openNativeVideo(startupCtx, captureCtx, cfg, kind == capturePreparationTest)
+	}
 	timestampedOutput := supportsTimestampedVideoOutput(cfg.VideoCodec)
 	p.pwFd = nil
 	p.portal = nil

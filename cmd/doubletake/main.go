@@ -133,7 +133,7 @@ func main() {
 	targetLatencyMs := flag.Int("target-latency-ms", 0, "Joint audio/video playout latency in milliseconds (0 = connection profile; daemon mirrors use 250 ms and direct audio uses 2 s)")
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
-	testMode := flag.Bool("test", false, "Use synthetic video (videotestsrc) instead of screen capture for debugging")
+	testMode := flag.Bool("test", false, "Use synthetic video instead of screen capture for debugging")
 	videoSource := flag.String("source", "", "Play media from a file, HTTP(S) URL, or - for stdin")
 	audioSink := string(airplay.DefaultAudioSource)
 	flag.StringVar(&audioSink, "audio-sink", audioSink, "Audio route: monitor (copy default output) or output (selectable doubletake sink)")
@@ -156,6 +156,9 @@ func main() {
 		log.Fatal("-no-video and -no-audio cannot be used together")
 	}
 	if *videoSource != "" {
+		if !airplay.HasInProcessGStreamer() {
+			log.Fatal("file, HTTP and stdin playback require a GStreamer build")
+		}
 		if *daemonize {
 			log.Fatal("use doubletake ctl play SOURCE [target] with daemon mode")
 		}
@@ -173,9 +176,6 @@ func main() {
 			}
 			*videoSource = path
 		}
-	}
-	if !airplay.HasInProcessGStreamer() {
-		log.Fatal("media capture requires cgo and the GStreamer development libraries")
 	}
 	if err := airplay.ValidateHWAccel(*hwaccel); err != nil {
 		log.Fatalf("invalid -hwaccel: %v", err)
@@ -591,9 +591,9 @@ func main() {
 	}
 	if *testMode {
 		if *noAudio {
-			log.Println("using synthetic video (videotestsrc) for debugging")
+			log.Println("using synthetic video for debugging")
 		} else {
-			log.Println("using synthetic video (videotestsrc) and audio test tone for debugging")
+			log.Println("using synthetic video and audio test tone for debugging")
 		}
 	}
 	prepareCapture := func(cfg airplay.CaptureConfig) (*airplay.CapturePreparation, error) {
