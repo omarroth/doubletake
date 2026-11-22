@@ -76,8 +76,10 @@ it as `gst-plugin-va`. Older `vaapipostproc` packages do not provide that elemen
 
 ## macOS and Windows development builds
 
-Build the commands with `CGO_ENABLED=0 go build ./cmd/...` and install
-GStreamer with its tools and plugins on PATH. Native desktop capture is
+Install GStreamer with its tools and plugins on PATH. Build the commands into
+`bin/` with `CGO_ENABLED=0 go build -o bin/ ./cmd/doubletake ./cmd/doubletake-ctl`.
+In Windows PowerShell, set `$env:CGO_ENABLED = '0'` before running `go build`.
+Native desktop capture is
 experimental. macOS uses `avfvideosrc` and requires Screen Recording access
 for the launching terminal or app. Use `-no-audio` for macOS desktop capture.
 Windows uses `d3d11screencapturesrc` in an interactive desktop session and

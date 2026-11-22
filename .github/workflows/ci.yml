@@ -62,8 +62,8 @@ jobs:
         run: go build ./cmd/...
       - name: Exercise loopback receiver pairing and classic audio
         run: go test ./internal/airplay -run 'Test(ReceiverServerRequiresPairVerifyBeforeSessionRequests|ReceiverFPSAPCompletesSenderExchange|RAOPMatchesLocalVolumeAndPreservesDaemonMute|DiscoveryPreservesLinkLocalIPv6Interface)$' -count=1
-      - name: Exercise exclusive daemon instance ownership
-        run: go test ./internal/daemon -run 'TestRunRejectsSecondDaemonWithoutRemovingLiveSocket$' -count=1
+      - name: Exercise daemon socket access and exclusive instance ownership
+        run: go test ./internal/daemon -run '^TestRunRejects(SecondDaemonWithoutRemovingLiveSocket|LiveDaemonThatPredatesInstanceLock)$' -count=1
 
   build-gstreamer:
     strategy:
