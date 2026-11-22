@@ -15,6 +15,10 @@ import (
 	"time"
 )
 
+// ErrMediaPlaybackRequiresGStreamer is returned when media playback is
+// requested from a sender built without GStreamer.
+var ErrMediaPlaybackRequiresGStreamer = errors.New("file, HTTP and stdin playback require a GStreamer-enabled doubletake sender")
+
 // ResolveMediaSource accepts an HTTP(S) URL or resolves a local file in the
 // caller's working directory. Foreground stdin is handled by the caller.
 func ResolveMediaSource(source string) (string, error) {

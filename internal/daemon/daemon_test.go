@@ -11,6 +11,17 @@ import (
 	"doubletake/internal/airplay"
 )
 
+func TestNativeDaemonRejectsMediaPlaybackBeforeConnecting(t *testing.T) {
+	if airplay.HasInProcessGStreamer() {
+		t.Skip("requires a build without GStreamer")
+	}
+	d := &Daemon{}
+	response := d.handleConnect(Request{Cmd: "play", MediaSource: filepath.Join(t.TempDir(), "missing.mkv")})
+	if want := airplay.ErrMediaPlaybackRequiresGStreamer.Error(); response.OK || response.Error != want {
+		t.Fatalf("play response = %+v, want error %q", response, want)
+	}
+}
+
 func TestRunRejectsSecondDaemonWithoutRemovingLiveSocket(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "doubletake.sock")
 	lockFile, err := acquireInstanceLock(socketPath)

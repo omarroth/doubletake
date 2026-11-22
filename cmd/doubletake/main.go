@@ -156,7 +156,7 @@ func main() {
 	}
 	if *videoSource != "" {
 		if !airplay.HasInProcessGStreamer() {
-			log.Fatal("file, HTTP and stdin playback require a GStreamer build")
+			log.Fatal(airplay.ErrMediaPlaybackRequiresGStreamer)
 		}
 		if *daemonize {
 			log.Fatal("use doubletake ctl play SOURCE [target] with daemon mode")

@@ -840,6 +840,9 @@ func (d *Daemon) handleConnect(req Request) Response {
 		if d.cfg.NoVideo || d.cfg.TestMode {
 			return Response{OK: false, Error: "play requires a video-enabled daemon outside test mode"}
 		}
+		if !airplay.HasInProcessGStreamer() {
+			return Response{OK: false, Error: airplay.ErrMediaPlaybackRequiresGStreamer.Error()}
+		}
 		source, err := airplay.ResolveMediaSource(req.MediaSource)
 		if err != nil {
 			return Response{OK: false, Error: err.Error()}

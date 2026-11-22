@@ -258,7 +258,7 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	}
 	if !HasInProcessGStreamer() {
 		if cfg.MediaSource != "" {
-			return nil, fmt.Errorf("file, HTTP and stdin playback require a GStreamer build")
+			return nil, ErrMediaPlaybackRequiresGStreamer
 		}
 		return prepareNativeVideo(ctx, cfg, false)
 	}
