@@ -6,7 +6,7 @@ package airplay
 #cgo LDFLAGS: -lole32 -luuid
 #include <stdint.h>
 typedef struct DTLoopback DTLoopback;
-DTLoopback *dt_loopback_open(int32_t *status);
+DTLoopback *dt_loopback_open(int32_t *status, const char **stage);
 int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size, int64_t *age);
 void dt_loopback_close(DTLoopback *capture);
 */
@@ -35,9 +35,10 @@ func openWindowsMonitor(lifetime context.Context) (nativePCMInput, error) {
 		defer runtime.UnlockOSThread()
 
 		var status C.int32_t
-		capture := C.dt_loopback_open(&status)
+		var stage *C.char
+		capture := C.dt_loopback_open(&status, &stage)
 		if capture == nil {
-			started <- fmt.Errorf("start WASAPI loopback: HRESULT 0x%08x", uint32(status))
+			started <- fmt.Errorf("start WASAPI loopback: %s (HRESULT 0x%08x)", C.GoString(stage), uint32(status))
 			return
 		}
 		defer C.dt_loopback_close(capture)

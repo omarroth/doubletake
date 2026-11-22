@@ -28,12 +28,46 @@ void dt_loopback_close(DTLoopback *capture) {
     CoUninitialize();
 }
 
-DTLoopback *dt_loopback_open(int32_t *status) {
+static HRESULT dt_loopback_device(IMMDeviceEnumerator *enumerator, IMMDevice **device, const char **stage) {
+    static const ERole roles[] = { eConsole, eMultimedia };
+    const HRESULT not_found = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    *stage = "look up the default Windows playback output";
+    for (size_t i = 0; i < sizeof(roles) / sizeof(roles[0]); i++) {
+        HRESULT hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, roles[i], device);
+        if (hr != not_found) return hr;
+    }
+
+    // A new or redirected Windows session can have an active render device
+    // before either default role is populated. Pick it only if unambiguous.
+    *stage = "enumerate active Windows playback outputs";
+    IMMDeviceCollection *outputs = NULL;
+    HRESULT hr = IMMDeviceEnumerator_EnumAudioEndpoints(enumerator, eRender, DEVICE_STATE_ACTIVE, &outputs);
+    if (FAILED(hr)) return hr;
+    UINT count = 0;
+    hr = IMMDeviceCollection_GetCount(outputs, &count);
+    if (SUCCEEDED(hr)) {
+        if (count == 1) {
+            *stage = "select the active Windows playback output";
+            hr = IMMDeviceCollection_Item(outputs, 0, device);
+        } else {
+            *stage = count == 0
+                ? "no active Windows playback output; enable an output in Settings > System > Sound"
+                : "no default Windows playback output; select an output in Settings > System > Sound";
+            hr = not_found;
+        }
+    }
+    IMMDeviceCollection_Release(outputs);
+    return hr;
+}
+
+DTLoopback *dt_loopback_open(int32_t *status, const char **stage) {
+    *stage = "initialize Windows COM";
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         *status = hr;
         return NULL;
     }
+    *stage = "allocate loopback capture";
     DTLoopback *capture = calloc(1, sizeof(*capture));
     if (!capture) {
         CoUninitialize();
@@ -42,9 +76,13 @@ DTLoopback *dt_loopback_open(int32_t *status) {
     }
     IMMDeviceEnumerator *enumerator = NULL;
     IMMDevice *device = NULL;
+    *stage = "open the Windows audio device enumerator";
     hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL, &IID_IMMDeviceEnumerator, (void **)&enumerator);
-    if (SUCCEEDED(hr)) hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, eMultimedia, &device);
-    if (SUCCEEDED(hr)) hr = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&capture->client);
+    if (SUCCEEDED(hr)) hr = dt_loopback_device(enumerator, &device, stage);
+    if (SUCCEEDED(hr)) {
+        *stage = "activate the Windows playback output";
+        hr = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&capture->client);
+    }
     if (device) IMMDevice_Release(device);
     if (enumerator) IMMDeviceEnumerator_Release(enumerator);
     if (FAILED(hr)) goto fail;
@@ -52,16 +90,23 @@ DTLoopback *dt_loopback_open(int32_t *status) {
     WAVEFORMATEX format = { WAVE_FORMAT_PCM, 2, 44100, 44100 * 4, 4, 16, 0 };
     DWORD flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    *stage = "initialize stereo 44.1 kHz loopback on the Windows playback output";
     hr = IAudioClient_Initialize(capture->client, AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, &format, NULL);
     if (FAILED(hr)) goto fail;
+    *stage = "create the WASAPI capture event";
     capture->ready = CreateEventW(NULL, FALSE, FALSE, NULL);
     if (!capture->ready) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto fail;
     }
+    *stage = "register the WASAPI capture event";
     hr = IAudioClient_SetEventHandle(capture->client, capture->ready);
-    if (SUCCEEDED(hr)) hr = IAudioClient_GetService(capture->client, &IID_IAudioCaptureClient, (void **)&capture->reader);
-    if (SUCCEEDED(hr)) hr = IAudioClient_Start(capture->client);
+    if (FAILED(hr)) goto fail;
+    *stage = "get the WASAPI capture service";
+    hr = IAudioClient_GetService(capture->client, &IID_IAudioCaptureClient, (void **)&capture->reader);
+    if (FAILED(hr)) goto fail;
+    *stage = "start WASAPI capture on the Windows playback output";
+    hr = IAudioClient_Start(capture->client);
     if (FAILED(hr)) goto fail;
     return capture;
 
