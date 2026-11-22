@@ -34,7 +34,7 @@ const (
 
 	failedMirrorSetupTeardownTimeout = 2 * time.Second
 	asyncPTPClockWaitTimeout         = 2 * time.Second
-	initialVolumeFetchTimeout        = 3 * time.Second
+	receiverVolumeRequestTimeout     = 3 * time.Second
 
 	airPlayDefaultVolumeDB = -20.0
 	airPlayQuietVolumeDB   = -27.0
@@ -1392,7 +1392,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 	receiverVolume := receiverVolumeFromInfo(c.info)
 	if !cfg.NoAudio && !receiverVolume.known && supportsInitialVolume(c.info) {
 		body, _, fetchErr := c.httpRequestWithHeadersTimeout(
-			"GET_PARAMETER", audioURI, "text/parameters", []byte("volume\r\n"), initialVolumeFetchTimeout,
+			"GET_PARAMETER", audioURI, "text/parameters", []byte("volume\r\n"), receiverVolumeRequestTimeout,
 		)
 		if fetchErr != nil {
 			if hasIncompleteResponse(fetchErr) {
@@ -2612,8 +2612,7 @@ func (s *MirrorSession) PlayoutTiming() (clock string, video, audio time.Duratio
 }
 
 // SetAudioMuted updates mirrored audio volume on the receiver. AirPlay uses
-// -144 dB as its mute sentinel; unmute restores the receiver's initial volume
-// rather than forcing the old hard-coded 0 dB (full-scale) value.
+// -144 dB as its mute sentinel. Unmute restores the last known playback level.
 func (s *MirrorSession) SetAudioMuted(muted bool) error {
 	if s == nil || s.client == nil || s.sessionURI == "" {
 		return fmt.Errorf("audio control unavailable")
@@ -2635,7 +2634,7 @@ func (s *MirrorSession) SetAudioMuted(muted bool) error {
 		volumeDB = airPlayMutedVolumeDB
 	}
 	volumeDB = normalizeOutgoingVolume(volumeDB)
-	if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", audioVolumeBody(volumeDB), nil); err != nil {
+	if _, err := s.requestReceiverVolume("SET_PARAMETER", audioVolumeBody(volumeDB)); err != nil {
 		return fmt.Errorf("set audio muted=%t: %w", muted, err)
 	}
 	s.receiverMuted = muted
@@ -2647,11 +2646,17 @@ func (s *MirrorSession) ReceiverVolume() (float64, error) {
 	if s.noAudio {
 		return 0, errors.New("session audio is disabled")
 	}
-	body, _, err := s.client.rtspRequest("GET_PARAMETER", s.sessionURI, "text/parameters", []byte("volume\r\n"), nil)
+	s.receiverVolumeMu.Lock()
+	defer s.receiverVolumeMu.Unlock()
+	body, err := s.requestReceiverVolume("GET_PARAMETER", []byte("volume\r\n"))
 	if err != nil {
 		return 0, err
 	}
-	return parseReceiverVolume(body)
+	db, err := parseReceiverVolume(body)
+	if err == nil && !s.receiverMuted && validateReceiverVolume(db) == nil {
+		s.receiverVolumeDB, s.receiverVolumeDBKnown = db, true
+	}
+	return db, err
 }
 
 // SetReceiverVolume sets the playback level. A muted stream keeps the new
@@ -2666,12 +2671,23 @@ func (s *MirrorSession) SetReceiverVolume(db float64) error {
 	s.receiverVolumeMu.Lock()
 	defer s.receiverVolumeMu.Unlock()
 	if !s.receiverMuted {
-		if _, _, err := s.client.rtspRequest("SET_PARAMETER", s.sessionURI, "text/parameters", audioVolumeBody(db), nil); err != nil {
+		if _, err := s.requestReceiverVolume("SET_PARAMETER", audioVolumeBody(db)); err != nil {
 			return err
 		}
 	}
 	s.receiverVolumeDB, s.receiverVolumeDBKnown = db, true
 	return nil
+}
+
+func (s *MirrorSession) requestReceiverVolume(method string, parameters []byte) ([]byte, error) {
+	body, _, err := s.client.httpRequestWithHeadersTimeout(method, s.sessionURI, "text/parameters", parameters, receiverVolumeRequestTimeout)
+	if hasIncompleteResponse(err) {
+		// A partial reply makes the shared control connection unusable. A
+		// complete refusal can be reported without interrupting playback.
+		_ = s.client.Close()
+		s.failStream(fmt.Errorf("receiver volume request: %w", err))
+	}
+	return body, err
 }
 
 func validateReceiverVolume(db float64) error {

@@ -1326,6 +1326,45 @@ func TestSetAudioMutedRestoresInitialReceiverVolume(t *testing.T) {
 	}
 }
 
+func TestReadReceiverVolumeDistinguishesRefusalFromIncompleteReply(t *testing.T) {
+	for _, tc := range []struct {
+		name, response string
+		wantStreamErr  bool
+	}{
+		{name: "unsupported", response: "RTSP/1.0 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"},
+		{name: "partial", response: "RTSP/1.0 200 OK\r\nContent-Length: 100\r\n\r\nvolume: -18\r\n", wantStreamErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			session := &MirrorSession{
+				client: &AirPlayClient{conn: clientConn}, sessionURI: "rtsp://example/session", streamDone: make(chan struct{}),
+			}
+			serverErr := make(chan error, 1)
+			go func() {
+				defer serverConn.Close()
+				req, err := readRTSPTestRequest(bufio.NewReader(serverConn))
+				if err == nil && (req.method != "GET_PARAMETER" || string(req.body) != "volume\r\n") {
+					err = fmt.Errorf("unexpected volume request: %+v", req)
+				}
+				if err == nil {
+					_, err = io.WriteString(serverConn, tc.response)
+				}
+				serverErr <- err
+			}()
+			if _, err := session.ReceiverVolume(); err == nil || hasIncompleteResponse(err) != tc.wantStreamErr {
+				t.Fatalf("unexpected volume error: %v", err)
+			}
+			if err := session.streamFailure(); (err != nil) != tc.wantStreamErr {
+				t.Fatalf("unexpected stream error: %v", err)
+			}
+			if err := <-serverErr; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 type audioSessionCase struct {
 	rejectEarlyRecord bool
 	skipRecord        bool
