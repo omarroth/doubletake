@@ -185,8 +185,9 @@ doubletake ctl play ./clip.mp4 192.168.1.77
 ```
 
 Custom sources play the clip's video and audio and stop at end of input.
-Use `-no-audio` to play video only. GStreamer must have decoders for the
-input tracks. Direct HTTP(S) media URLs are fetched by doubletake. For stdin,
+They require a GStreamer-enabled sender. Use `-no-audio` to play video only.
+GStreamer must have decoders for the input tracks. Direct HTTP(S) media URLs
+are fetched by doubletake. For stdin,
 use a streamable container such as Matroska or MPEG-TS and pair first if the
 receiver needs an interactive PIN. For example, pipe Streamlink output with
 `streamlink --stdout URL best | doubletake -target RECEIVER_IP -source -`.
