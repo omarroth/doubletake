@@ -50,14 +50,19 @@ func TestRunRejectsSecondDaemonWithoutRemovingLiveSocket(t *testing.T) {
 	releaseInstanceLock(reacquired)
 }
 
-func TestRunRejectsLiveDaemonThatPredatesInstanceLock(t *testing.T) {
+func shortTestSocketPath(t *testing.T) string {
+	t.Helper()
 	// Keep the pathname under the Unix socket limit on native CI runners.
 	dir, err := os.MkdirTemp("", "dt-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	socketPath := filepath.Join(dir, "d.sock")
+	return filepath.Join(dir, "d.sock")
+}
+
+func TestRunRejectsLiveDaemonThatPredatesInstanceLock(t *testing.T) {
+	socketPath := shortTestSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen as old daemon: %v", err)
@@ -71,6 +76,24 @@ func TestRunRejectsLiveDaemonThatPredatesInstanceLock(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(socketPath); statErr != nil {
 		t.Fatalf("live old-daemon socket was removed: %v", statErr)
+	}
+}
+
+func TestRemoveStaleControlSocket(t *testing.T) {
+	socketPath := shortTestSocketPath(t)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStaleSocket(socketPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("stale socket still present: %v", err)
 	}
 }
 

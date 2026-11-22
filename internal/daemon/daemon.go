@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"doubletake/internal/airplay"
@@ -238,7 +237,7 @@ func removeStaleSocket(socketPath string) error {
 		conn.Close()
 		return fmt.Errorf("another doubletake daemon is already running for %s", socketPath)
 	}
-	if !errors.Is(dialErr, syscall.ECONNREFUSED) && !os.IsNotExist(dialErr) {
+	if !errors.Is(dialErr, socketConnectionRefused) && !os.IsNotExist(dialErr) {
 		return fmt.Errorf("probe existing control socket: %w", dialErr)
 	}
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
