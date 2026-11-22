@@ -9,8 +9,9 @@ import (
 )
 
 type nativePCMBlock struct {
-	samples []byte
-	pts     time.Time
+	samples       []byte
+	pts           time.Time
+	discontinuity bool
 }
 
 type nativePCMInput struct {
@@ -96,7 +97,7 @@ func (r *nativePCMFrames) ReadPCMFramePosition(dst []byte) (audioPCMFramePositio
 			}
 			if !r.block.pts.IsZero() {
 				expected := r.block.pts.Add(audioSamplesDuration(uint64(r.consumed / audioBytesPerSampleFrame)))
-				if gap := block.pts.Sub(expected); gap < -30*time.Millisecond || gap > 30*time.Millisecond {
+				if gap := block.pts.Sub(expected); block.discontinuity || gap < -30*time.Millisecond || gap > 30*time.Millisecond {
 					if gap > 0 {
 						r.position += uint32(durationToAudioSamples(gap))
 					}

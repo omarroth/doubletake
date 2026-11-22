@@ -117,8 +117,9 @@ fail:
 }
 
 // GetBuffer returns an absolute performance-counter timestamp in units of
-// 100 ns for the first frame. Return its age in the same clock.
-int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size, int64_t *age) {
+// 100 ns for the first frame. Return its age only if the timestamp is valid.
+int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size,
+        int64_t *age, int *timestamp_valid, int *discontinuity) {
     UINT32 frames = 0;
     HRESULT hr = IAudioCaptureClient_GetNextPacketSize(capture->reader, &frames);
     if (FAILED(hr)) return hr;
@@ -128,9 +129,14 @@ int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size, int
         if (FAILED(hr) || !frames) return hr;
     }
     DWORD flags = 0;
-    UINT64 position = 0, qpc = 0;
+    UINT64 qpc = 0;
     BYTE *data = NULL;
-    hr = IAudioCaptureClient_GetBuffer(capture->reader, &data, &frames, &flags, &position, &qpc);
+    hr = IAudioCaptureClient_GetBuffer(capture->reader, &data, &frames, &flags, NULL, &qpc);
+    if (hr == AUDCLNT_E_BUFFER_ERROR) {
+        // The buffer was unavailable this pass. Continue on the next event.
+        WaitForSingleObject(capture->ready, 10);
+        return S_FALSE;
+    }
     if (FAILED(hr) || !frames) return hr;
     size_t length = (size_t)frames * 4;
     if (length > capture->capacity) {
@@ -146,13 +152,14 @@ int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size, int
     else memcpy(capture->samples, data, length);
     *bytes = capture->samples;
     *size = (int)length;
-    *age = frames * 10000000LL / 44100;
+    *discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
     LARGE_INTEGER now, frequency;
     if (!(flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && qpc &&
         QueryPerformanceCounter(&now) && QueryPerformanceFrequency(&frequency)) {
         int64_t ticks = (now.QuadPart / frequency.QuadPart) * 10000000LL +
             (now.QuadPart % frequency.QuadPart) * 10000000LL / frequency.QuadPart;
         *age = ticks - (int64_t)qpc;
+        *timestamp_valid = 1;
     }
     return IAudioCaptureClient_ReleaseBuffer(capture->reader, frames);
 }

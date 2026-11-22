@@ -7,7 +7,8 @@ package airplay
 #include <stdint.h>
 typedef struct DTLoopback DTLoopback;
 DTLoopback *dt_loopback_open(int32_t *status, const char **stage);
-int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size, int64_t *age);
+int32_t dt_loopback_pull(DTLoopback *capture, const void **bytes, int *size,
+    int64_t *age, int *timestamp_valid, int *discontinuity);
 void dt_loopback_close(DTLoopback *capture);
 */
 import "C"
@@ -50,7 +51,8 @@ func openWindowsMonitor(lifetime context.Context) (nativePCMInput, error) {
 			var data unsafe.Pointer
 			var size C.int
 			var age C.int64_t
-			status := C.dt_loopback_pull(capture, &data, &size, &age)
+			var timestampValid, discontinuity C.int
+			status := C.dt_loopback_pull(capture, &data, &size, &age, &timestampValid, &discontinuity)
 			if status < 0 {
 				failure = fmt.Errorf("read WASAPI loopback: HRESULT 0x%08x", uint32(status))
 				return
@@ -59,7 +61,15 @@ func openWindowsMonitor(lifetime context.Context) (nativePCMInput, error) {
 			now := time.Now()
 			var block nativePCMBlock
 			if size > 0 {
-				block = nativePCMBlock{samples: C.GoBytes(data, size), pts: now.Add(-time.Duration(age) * 100)}
+				samples := C.GoBytes(data, size)
+				duration := audioSamplesDuration(uint64(len(samples) / audioBytesPerSampleFrame))
+				pts := nextPTS
+				if timestampValid != 0 {
+					pts = now.Add(-time.Duration(age) * 100)
+				} else if pts.IsZero() || discontinuity != 0 {
+					pts = now.Add(-duration)
+				}
+				block = nativePCMBlock{samples: samples, pts: pts, discontinuity: discontinuity != 0}
 				lastPacket = now
 			} else {
 				// The Windows audio engine may suspend a quiet endpoint.
