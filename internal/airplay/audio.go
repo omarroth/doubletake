@@ -1678,6 +1678,8 @@ func (audioStream *AudioStream) play(ctx context.Context, capture *AudioCapture,
 	minFrameSendGap := time.Duration(0)
 	maxFrameSendGap := time.Duration(0)
 	frameSendGaps := 0
+	minPlayoutLead := time.Duration(0)
+	lateInInterval := 0
 	minRedundantFrames := audioRedundancyCount
 	maxRedundantFrames := 0
 
@@ -1827,6 +1829,14 @@ func (audioStream *AudioStream) play(ctx context.Context, capture *AudioCapture,
 
 		frameSeq++
 		now := mediaNow()
+		sourceAge := now.Sub(framePTS)
+		playoutLead := audioLatencyDuration(latencySamples) - sourceAge
+		if frameSendGaps == 0 || playoutLead < minPlayoutLead {
+			minPlayoutLead = playoutLead
+		}
+		if timestampedAudio && playoutLead <= 0 {
+			lateInInterval++
+		}
 		if !lastFrameSentAt.IsZero() {
 			gap := now.Sub(lastFrameSentAt)
 			if frameSendGaps == 0 || gap < minFrameSendGap {
@@ -1843,10 +1853,8 @@ func (audioStream *AudioStream) play(ctx context.Context, capture *AudioCapture,
 				elapsed = now.Sub(lastTimingReportAt)
 				mediaDuration = audioSamplesDuration(uint64(frameRTP - lastTimingReportRTP))
 			}
-			sourceAge := now.Sub(framePTS)
-			latencySamples := audioStream.currentLatencySamples()
-			dbg("[AUDIO-TIMING] frame=%d rtp=%d source-age=%v playout-lead=%v interval=%v media=%v skew=%v send-gap=%v..%v encoded=%d redundancy=%d..%d",
-				frameCount, frameRTP, sourceAge, audioLatencyDuration(latencySamples)-sourceAge,
+			dbg("[AUDIO-TIMING] frame=%d rtp=%d source-age=%v playout-lead=%v min-playout-lead=%v late=%d interval=%v media=%v skew=%v send-gap=%v..%v encoded=%d redundancy=%d..%d",
+				frameCount, frameRTP, sourceAge, playoutLead, minPlayoutLead, lateInInterval,
 				elapsed, mediaDuration, elapsed-mediaDuration, minFrameSendGap, maxFrameSendGap, n,
 				minRedundantFrames, maxRedundantFrames)
 			lastTimingReportAt = now
@@ -1854,6 +1862,7 @@ func (audioStream *AudioStream) play(ctx context.Context, capture *AudioCapture,
 			minFrameSendGap = 0
 			maxFrameSendGap = 0
 			frameSendGaps = 0
+			lateInInterval = 0
 			minRedundantFrames = audioRedundancyCount
 			maxRedundantFrames = 0
 		}
