@@ -74,6 +74,17 @@ it as `gst-plugin-va`. Older `vaapipostproc` packages do not provide that elemen
   screencasts and, if needed, `debug { disable-pipewire-dmabuf }`.
   See [#78](https://github.com/omarroth/doubletake/issues/78).
 
+## macOS and Windows development builds
+
+Build the commands with `CGO_ENABLED=0 go build ./cmd/...` and install
+GStreamer with its tools and plugins on PATH. Native desktop capture is
+experimental. macOS uses `avfvideosrc` and requires Screen Recording access
+for the launching terminal or app. Use `-no-audio` for macOS desktop capture.
+Windows uses `d3d11screencapturesrc` in an interactive desktop session and
+`wasapi2src` for output monitoring. Use `-no-audio` for Windows custom media.
+These builds use GStreamer's subprocess backend and a fixed video encoder
+configuration. CI runs protocol and process tests in macOS and Windows VMs.
+
 ## Audio
 
 Audio defaults to monitoring the local output. The selectable output

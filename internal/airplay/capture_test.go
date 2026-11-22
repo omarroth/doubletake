@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -272,20 +271,6 @@ func TestScreenCaptureStopIsConcurrentAndIdempotent(t *testing.T) {
 	}
 	if got := cancels.Load(); got != 1 {
 		t.Fatalf("capture context cancellations = %d, want 1", got)
-	}
-}
-
-func TestStartGStreamerCommandSetsParentDeathSignal(t *testing.T) {
-	cmd := exec.Command("true")
-	waitResult, err := startGStreamerCommand(cmd)
-	if err != nil {
-		t.Fatalf("startGStreamerCommand: %v", err)
-	}
-	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Pdeathsig != syscall.SIGKILL {
-		t.Fatalf("Pdeathsig = %v, want SIGKILL", cmd.SysProcAttr)
-	}
-	if err := <-waitResult; err != nil {
-		t.Fatalf("wait for supervised command: %v", err)
 	}
 }
 

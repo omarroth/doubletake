@@ -43,6 +43,28 @@ jobs:
       - run: make test-go
       - run: go vet ./...
 
+  portable-protocol:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - name: Build all commands
+        run: go build ./cmd/...
+      - name: Exercise loopback receiver pairing and classic audio
+        run: go test ./internal/airplay -run 'Test(ReceiverServerRequiresPairVerifyBeforeSessionRequests|ReceiverFPSAPCompletesSenderExchange|RAOPMatchesLocalVolumeAndPreservesDaemonMute|DiscoveryPreservesLinkLocalIPv6Interface)$' -count=1
+      - name: Exercise exclusive daemon instance ownership
+        run: go test ./internal/daemon -run 'TestRunRejectsSecondDaemonWithoutRemovingLiveSocket$' -count=1
+
   build-gstreamer:
     strategy:
       fail-fast: false

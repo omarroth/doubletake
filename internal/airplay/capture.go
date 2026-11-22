@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -148,6 +147,7 @@ const (
 	capturePreparationWayland
 	capturePreparationTest
 	capturePreparationMedia
+	capturePreparationNativeDesktop
 )
 
 // CapturePreparation performs the potentially interactive part of screen
@@ -278,6 +278,8 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	kind := capturePreparationX11
 	if cfg.MediaSource != "" {
 		kind = capturePreparationMedia
+	} else if nativeDesktopSource(runtime.GOOS, cfg.ShowCursor) != nil {
+		kind = capturePreparationNativeDesktop
 	} else if (cfg.X11WindowID != 0 || cfg.X11WindowName != "") && os.Getenv("DISPLAY") != "" {
 		kind = capturePreparationX11
 	} else if os.Getenv("WAYLAND_DISPLAY") != "" {
@@ -318,6 +320,16 @@ func PrepareCapture(ctx context.Context, cfg CaptureConfig) (*CapturePreparation
 	if kind == capturePreparationMedia {
 		if !preparation.timestampedOutput {
 			return nil, fmt.Errorf("video sources require GStreamer RTP/ONVIF timestamps")
+		}
+		return preparation, nil
+	}
+	if kind == capturePreparationNativeDesktop {
+		if cfg.X11WindowID != 0 || cfg.X11WindowName != "" {
+			return nil, fmt.Errorf("X11 window options require the X11 capture backend")
+		}
+		source := nativeDesktopSource(runtime.GOOS, cfg.ShowCursor)
+		if !hasGstElement(source[0]) {
+			return nil, fmt.Errorf("desktop capture on %s requires GStreamer %s", runtime.GOOS, source[0])
 		}
 		return preparation, nil
 	}
@@ -525,6 +537,8 @@ func (p *CapturePreparation) startWithContextAndCodec(lifetime context.Context, 
 		return startPreparedTestCapture(captureCtx, cfg, encoder, timestampedOutput)
 	case capturePreparationMedia:
 		return startPreparedMediaCapture(captureCtx, cfg, encoder, audio)
+	case capturePreparationNativeDesktop:
+		return startNativeDesktopCapture(startupCtx, captureCtx, cfg, encoder, timestampedOutput)
 	default:
 		if pwFd != nil {
 			_ = pwFd.Close()
@@ -871,10 +885,8 @@ func startGStreamerCommand(cmd *exec.Cmd) (<-chan error, error) {
 	waitResult := make(chan error, 1)
 
 	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-
-		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+		release := configureCaptureProcess(cmd)
+		defer release()
 		err := cmd.Start()
 		started <- err
 		if err != nil {

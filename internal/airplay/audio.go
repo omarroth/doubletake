@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -284,6 +285,15 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 	if testTone {
 		srcArgs = audioTestToneSourceArgs(codecSPF)
 		dbg("[AUDIO] using test tone (440 Hz sine wave, volume=%s, live, spf=%d)", audioTestToneVolume, codecSPF)
+	} else if runtime.GOOS == "windows" {
+		if source != AudioSourceMonitor || !hasGstElement("wasapi2src") {
+			cancel()
+			return nil, fmt.Errorf("Windows desktop audio requires the monitor route and GStreamer wasapi2src")
+		}
+		srcArgs = []string{"wasapi2src", "loopback=true", "low-latency=true"}
+	} else if runtime.GOOS == "darwin" {
+		cancel()
+		return nil, fmt.Errorf("desktop audio capture is unavailable on macOS")
 	} else {
 		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
 		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil

@@ -165,7 +165,7 @@ func validatePortRange(portMin, portMax int) error {
 func DefaultSocketPath() string {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
-		dir = "/tmp"
+		dir = os.TempDir()
 	}
 	return filepath.Join(dir, "doubletake.sock")
 }
@@ -183,9 +183,9 @@ func acquireInstanceLock(socketPath string) (*os.File, error) {
 		lockFile.Close()
 		return nil, fmt.Errorf("chmod daemon lock %s: %w", lockPath, err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if busy, err := tryLockInstance(lockFile); err != nil {
 		lockFile.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		if busy {
 			return nil, fmt.Errorf("another doubletake daemon is already running for %s", socketPath)
 		}
 		return nil, fmt.Errorf("lock daemon instance %s: %w", lockPath, err)
@@ -197,7 +197,6 @@ func releaseInstanceLock(lockFile *os.File) {
 	if lockFile == nil {
 		return
 	}
-	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 	_ = lockFile.Close()
 }
 

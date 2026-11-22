@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -77,6 +78,9 @@ func mediaSourceURI(source string) string {
 func (s *MirrorSession) StartMediaCapture(p *CapturePreparation, width, height int, codec VideoCodec) (*ScreenCapture, error) {
 	if s.noAudio || !s.HasAudio() {
 		return p.StartWithCodec(width, height, codec)
+	}
+	if runtime.GOOS == "windows" {
+		return nil, errors.New("custom media audio is unavailable on Windows; start doubletake with -no-audio")
 	}
 	return p.startWithContextAndCodec(nil, width, height, codec, s)
 }
