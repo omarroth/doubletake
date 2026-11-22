@@ -1,4 +1,4 @@
-.PHONY: all build doubletake doubletake-ctl doubletake-gstreamer-cgo doubletake-test-receiver release doubletake-release doubletake-ctl-release package-release install install-prebuilt install-bin install-man install-systemd install-completion install-license uninstall test test-go test-gstreamer clean
+.PHONY: all build doubletake doubletake-ctl doubletake-gstreamer-cgo doubletake-test-receiver macos-audio-helper release doubletake-release doubletake-ctl-release package-release install install-prebuilt install-bin install-man install-systemd install-completion install-license uninstall test test-go test-gstreamer clean
 
 PREFIX ?= /usr/local
 MANDIR ?= $(PREFIX)/share/man
@@ -24,6 +24,12 @@ doubletake:
 
 doubletake-ctl:
 	CGO_ENABLED=0 go build -ldflags='$(VERSION_FLAGS)' -o '$(BUILD_DIR)/doubletake-ctl' ./cmd/doubletake-ctl
+
+macos-audio-helper:
+	install -d '$(BUILD_DIR)'
+	xcrun --sdk macosx swiftc -O -parse-as-library -swift-version 5 -target "$$(uname -m)-apple-macosx13.0" \
+		-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker 'platform/macos/audio-info.plist' \
+		-o '$(BUILD_DIR)/doubletake-macos-audio' platform/macos/audio.swift
 
 # Compatibility alias for the prototype target name.
 doubletake-gstreamer-cgo: doubletake

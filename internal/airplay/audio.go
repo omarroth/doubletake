@@ -292,8 +292,12 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 		}
 		srcArgs = []string{"wasapi2src", "loopback=true", "low-latency=true"}
 	} else if runtime.GOOS == "darwin" {
-		cancel()
-		return nil, fmt.Errorf("desktop audio capture is unavailable on macOS")
+		if source != AudioSourceMonitor {
+			cancel()
+			return nil, fmt.Errorf("macOS desktop audio uses the monitor route")
+		}
+		srcArgs = []string{"fdsrc", "fd=0", "do-timestamp=true", "blocksize=8192", "!",
+			"rawaudioparse", "pcm-format=f32le", "sample-rate=48000", "num-channels=2"}
 	} else {
 		hasPipeWireSource := exec.Command("gst-inspect-1.0", "pipewiresrc").Run() == nil
 		hasPulseSource := exec.Command("gst-inspect-1.0", "pulsesrc").Run() == nil
@@ -366,6 +370,21 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 		return nil, fmt.Errorf("gst stdout pipe: %w", err)
 	}
 	gstStderr, _ := gstCmd.StderrPipe()
+	var nativeWait <-chan error
+	if !testTone && runtime.GOOS == "darwin" {
+		reader, wait, err := startMacOSAudio(captureCtx)
+		if err != nil {
+			_ = gstStdout.Close()
+			_ = gstStderr.Close()
+			if ac.eld != nil {
+				ac.eld.Close()
+			}
+			cancel()
+			return nil, err
+		}
+		defer reader.Close()
+		gstCmd.Stdin, nativeWait = reader, wait
+	}
 
 	waitResult, err := startGStreamerCommand(gstCmd)
 	if err != nil {
@@ -385,6 +404,12 @@ func StartAudioCaptureWithSource(ctx context.Context, testTone bool, codec Audio
 	}
 	go func() {
 		ac.waitErr = <-waitResult
+		if nativeWait != nil {
+			cancel()
+			if err := <-nativeWait; err != nil {
+				ac.waitErr = err
+			}
+		}
 		if releaseOutput != nil {
 			releaseOutput()
 		}
