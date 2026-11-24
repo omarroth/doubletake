@@ -1506,8 +1506,11 @@ func (c *receiverConnection) configureVideoCrypto(stream map[string]any) error {
 		return err
 	}
 
-	streamKey := plistBytes(stream["shk"])
-	if len(streamKey) != len(masterKey) || !bytes.Equal(streamKey, masterKey) {
+	if c.hap == nil {
+		if _, present := stream["shk"]; present {
+			return fmt.Errorf("legacy video sent its stream key over plaintext control")
+		}
+	} else if !bytes.Equal(plistBytes(stream["shk"]), masterKey) {
 		return fmt.Errorf("legacy video shk does not match the authenticated FairPlay session key")
 	}
 	streamIV := plistBytes(stream["shiv"])

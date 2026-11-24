@@ -1328,6 +1328,7 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		"type":               int64(110),
 		"streamConnectionID": videoStreamConnectionID,
 		"latencyMs":          latencies.video.Milliseconds(),
+		"shiv":               encIV,
 		"timestampInfo": []interface{}{
 			map[string]interface{}{"name": "SubSu"},
 			map[string]interface{}{"name": "BePxT"},
@@ -1337,10 +1338,11 @@ func (c *AirPlayClient) setupMirrorSessionAttempt(ctx context.Context, cfg Strea
 		},
 	}
 
-	// Encryption keys: shk/shiv go inside the video stream descriptor
-	if encKey != nil {
+	// On plaintext control, a FairPlay receiver gets its key from the session
+	// root. Sending shk again would expose the derived key on the network.
+	// Peers without FairPlay need the descriptor key to use legacy AES.
+	if c.encrypted || c.fpKey == nil {
 		videoStreamDesc["shk"] = encKey
-		videoStreamDesc["shiv"] = encIV
 	}
 
 	// Audio SETUP has established the session in both negotiated orderings. The
