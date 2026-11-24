@@ -1451,7 +1451,8 @@ type StreamConfig struct {
 	Bitrate                int        // Video bitrate in kbps
 	VideoCodec             VideoCodec // empty/h264, auto (highest usable), or explicitly requested hevc
 	AutomaticHEVCAvailable bool       // local measured 4K HEVC path passed its production preflight
-	// PreferredAudioCodec changes preference only when that format is offered.
+	// PreferredAudioCodec prefers a shared encoder when its format is offered.
+	// Zero uses the ordinary receiver negotiation.
 	PreferredAudioCodec AudioCodec
 	// PlayoutLatency fixes both media leads for a shared sender timeline. Zero
 	// retains the ordinary per-connection policy. Receivers which provide live

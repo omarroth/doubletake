@@ -66,6 +66,21 @@ func acquireSharedTestCapture(t *testing.T, h *SharedAudioCapture) *AudioCapture
 	return c
 }
 
+func TestSharedAudioCodecPreferenceFollowsActiveEncoder(t *testing.T) {
+	h, _, _ := newSharedAudioTestHub(t)
+	if got := h.PreferredCodec(); got != 0 {
+		t.Fatalf("idle codec preference = %v, want automatic negotiation", got)
+	}
+	capture := acquireSharedTestCapture(t, h)
+	if got := h.PreferredCodec(); got != AudioCodecALAC {
+		t.Fatalf("codec preference with an active ALAC encoder = %v, want ALAC", got)
+	}
+	capture.Stop()
+	if got := h.PreferredCodec(); got != 0 {
+		t.Fatalf("codec preference after last receiver leaves = %v, want automatic negotiation", got)
+	}
+}
+
 func TestSharedAudioDefaultSharesCaptureWithExplicitMonitor(t *testing.T) {
 	h, _, starts := newSharedAudioTestHub(t)
 	ctx, cancel := context.WithCancel(context.Background())

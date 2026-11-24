@@ -33,11 +33,12 @@ func TestDaemonReusesCodecBeforeAddingRequiredEncoder(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Shutdown()
-	// An ELD-only receiver starts the codec group. A dual-format receiver
-	// reuses ELD; a later ALAC-only receiver needs a second encoder, one source.
+	// A dual-format receiver starts the group with ELD, matching foreground
+	// negotiation. An ELD-only receiver reuses it, and a later ALAC-only
+	// receiver needs a second encoder sharing the same source.
 	// A fourth, legacy HAP/AES receiver must reuse those sources too.
 	var receivers []*airplay.ReceiverServer
-	for i, profile := range []airplay.ReceiverProfile{airplay.ReceiverProfileAirServer, airplay.ReceiverProfileModern, airplay.ReceiverProfileUxPlay, airplay.ReceiverProfileAppleTV3} {
+	for i, profile := range []airplay.ReceiverProfile{airplay.ReceiverProfileModern, airplay.ReceiverProfileAirServer, airplay.ReceiverProfileUxPlay, airplay.ReceiverProfileAppleTV3} {
 		server, err := airplay.NewReceiverServer(airplay.ReceiverConfig{ListenAddress: fmt.Sprintf("127.0.0.%d:0", i+1), Profile: profile, DisplayWidth: 320, DisplayHeight: 180, DecodeMedia: airplay.HasInProcessGStreamer(), Logger: log.New(io.Discard, "", 0)})
 		if err != nil {
 			t.Fatal(err)

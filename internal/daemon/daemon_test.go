@@ -159,14 +159,13 @@ func TestMirrorStreamConfigIncludesDaemonPortRange(t *testing.T) {
 	}}
 
 	want := airplay.StreamConfig{
-		PreferredAudioCodec: airplay.AudioCodecALAC,
-		FPS:                 60,
-		TargetWidth:         2560,
-		TargetHeight:        1440,
-		Bitrate:             8000,
-		PortMin:             60000,
-		PortMax:             60010,
-		NoAudio:             true,
+		FPS:          60,
+		TargetWidth:  2560,
+		TargetHeight: 1440,
+		Bitrate:      8000,
+		PortMin:      60000,
+		PortMax:      60010,
+		NoAudio:      true,
 	}
 	if got := d.mirrorStreamConfig(""); got != want {
 		t.Fatalf("mirror stream config = %+v, want %+v", got, want)

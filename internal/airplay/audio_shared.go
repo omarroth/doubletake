@@ -210,8 +210,8 @@ func (h *SharedAudioCapture) Stats() SharedAudioStats {
 	return SharedAudioStats{Sources: 1, Encoders: len(h.active.codecs), Receivers: h.active.users}
 }
 
-// PreferredCodec reuses an active encoder when possible. Negotiation must still
-// check the new receiver's format mask; this is a preference, not an override.
+// PreferredCodec returns a shared encoder preference when one is active.
+// Zero lets the first receiver negotiate the same codec as a foreground session.
 func (h *SharedAudioCapture) PreferredCodec() AudioCodec {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -223,7 +223,7 @@ func (h *SharedAudioCapture) PreferredCodec() AudioCodec {
 			return AudioCodecAACELD
 		}
 	}
-	return AudioCodecALAC
+	return 0
 }
 
 func (h *SharedAudioCapture) Acquire(ctx context.Context, testTone bool, codec AudioCodec, route AudioSource) (*AudioCapture, error) {

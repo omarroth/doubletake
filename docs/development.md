@@ -92,9 +92,9 @@ next to `doubletake.exe`. For ARM64, use the [MSYS2 CLANGARM64 package](https://
 Other platforms that opt in with `-tags fdk_aac` use the `fdk-aac` pkg-config
 file and link the library directly.
 
-The foreground sender prefers AAC-ELD when the receiver advertises it. The
-daemon prefers an existing shared codec or ALAC when possible. Receivers still
-select only formats they advertise.
+Foreground and idle-daemon sessions prefer AAC-ELD when the receiver offers it
+and the encoder is available. A receiver joining an active daemon group reuses
+a compatible encoder when possible.
 
 On Linux, to build without FDK-AAC, retaining GStreamer and ALAC:
 
