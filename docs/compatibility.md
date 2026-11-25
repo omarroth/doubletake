@@ -129,13 +129,13 @@ AAC-ELD encoder.
 Some layered Windows overlays may be absent from the native desktop capture.
 
 The regular build covers custom file, HTTP and stdin playback, Linux video,
-and `-audio-sink output`. It also provides the GStreamer video encoders for
+and `-audio-source output`. It also provides the GStreamer video encoders for
 Windows hardware acceleration.
 
 ## Audio
 
 Audio defaults to monitoring the local output. The selectable output
-(`-audio-sink output`) requires `pactl`, PulseAudio or `pipewire-pulse`, and
+(`-audio-source output`) requires `pactl`, PulseAudio or `pipewire-pulse`, and
 GStreamer's `pulsesrc`. Use its volume and mute controls for the captured audio
 and route applications to it through your sound settings.
 

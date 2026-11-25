@@ -142,7 +142,7 @@ replacing a receiver, use `-pair` to pair again. Saved pairings verify the
 receiver's identity on reconnect.
 
 By default, doubletake streams audio from your default local output while it
-continues playing locally. On Linux with GStreamer, use `-audio-sink output`
+continues playing locally. On Linux with GStreamer, use `-audio-source output`
 and select **doubletake** in your sound settings to route audio to the receiver.
 Use `-no-audio` for video only or `-no-video` for audio-only playback.
 
@@ -167,7 +167,7 @@ Common options:
 | `-bitrate KBPS` | Fixed bitrate; default `0` enables adaptation |
 | `-hwaccel METHOD` | `auto`, `nvenc`, `vaapi`, `v4l2`, `openh264`, or `none` |
 | `-video-codec CODEC` | `auto`, `h264`, or `hevc` |
-| `-audio-sink SOURCE` | `monitor` (default) or selectable `output` |
+| `-audio-source SOURCE` | `monitor` (default) or selectable `output` |
 | `-no-audio` | Disable audio |
 | `-no-video` | Stream audio only to a receiver with a supported audio endpoint |
 | `-target-latency-ms MS` | Override the audio/video playout budget |
@@ -256,7 +256,7 @@ systemctl --user enable --now doubletake.service
 - **Capture or encoder errors:** check the [compatibility notes](docs/compatibility.md).
   `-hwaccel none` selects software encoding for comparison.
 - **Audio:** check that audio is playing on your default local output. If using
-  `-audio-sink output`, route the desired applications to **doubletake**.
+  `-audio-source output`, route the desired applications to **doubletake**.
   Receivers requiring AAC-ELD need FDK-AAC installed. See [audio codecs](docs/development.md#audio-codecs).
 
 ## Disclaimer and license

@@ -22,7 +22,7 @@ _doubletake_complete_value()
     case $option in
         hwaccel) _doubletake_complete_words 'auto nvenc vaapi v4l2 openh264 none' ;;
         video-codec) _doubletake_complete_words 'auto h264 hevc' ;;
-        audio-sink) _doubletake_complete_words 'output monitor' ;;
+        audio-source) _doubletake_complete_words 'output monitor' ;;
         cred-backend) _doubletake_complete_words 'file keyring' ;;
         resolution|s) _doubletake_complete_words 'max 1280x720 1920x1080 2560x1440 3840x2160' ;;
         creds|socket|source) _filedir ;;
@@ -58,7 +58,7 @@ _doubletake()
     for ((i = 1; i < cword; i++)); do
         case ${words[i]} in
             --) return ;;
-            -audio-sink|--audio-sink|-bitrate|--bitrate|-code|--code|\
+            -audio-source|--audio-source|-bitrate|--bitrate|-code|--code|\
             -cred-backend|--cred-backend|-creds|--creds|-device-id|--device-id|\
             -fps|--fps|-hwaccel|--hwaccel|-port|--port|-port-range|--port-range|\
             -resolution|--resolution|-s|--s|-socket|--socket|-source|--source|-target|--target|\
@@ -81,7 +81,7 @@ _doubletake()
     if [[ $assigned == true ]]; then return; fi
 
     _doubletake_complete_flags \
-        -audio-sink -bitrate -code -cred-backend -creds -daemonize -debug \
+        -audio-source -bitrate -code -cred-backend -creds -daemonize -debug \
         -device-id -fps -h -help -hwaccel -no-audio -no-video -no-cursor -pair -port \
         -port-range -resolution -s -socket -source -target -target-latency-ms -test \
         -version -video-codec -x11-window-id -x11-window-name

@@ -135,8 +135,7 @@ func main() {
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
 	testMode := flag.Bool("test", false, "Use synthetic video instead of screen capture for debugging")
 	videoSource := flag.String("source", "", "Play media from a file, HTTP(S) URL, or - for stdin (requires a GStreamer build)")
-	audioSink := string(airplay.DefaultAudioSource)
-	flag.StringVar(&audioSink, "audio-sink", audioSink, "Audio route: monitor (copy default output) or output (selectable doubletake sink)")
+	audioSource := flag.String("audio-source", string(airplay.DefaultAudioSource), "Desktop audio source: monitor (copy default output) or output (selectable doubletake output)")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	noVideo := flag.Bool("no-video", false, "Stream audio only to a receiver with a supported audio endpoint")
 	portRange := flag.String("port-range", "", "Local UDP port range for receiver timing/audio (e.g. \"60000-60010\"); empty = OS ephemeral. Needs at least 3 ports.")
@@ -182,8 +181,8 @@ func main() {
 	if err := airplay.ValidateVideoCodec(*videoCodec); err != nil {
 		log.Fatalf("invalid -video-codec: %v", err)
 	}
-	if err := airplay.ValidateAudioSource(audioSink); err != nil {
-		log.Fatalf("invalid -audio-sink: %v", err)
+	if err := airplay.ValidateAudioSource(*audioSource); err != nil {
+		log.Fatalf("invalid -audio-source: %v", err)
 	}
 	targetVideo, err := parseVideoTarget(resolution)
 	if err != nil {
@@ -236,7 +235,7 @@ func main() {
 			TestMode:     *testMode,
 			NoAudio:      *noAudio,
 			NoVideo:      *noVideo,
-			AudioSource:  airplay.AudioSource(audioSink),
+			AudioSource:  airplay.AudioSource(*audioSource),
 			ShowCursor:   !*noCursor,
 			Code:         credential,
 		})
@@ -321,7 +320,7 @@ func main() {
 			log.Fatalf("failed to load credentials: %v", err)
 		}
 		config := airplay.AudioOnlyConfig{Password: credential, PortMin: portMin, PortMax: portMax}
-		if err := streamAudioOnly(ctx, device, config, *testMode, airplay.AudioSource(audioSink), store, *expectedDeviceID); err != nil && ctx.Err() == nil {
+		if err := streamAudioOnly(ctx, device, config, *testMode, airplay.AudioSource(*audioSource), store, *expectedDeviceID); err != nil && ctx.Err() == nil {
 			log.Fatal(err)
 		}
 	}
@@ -754,7 +753,7 @@ func main() {
 
 	// Start audio capture and streaming unless disabled.
 	if !*noAudio && session.HasAudio() {
-		audioCapture, err := airplay.StartAudioCaptureWithSource(ctx, *testMode, session.AudioCodec(), airplay.AudioSource(audioSink))
+		audioCapture, err := airplay.StartAudioCaptureWithSource(ctx, *testMode, session.AudioCodec(), airplay.AudioSource(*audioSource))
 		if err != nil {
 			log.Printf("warning: audio capture failed: %v (continuing without audio)", err)
 		} else {
