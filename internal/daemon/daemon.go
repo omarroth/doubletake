@@ -1522,7 +1522,8 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	}
 	// Attach only after SETUP succeeds. This avoids buffering encoded data for a
 	// receiver which is still pairing, prompting, or negotiating its media ports.
-	sink := broadcast.AddSink()
+	_, videoLead, audioLead := session.PlayoutTiming()
+	sink := broadcast.AddSinkWithPlayoutLead(videoLead)
 	current.state = StateStreaming
 	current.session = session
 	current.client = client
@@ -1543,7 +1544,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	var audioDone chan error
 	if !d.cfg.NoAudio && session.HasAudio() {
 		var audioErr error
-		audioCapture, audioErr = d.audioCapture.Acquire(ctx, d.cfg.TestMode, session.AudioCodec(), d.cfg.AudioSource)
+		audioCapture, audioErr = d.audioCapture.AcquireWithPlayoutLead(ctx, d.cfg.TestMode, session.AudioCodec(), d.cfg.AudioSource, audioLead)
 		if audioErr != nil {
 			log.Printf("[daemon] audio capture failed: %v (continuing without audio)", audioErr)
 		} else {
@@ -1552,7 +1553,7 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 				defer audioCapture.Stop()
 				aerr := session.StreamAudio(ctx, audioCapture, session.AudioStream())
 				if aerr != nil && ctx.Err() == nil {
-					log.Printf("[daemon] audio streaming error: %v", aerr)
+					log.Printf("[daemon] audio streaming error for %s: %v", target, aerr)
 				}
 				audioDone <- aerr
 			}()
@@ -1645,7 +1646,7 @@ func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, devic
 		return err
 	}
 	defer session.Close()
-	capture, err := d.audioCapture.Acquire(ctx, d.cfg.TestMode, airplay.AudioCodecALAC, d.cfg.AudioSource)
+	capture, err := d.audioCapture.AcquireWithPlayoutLead(ctx, d.cfg.TestMode, airplay.AudioCodecALAC, d.cfg.AudioSource, session.PlayoutLatency())
 	if err != nil {
 		return fmt.Errorf("audio-only capture: %w", err)
 	}

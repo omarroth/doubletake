@@ -19,12 +19,10 @@ const (
 	// metadata; it is deliberately generous for normal H.264 buffer cadence.
 	broadcastSinkQueueChunks = 4096
 
-	// Shared encoded fan-out needs room for scheduler and transport bursts: a
-	// quarter second of nominal samples, independent of the 67 ms raw-frame
-	// queue. Encoded reference pictures cannot be dropped to catch up, so a
-	// sustained backlog disconnects only that receiver instead. Byte and chunk
-	// bounds still cap memory independently; single-target handoff still waits
-	// with just one pending AU.
+	// Shared encoded fan-out needs at least a quarter second of nominal samples
+	// for scheduler and transport bursts. Encoded reference pictures cannot be
+	// dropped to catch up, so a sustained backlog disconnects only that receiver.
+	// Byte and chunk bounds cap memory independently of each receiver's lead.
 	broadcastSinkFrameQueueDuration = 250 * time.Millisecond
 
 	// Source shutdown normally races with consumers draining their last few
@@ -154,7 +152,14 @@ func NewBroadcastCaptureWithFrameRate(src *ScreenCapture, fps int) *BroadcastCap
 // returning an already-finished sink, preserving the no-cross-target-stall
 // invariant even if a caller accidentally mixes the two modes.
 func (bc *BroadcastCapture) AddSink() *BroadcastSink {
+	return bc.AddSinkWithPlayoutLead(0)
+}
+
+// AddSinkWithPlayoutLead allows this receiver to queue encoded pictures up to
+// its negotiated lead, subject to the shared relay's memory and time limits.
+func (bc *BroadcastCapture) AddSinkWithPlayoutLead(playoutLead time.Duration) *BroadcastSink {
 	s := newBroadcastSinkWithPolicy(bc, false)
+	s.maxFrameQueueDuration = sharedQueueBudget(broadcastSinkFrameQueueDuration, playoutLead)
 	bc.mu.Lock()
 	if bc.stopped || bc.exclusive {
 		bc.mu.Unlock()

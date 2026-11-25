@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 )
 
 var errSharedAudioBacklog = errors.New("shared audio receiver backlog exceeded")
@@ -29,9 +30,10 @@ type sharedAudioSink struct {
 	done   chan struct{}
 }
 
-func newSharedAudioSink(codec AudioCodec) *sharedAudioSink {
+func newSharedAudioSink(codec AudioCodec, playoutLead time.Duration) *sharedAudioSink {
 	_, spf, _, _, _, _ := codec.Info()
-	s := &sharedAudioSink{limit: int(audioCaptureStallBuffer/audioSamplesDuration(uint64(spf))) + 1, done: make(chan struct{})}
+	budget := sharedQueueBudget(audioCaptureStallBuffer, playoutLead)
+	s := &sharedAudioSink{limit: int(budget/audioSamplesDuration(uint64(spf))) + 1, done: make(chan struct{})}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -227,6 +229,11 @@ func (h *SharedAudioCapture) PreferredCodec() AudioCodec {
 }
 
 func (h *SharedAudioCapture) Acquire(ctx context.Context, testTone bool, codec AudioCodec, route AudioSource) (*AudioCapture, error) {
+	return h.AcquireWithPlayoutLead(ctx, testTone, codec, route, 0)
+}
+
+// AcquireWithPlayoutLead sizes this receiver's queue using its negotiated lead.
+func (h *SharedAudioCapture) AcquireWithPlayoutLead(ctx context.Context, testTone bool, codec AudioCodec, route AudioSource, playoutLead time.Duration) (*AudioCapture, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -276,7 +283,7 @@ func (h *SharedAudioCapture) Acquire(ctx context.Context, testTone bool, codec A
 		go h.run(gen)
 	}
 	gen.codecs[codec] = group
-	sink := newSharedAudioSink(codec)
+	sink := newSharedAudioSink(codec, playoutLead)
 	group.sinks[sink] = struct{}{}
 	gen.users++
 	capture := &AudioCapture{codec: codec, encodedFrames: sink, outputVolume: gen.source.outputVolume}

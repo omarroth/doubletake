@@ -254,6 +254,23 @@ func TestBroadcastSinkRejectsFrameAtExactDurationThreshold(t *testing.T) {
 	}
 }
 
+func TestBroadcastSinkWithLongerPlayoutLeadPreservesFrameOrder(t *testing.T) {
+	broadcast := NewBroadcastCaptureWithFrameRate(nil, 30)
+	sink := broadcast.AddSinkWithPlayoutLead(2 * time.Second)
+	defer sink.Close()
+	for i := range 45 {
+		if err := sink.enqueueFrame(VideoAccessUnit{AnnexB: []byte{byte(i)}}); err != nil {
+			t.Fatalf("receiver with longer lead could not queue frame %d: %v", i, err)
+		}
+	}
+	for i := range 45 {
+		frame, err := sink.ReadVideoAccessUnit()
+		if err != nil || len(frame.AnnexB) != 1 || frame.AnnexB[0] != byte(i) {
+			t.Fatalf("read frame %d = %x, %v", i, frame.AnnexB, err)
+		}
+	}
+}
+
 func TestBroadcastSinkFrameQueueRetainsByteAndChunkLimits(t *testing.T) {
 	for _, test := range []struct {
 		name                string

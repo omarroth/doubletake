@@ -235,3 +235,13 @@ func SharedPlayoutLatency() time.Duration {
 	}
 	return audioCaptureStallBuffer
 }
+
+// sharedQueueBudget lets a receiver absorb a sender stall within its existing
+// playout lead, without adding latency or allowing an unbounded backlog.
+func sharedQueueBudget(minimum, lead time.Duration) time.Duration {
+	budget := max(minimum, lead)
+	if budget > 2*time.Second {
+		return 2 * time.Second
+	}
+	return budget
+}

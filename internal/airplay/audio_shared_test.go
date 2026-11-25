@@ -148,6 +148,11 @@ func TestSharedAudioEncodesOnePayloadForMultipleReceivers(t *testing.T) {
 func TestSharedAudioSlowReceiverCannotStallPeers(t *testing.T) {
 	h, input, _ := newSharedAudioTestHub(t)
 	slow, fast := acquireSharedTestCapture(t, h), acquireSharedTestCapture(t, h)
+	delayed, err := h.AcquireWithPlayoutLead(context.Background(), true, AudioCodecALAC, AudioSourceOutput, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delayed.Stop()
 	base := time.Now()
 	for i := range 100 {
 		(*input).frames <- audioPCMFramePosition{PTS: base.Add(audioSamplesDuration(uint64(i * 352))), SourceRTP: uint32(i * 352), HasSourceRTP: true}
@@ -157,6 +162,13 @@ func TestSharedAudioSlowReceiverCannotStallPeers(t *testing.T) {
 	}
 	if _, _, err := slow.readFramePosition(make([]byte, 8192)); !errors.Is(err, errSharedAudioBacklog) {
 		t.Fatalf("slow receiver = %v, want backlog error", err)
+	}
+	buffer := make([]byte, 8192)
+	for i := range 100 {
+		_, position, err := delayed.readFramePosition(buffer)
+		if want := uint32(i * 352); err != nil || position.SourceRTP != want {
+			t.Fatalf("receiver with longer lead lost frame %d: position=%+v err=%v", i, position, err)
+		}
 	}
 	select {
 	case <-(*input).done:
