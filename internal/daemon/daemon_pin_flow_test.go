@@ -175,7 +175,7 @@ func TestModernPasswordAndPINFlagsUseTransientPairingWithoutStartingDisplay(t *t
 		"name":        "Password TV",
 		"model":       "AppleTV-Test",
 		"deviceID":    "00:11:22:33:44:66",
-		"features":    uint64(airplay.FeatureSystemPairing | airplay.FeatureTransientPairing | uint64(1<<38) | uint64(1<<46)),
+		"features":    airplay.FeatureScreen | airplay.FeatureSystemPairing | airplay.FeatureTransientPairing | 1<<38 | 1<<46,
 		"statusFlags": uint64(0x280), // configured password and on-screen PIN
 	}, plist.BinaryFormat)
 	if err != nil {

@@ -60,7 +60,9 @@ func OpenAirPlay2Audio(ctx context.Context, device AirPlayDevice, cfg AudioOnlyC
 		client.pairType = pairingTypeLegacy
 		err = client.PairVerify(ctx)
 	} else {
-		if !info.SupportsTransientPairing() || info.RequiresPINPairing() || info.RequiresPassword() {
+		// A configured playback password can be a Digest credential. Only
+		// requirements for persistent pair-setup rule out this transient path.
+		if !info.SupportsTransientPairing() || info.RequiredPairingCredential() != PairingCredentialNone {
 			return nil, errors.New("AirPlay 2 audio receiver requires persistent media pairing")
 		}
 		err = client.pairAudioTransient(ctx)
@@ -295,6 +297,25 @@ func (d AirPlayDevice) AudioOnlyPort() int {
 
 func (d AirPlayDevice) UsesAudioOnly() bool {
 	return d.SupportsAirPlay2Audio() && !d.SupportsScreen() || d.UsesClassicRAOP()
+}
+
+// AudioOnlyEndpoint identifies a realtime AirPlay 2 speaker from a connected
+// receiver's /info response, including when it was addressed without discovery.
+func (c *AirPlayClient) AudioOnlyEndpoint() (AirPlayDevice, bool) {
+	if c.info == nil {
+		return AirPlayDevice{}, false
+	}
+	device := AirPlayDevice{
+		IP:            c.sessionPeerHost(),
+		Port:          c.port,
+		Name:          c.info.Name,
+		DeviceID:      c.info.DeviceID,
+		Features:      c.info.Features,
+		FeaturesEx:    c.info.FeaturesEx,
+		Flags:         c.info.StatusFlags,
+		SourceVersion: c.info.SourceVersion,
+	}
+	return device, device.SupportsAirPlay2Audio() && !device.SupportsScreen()
 }
 
 func OpenAudioOnly(ctx context.Context, device AirPlayDevice, cfg AudioOnlyConfig, store *CredentialStore, expectedID string) (*AudioOnlySession, error) {

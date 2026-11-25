@@ -301,29 +301,32 @@ func main() {
 		advertisement = device
 	}
 
-	if advertisement != nil && (*noVideo || advertisement.UsesAudioOnly()) {
+	runAudioOnly := func(device airplay.AirPlayDevice) {
 		if *videoSource != "" {
 			log.Fatal("the selected receiver supports audio only")
 		}
-		if advertisement.AudioOnlyPort() == 0 {
-			log.Fatalf("%s does not advertise a supported audio-only endpoint", advertisement.Name)
+		if device.AudioOnlyPort() == 0 {
+			log.Fatalf("%s does not advertise a supported audio-only endpoint", device.Name)
 		}
 		if *noAudio || *forcePair {
 			log.Fatal("direct audio requires audio enabled and does not support forced pairing")
 		}
-		host := advertisement.IP
-		if !advertisement.SupportsAirPlay2Audio() {
-			host = advertisement.RAOP.IP
+		host := device.IP
+		if !device.SupportsAirPlay2Audio() {
+			host = device.RAOP.IP
 		}
-		fmt.Printf("selected: %s (%s)\n", advertisement.Name, net.JoinHostPort(host, strconv.Itoa(advertisement.AudioOnlyPort())))
+		fmt.Printf("selected: %s (%s)\n", device.Name, net.JoinHostPort(host, strconv.Itoa(device.AudioOnlyPort())))
 		store, err := newCredentialStore(*credBackend, *credFile)
 		if err != nil {
 			log.Fatalf("failed to load credentials: %v", err)
 		}
 		config := airplay.AudioOnlyConfig{Password: credential, PortMin: portMin, PortMax: portMax}
-		if err := streamAudioOnly(ctx, *advertisement, config, *testMode, airplay.AudioSource(audioSink), store, *expectedDeviceID); err != nil && ctx.Err() == nil {
+		if err := streamAudioOnly(ctx, device, config, *testMode, airplay.AudioSource(audioSink), store, *expectedDeviceID); err != nil && ctx.Err() == nil {
 			log.Fatal(err)
 		}
+	}
+	if advertisement != nil && (*noVideo || advertisement.UsesAudioOnly()) {
+		runAudioOnly(*advertisement)
 		return
 	}
 
@@ -349,6 +352,14 @@ func main() {
 	info, err := client.GetInfo()
 	if err != nil {
 		log.Fatalf("get info failed: %v", err)
+	}
+	if device, audioOnly := client.AudioOnlyEndpoint(); audioOnly {
+		if advertisement != nil && advertisement.DeviceID != "" {
+			device.DeviceID = advertisement.DeviceID
+		}
+		_ = client.Close()
+		runAudioOnly(device)
+		return
 	}
 	if info.InitialVolumeKnown {
 		log.Printf("connected to: %s (model: %s, initialVolume: %.1f dB, volumeControlType: %d)", info.Name, info.Model, info.InitialVolume, info.VolumeControlType)

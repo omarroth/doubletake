@@ -1057,13 +1057,20 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	if suppliedCredential != "" {
 		credential = suppliedCredential
 	}
-	if audioDevice != nil {
-		err := d.streamAudioOnly(ctx, entry, *audioDevice, credential, expectedDeviceID)
+	streamAudio := func(device airplay.AirPlayDevice) {
+		if entry.mediaSource != "" {
+			removeStream("the selected receiver supports audio only")
+			return
+		}
+		err := d.streamAudioOnly(ctx, entry, device, credential, expectedDeviceID)
 		if err != nil && ctx.Err() == nil {
 			removeStream(err.Error())
 		} else {
 			removeStream("")
 		}
+	}
+	if audioDevice != nil {
+		streamAudio(*audioDevice)
 		return
 	}
 	connectClient := func() (*airplay.AirPlayClient, *airplay.ReceiverInfo, error) {
@@ -1129,6 +1136,11 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 			}
 		}
 		d.mu.Unlock()
+	}
+	if device, audioOnly := client.AudioOnlyEndpoint(); audioOnly {
+		_ = client.Close()
+		streamAudio(device)
+		return
 	}
 	if expectedDeviceID == "" {
 		log.Printf("[daemon] warning: no device_id for %s and none discovered; a device there naming itself as a new receiver would be paired with from scratch", target)
@@ -1599,7 +1611,7 @@ func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, devic
 	}
 	config := airplay.AudioOnlyConfig{Password: credential, PortMin: d.cfg.PortMin, PortMax: d.cfg.PortMax}
 	d.mu.Lock()
-	if d.streams[device.IP] != entry {
+	if d.streams[entry.deviceIP] != entry {
 		d.mu.Unlock()
 		return context.Canceled
 	}
@@ -1615,7 +1627,7 @@ func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, devic
 	session, err := airplay.OpenAudioOnly(ctx, device, config, d.credStore, expectedID)
 	if errors.Is(err, airplay.ErrCredentialsRequired) && credential == "" {
 		d.mu.Lock()
-		if d.streams[device.IP] != entry {
+		if d.streams[entry.deviceIP] != entry {
 			d.mu.Unlock()
 			return context.Canceled
 		}
@@ -1640,7 +1652,7 @@ func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, devic
 	defer capture.Stop()
 
 	d.mu.Lock()
-	if d.streams[device.IP] != entry {
+	if d.streams[entry.deviceIP] != entry {
 		d.mu.Unlock()
 		return context.Canceled
 	}

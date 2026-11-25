@@ -113,6 +113,10 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 	}
 	defer d.Shutdown()
 	d.devices = devices
+	if !classic && !mirror {
+		// Connect to the AirPlay 2 speaker by address, without a discovery entry.
+		d.devices = devices[:1]
+	}
 
 	wait := func(label string, condition func() bool) {
 		t.Helper()
@@ -131,7 +135,11 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 	connect := func(index int, code string) {
 		t.Helper()
 		device := devices[index]
-		reply := d.handleConnect(Request{Target: device.IP, DeviceID: device.DeviceID, Pin: code})
+		req := Request{Target: device.IP, DeviceID: device.DeviceID, Pin: code}
+		if index == 1 && !classic && !mirror {
+			req.Port = device.Port
+		}
+		reply := d.handleConnect(req)
 		if !reply.OK {
 			t.Fatalf("connect receiver %d: %+v", index, reply)
 		}

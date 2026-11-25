@@ -217,9 +217,10 @@ Mirroring sessions default to 250 ms of playout lead.
 HomePods and other compatible AirPlay speakers can stream audio without screen
 capture. Choose one from interactive discovery, or use
 `doubletake ctl devices` and connect several in daemon mode. Start the daemon
-with `-no-video` to request audio-only playback on all connections. With a direct
-`-target`, `-no-video` looks up the audio endpoint via mDNS. doubletake prefers
-realtime AirPlay 2 audio and shares one PTP clock across compatible speakers.
+with `-no-video` to request audio-only playback on all connections. A direct
+`-target` can also identify an AirPlay 2 speaker. With `-no-video`, doubletake
+looks up the audio endpoint via mDNS. It prefers realtime AirPlay 2 audio and
+shares one PTP clock across compatible speakers.
 Speakers that offer classic RAOP can also use that transport. Direct audio
 defaults to a 2-second playout lead. Start a speaker before a mirror to let the
 mirror inherit the speaker's lead. Use `-target-latency-ms` to set a common lead

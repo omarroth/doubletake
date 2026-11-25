@@ -79,3 +79,24 @@ func TestAirPlay2RealtimeAudioHeadless(t *testing.T) {
 		}
 	}
 }
+
+func TestAirPlay2AudioUsesConfiguredDigestPassword(t *testing.T) {
+	server, client, ctx := newReceiverServerTestPair(t, ReceiverConfig{
+		RealtimeAudio: true, Auth: ReceiverAuthDigest, Code: "fixture-password",
+	})
+	device, ok := client.AudioOnlyEndpoint()
+	if !ok || device.Port != server.Addr().(*net.TCPAddr).Port || !device.SupportsAirPlay2Audio() {
+		t.Fatal("/info did not identify the audio-only endpoint")
+	}
+	if _, err := OpenAudioOnly(ctx, device, AudioOnlyConfig{}, nil, device.DeviceID); !errors.Is(err, ErrCredentialsRequired) {
+		t.Fatalf("AirPlay 2 without password = %v, want Digest challenge", err)
+	}
+	session, err := OpenAudioOnly(ctx, device, AudioOnlyConfig{Password: "fixture-password"}, nil, device.DeviceID)
+	if err != nil {
+		t.Fatalf("AirPlay 2 with configured password: %v", err)
+	}
+	defer session.Close()
+	if !session.airPlay2 || server.Stats().PairVerify != 0 {
+		t.Fatal("configured password did not use transient AirPlay 2 audio pairing")
+	}
+}
