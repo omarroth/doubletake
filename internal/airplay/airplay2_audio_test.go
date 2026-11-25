@@ -18,11 +18,28 @@ func TestAirPlay2RealtimeAudioHeadless(t *testing.T) {
 	if exec.Command("gst-inspect-1.0", "avdec_alac").Run() != nil && exec.Command("gst-inspect-1.0", "alacdec").Run() != nil {
 		t.Skip("requires GStreamer ALAC decoding")
 	}
+	t.Run("NTP", func(t *testing.T) { testAirPlay2RealtimeAudioHeadless(t, false) })
+	t.Run("NTP after PTP bind failure", func(t *testing.T) { testAirPlay2RealtimeAudioHeadless(t, true) })
+}
+
+func testAirPlay2RealtimeAudioHeadless(t *testing.T, failPTPBind bool) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	receiver, err := NewReceiverServer(ReceiverConfig{
+	receiverConfig := ReceiverConfig{
 		ListenAddress: "127.0.0.1:0", RealtimeAudio: true, DecodeMedia: true, AudioDropEvery: 13,
-	})
+	}
+	var audioConfig AudioOnlyConfig
+	ptpBindAttempts := 0
+	if failPTPBind {
+		receiverConfig.AcceptNTPFallback = true
+		receiverConfig.realtimePTPStart = func(uint64) error { return errors.New("unexpected SETPEERS") }
+		audioConfig.ptpPool = &ptpClockPool{bind: func() (*net.UDPConn, *net.UDPConn, error) {
+			ptpBindAttempts++
+			return nil, nil, errors.New("test PTP port bind failure")
+		}}
+	}
+	receiver, err := NewReceiverServer(receiverConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,11 +53,17 @@ func TestAirPlay2RealtimeAudioHeadless(t *testing.T) {
 	if !device.UsesAudioOnly() {
 		t.Fatal("realtime media endpoint must be selected as audio-only")
 	}
-	session, err := OpenAudioOnly(ctx, device, AudioOnlyConfig{}, nil, device.DeviceID)
+	session, err := OpenAudioOnly(ctx, device, audioConfig, nil, device.DeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer session.Close()
+	if !session.airPlay2 || session.playback.timingProtocol != timingProtocolNTP {
+		t.Fatalf("expected AirPlay 2 with NTP, got AirPlay 2=%t timing=%q", session.airPlay2, session.playback.timingProtocol)
+	}
+	if failPTPBind && ptpBindAttempts != 1 {
+		t.Fatalf("expected one PTP bind attempt, got %d", ptpBindAttempts)
+	}
 	if err := session.matchOutputVolume(-10); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +84,8 @@ func TestAirPlay2RealtimeAudioHeadless(t *testing.T) {
 		if stats.Playback.AudioPlayedSamples >= 12*352 && stats.Playback.AudioRecovered > 0 && stats.FeedbackRequests > 0 {
 			if stats.PairSetup != 2 || stats.PairVerify != 0 || stats.SetupRequests != 2 ||
 				stats.EventConnections != 1 || stats.VideoConnections != 0 || stats.ParameterRequests != 1 ||
-				stats.Playback.AudioPeak == 0 || stats.Playback.AudioCryptoErrors != 0 || stats.Playback.DecodeErrors != 0 {
+				stats.TimingReplies < 3 || stats.Playback.AudioPeak == 0 ||
+				stats.Playback.AudioCryptoErrors != 0 || stats.Playback.DecodeErrors != 0 {
 				t.Fatalf("invalid realtime audio playback: %+v", stats)
 			}
 			stopAudio()

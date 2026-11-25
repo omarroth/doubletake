@@ -111,7 +111,7 @@ func (pool *ptpClockPool) acquire(peer netip.Addr) (*sharedPTPClock, func(), err
 		}
 		event, general, err := pool.bind()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("%w: %w", errAudioPTPUnavailable, err)
 		}
 		eventPort, generalPort := pool.peerEventPort, pool.peerGeneralPort
 		if eventPort == 0 {

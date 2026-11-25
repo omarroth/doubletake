@@ -230,10 +230,10 @@ AirPlay 2 uses transient pairing or saved HomeKit credentials. Speakers that
 require a new persistent pairing cannot be enrolled in audio-only mode yet.
 
 Direct AirPlay 2 PTP audio binds UDP ports 319 and 320 independently of
-`-port-range`. If those ports are unavailable, doubletake can use a separately
-advertised classic RAOP endpoint when the receiver's pairing requirements
-allow it. On Linux systems that restrict access to these ports, grant the
-binary permission to bind them with
+`-port-range`. If it cannot bind them, doubletake tries AirPlay 2 with NTP.
+If the receiver rejects that setup, doubletake can try its advertised classic
+RAOP endpoint. On Linux systems that restrict access to these ports, enable
+PTP with
 `sudo setcap cap_net_bind_service=+ep "$(realpath ./bin/doubletake)"`.
 
 Classic RAOP supports clear or RSA-wrapped audio and Digest passwords.

@@ -232,18 +232,23 @@ func TestAirPlay2PTPUnavailableFallsBackToAdvertisedClassicAudio(t *testing.T) {
 			return nil, nil, errors.New("test PTP port bind failure")
 		}},
 	}
-	if session, err := OpenAudioOnly(ctx, device, cfg, store, device.DeviceID); !errors.Is(err, errAudioPTPUnavailable) {
+	session, err := OpenAudioOnly(ctx, device, cfg, store, device.DeviceID)
+	var status *HTTPStatusError
+	if !errors.Is(err, errAudioPTPUnavailable) || !errors.As(err, &status) || status.StatusCode != 400 {
 		if session != nil {
 			session.Close()
 		}
-		t.Fatalf("expected the PTP bind error without classic advertisement, got %v", err)
+		t.Fatalf("expected PTP bind failure and NTP rejection without classic advertisement, got %v", err)
 	}
 	device.RAOP = classic.RAOPDevice().RAOP
-	session, err := OpenAudioOnly(ctx, device, cfg, store, device.DeviceID)
+	session, err = OpenAudioOnly(ctx, device, cfg, store, device.DeviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer session.Close()
+	if stats := realtime.Stats(); stats.SetupRequests != 2 || stats.RecordRequests != 0 {
+		t.Fatalf("expected an NTP SETUP rejection on each AirPlay 2 connection: %+v", stats)
+	}
 	if stats := classic.Stats(); stats.RecordRequests != 1 {
 		t.Fatalf("classic receiver did not start playback: %+v", stats)
 	}

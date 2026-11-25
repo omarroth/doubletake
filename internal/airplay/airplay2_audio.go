@@ -17,8 +17,8 @@ const featureUnifiedMedia uint = 38
 
 var errAudioPTPUnavailable = errors.New("AirPlay 2 media PTP clock unavailable")
 
-// OpenAirPlay2Audio opens encrypted realtime audio (stream type 96) on
-// the receiver's advertised network clock.
+// OpenAirPlay2Audio opens encrypted realtime audio (stream type 96),
+// preferring PTP on receivers that advertise it.
 func OpenAirPlay2Audio(ctx context.Context, device AirPlayDevice, cfg AudioOnlyConfig, store *CredentialStore, expectedID string) (*AudioOnlySession, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -79,21 +79,28 @@ func OpenAirPlay2Audio(ctx context.Context, device AirPlayDevice, cfg AudioOnlyC
 	timingProtocol, clockAt := timingProtocolNTP, wallAudioClock
 	var clock *sharedPTPClock
 	var releaseClock func()
+	var ptpBindErr error
 	if info.HasFeature(featurePTP) && supportsPTPSourceVersion(info.SourceVersion) {
 		pool := cfg.ptpPool
 		if pool == nil {
 			pool = &directAudioPTP
 		}
 		clock, releaseClock, err = pool.acquire(peer.AddrPort().Addr().Unmap())
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", errAudioPTPUnavailable, err)
+		switch {
+		case errors.Is(err, errAudioPTPUnavailable):
+			// No timing has been negotiated yet, so use the authenticated session for NTP.
+			ptpBindErr = err
+			log.Printf("[AUDIO] %v, trying AirPlay 2 with NTP", err)
+		case err != nil:
+			return nil, fmt.Errorf("initialize AirPlay 2 PTP clock: %w", err)
+		default:
+			defer func() {
+				if !ready {
+					releaseClock()
+				}
+			}()
+			timingProtocol, clockAt = timingProtocolPTP, clock.mediaTimeAt
 		}
-		defer func() {
-			if !ready {
-				releaseClock()
-			}
-		}()
-		timingProtocol, clockAt = timingProtocolPTP, clock.mediaTimeAt
 	}
 
 	ports, err := allocateConsecutiveUDPPortsInRange(3, cfg.PortMin, cfg.PortMax)
@@ -155,7 +162,7 @@ func OpenAirPlay2Audio(ctx context.Context, device AirPlayDevice, cfg AudioOnlyC
 		request["timingPeerInfo"] = timingPeer
 		request["timingPeerList"] = []any{timingPeer}
 	}
-	session, err := client.setupDirectAudio(uri, request)
+	session, err := client.setupDirectAudio(uri, request, ptpBindErr)
 	if err != nil {
 		return nil, fmt.Errorf("AirPlay 2 audio session SETUP: %w", err)
 	}
@@ -198,7 +205,7 @@ func OpenAirPlay2Audio(ctx context.Context, device AirPlayDevice, cfg AudioOnlyC
 		"latencyMin": min(int(samples), audioSampleRate/4), "latencyMax": samples,
 		"supportsDynamicStreamID": false,
 	}
-	replies, err := client.setupDirectAudio(uri, map[string]any{"streams": []any{descriptor}})
+	replies, err := client.setupDirectAudio(uri, map[string]any{"streams": []any{descriptor}}, ptpBindErr)
 	if err != nil {
 		return nil, fmt.Errorf("AirPlay 2 audio stream SETUP: %w", err)
 	}
@@ -258,13 +265,20 @@ func OpenAirPlay2Audio(ctx context.Context, device AirPlayDevice, cfg AudioOnlyC
 	}, nil
 }
 
-func (c *AirPlayClient) setupDirectAudio(uri string, request map[string]any) (map[string]any, error) {
+func (c *AirPlayClient) setupDirectAudio(uri string, request map[string]any, ptpBindErr error) (map[string]any, error) {
 	body, err := plist.Marshal(request, plist.BinaryFormat)
 	if err != nil {
 		return nil, err
 	}
 	body, _, err = c.rtspRequest("SETUP", uri, "application/x-apple-binary-plist", body, nil)
 	if err != nil {
+		var status *HTTPStatusError
+		if ptpBindErr != nil && errors.As(err, &status) {
+			switch status.StatusCode {
+			case 400, 461, 551: // Bad Request, Unsupported Transport, Option Not Supported.
+				return nil, fmt.Errorf("NTP rejected after %w: %w", ptpBindErr, err)
+			}
+		}
 		return nil, err
 	}
 	var response map[string]any
@@ -324,10 +338,8 @@ func OpenAudioOnly(ctx context.Context, device AirPlayDevice, cfg AudioOnlyConfi
 		if !errors.Is(err, errAudioPTPUnavailable) || device.RAOP == nil {
 			return session, err
 		}
-		// A local bind failure can use the separately advertised classic
-		// endpoint. Pairing, negotiation, and synchronization failures do
-		// not trigger a protocol downgrade.
-		log.Printf("[AUDIO] %v; trying advertised classic RAOP endpoint", err)
+		// The receiver rejected NTP SETUP after a local PTP bind failure.
+		log.Printf("[AUDIO] %v, trying advertised classic RAOP endpoint", err)
 	}
 	if device.RAOP == nil {
 		return nil, errors.New("receiver does not advertise a supported audio-only endpoint")
