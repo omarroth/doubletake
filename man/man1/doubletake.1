@@ -106,10 +106,10 @@ Daemon mode uses a 250 ms budget for mirror sessions. Direct audio playback
 uses a 2-second audio lead. A nonzero value sets a common lead at startup,
 subject to the receiver's supported latency.
 .TP
-.B \-source \fISOURCE\fR
+.B \-video-source \fISOURCE\fR
 Play video and audio from a local file or a direct HTTP(S) media URL.
 Requires a GStreamer-enabled sender.
-Use \fB\-source \-\fR with \fB\-target\fR to
+Use \fB\-video-source \-\fR with \fB\-target\fR to
 read a streamable container from standard input. Pair first if an interactive
 PIN is required. Playback stops at the end of input. Use \fB\-no-audio\fR
 for video only.

@@ -134,7 +134,7 @@ func main() {
 	hwaccel := flag.String("hwaccel", "auto", "Encoder: auto, nvenc, vaapi, v4l2, openh264, none (x264/x265)")
 	videoCodec := flag.String("video-codec", "auto", "Screen codec: auto, h264, or hevc (auto selects the highest usable receiver mode)")
 	testMode := flag.Bool("test", false, "Use synthetic video instead of screen capture for debugging")
-	videoSource := flag.String("source", "", "Play media from a file, HTTP(S) URL, or - for stdin (requires a GStreamer build)")
+	videoSource := flag.String("video-source", "", "Play media from a file, HTTP(S) URL, or - for stdin (requires a GStreamer build)")
 	audioSource := flag.String("audio-source", string(airplay.DefaultAudioSource), "Desktop audio source: monitor (copy default output) or output (selectable doubletake output)")
 	noAudio := flag.Bool("no-audio", false, "Disable audio streaming")
 	noVideo := flag.Bool("no-video", false, "Stream audio only to a receiver with a supported audio endpoint")
@@ -161,11 +161,11 @@ func main() {
 			log.Fatal("use doubletake ctl play SOURCE [target] with daemon mode")
 		}
 		if *noVideo || *testMode || *x11WindowID != "" || *x11WindowName != "" {
-			log.Fatal("-source requires video and cannot be combined with -test or an X11 window selector")
+			log.Fatal("-video-source requires video and cannot be combined with -test or an X11 window selector")
 		}
 		if *videoSource == "-" {
 			if *target == "" {
-				log.Fatal("-source - requires -target because stdin carries video")
+				log.Fatal("-video-source - requires -target because stdin carries video")
 			}
 		} else {
 			path, err := airplay.ResolveMediaSource(*videoSource)

@@ -114,7 +114,7 @@ complete_line _doubletake 'doubletake -creds cred' doubletake -creds cred
 expect 'credentials with spaces.json'
 complete_line _doubletake_ctl 'doubletake-ctl -socket daemon' doubletake-ctl -socket daemon
 expect 'daemon socket'
-complete_line _doubletake 'doubletake -source clip' doubletake -source clip
+complete_line _doubletake 'doubletake -video-source clip' doubletake -video-source clip
 expect 'clip with spaces.mkv'
 complete_line _doubletake_ctl 'doubletake-ctl play clip' doubletake-ctl play clip
 expect 'clip with spaces.mkv'
