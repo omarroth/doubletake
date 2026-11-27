@@ -16,28 +16,45 @@ import (
 )
 
 func TestDaemonRAOPSharedAudioPlayout(t *testing.T) {
-	testSharedAudioPlayout(t, airplay.ReceiverProfileRAOP, false)
+	testSharedAudioPlayout(t, sharedAudioPlayoutCase{other: airplay.ReceiverProfileRAOP})
 }
 
 func TestDaemonRAOPAndMirrorSharedAudioPlayout(t *testing.T) {
 	if err := exec.Command("gst-inspect-1.0", "openh264enc").Run(); err != nil {
 		t.Skip("requires the OpenH264 encoder")
 	}
-	testSharedAudioPlayout(t, airplay.ReceiverProfileUxPlay, false)
+	t.Run("speaker first", func(t *testing.T) {
+		testSharedAudioPlayout(t, sharedAudioPlayoutCase{other: airplay.ReceiverProfileUxPlay})
+	})
+	t.Run("display first", func(t *testing.T) {
+		testSharedAudioPlayout(t, sharedAudioPlayoutCase{other: airplay.ReceiverProfileUxPlay, displayFirst: true})
+	})
 }
 
 func TestDaemonRAOPAndAirPlay2AudioSharedPlayout(t *testing.T) {
-	testSharedAudioPlayout(t, airplay.ReceiverProfileRoku, false)
+	testSharedAudioPlayout(t, sharedAudioPlayoutCase{other: airplay.ReceiverProfileRoku})
+}
+
+func TestDaemonAirPlay2SpeakerJoinsActiveMirror(t *testing.T) {
+	if err := exec.Command("gst-inspect-1.0", "openh264enc").Run(); err != nil {
+		t.Skip("requires the OpenH264 encoder")
+	}
+	testSharedAudioPlayout(t, sharedAudioPlayoutCase{other: airplay.ReceiverProfileUxPlay, displayFirst: true, airPlay2Speaker: true})
 }
 
 func TestDaemonNoVideoStreamsAudioToDisplayRAOPEndpoint(t *testing.T) {
-	testSharedAudioPlayout(t, airplay.ReceiverProfileRAOP, true)
+	testSharedAudioPlayout(t, sharedAudioPlayoutCase{other: airplay.ReceiverProfileRAOP, noVideo: true})
 }
 
-func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile, noVideo bool) {
+type sharedAudioPlayoutCase struct {
+	other                                  airplay.ReceiverProfile
+	noVideo, displayFirst, airPlay2Speaker bool
+}
+
+func testSharedAudioPlayout(t *testing.T, test sharedAudioPlayoutCase) {
 	t.Helper()
-	mirror := secondProfile == airplay.ReceiverProfileUxPlay
-	classic := secondProfile == airplay.ReceiverProfileRAOP
+	mirror := test.other == airplay.ReceiverProfileUxPlay
+	classic := test.other == airplay.ReceiverProfileRAOP
 	if err := exec.Command("gst-inspect-1.0", "rtponviftimestamp").Run(); err != nil {
 		t.Skip("requires GStreamer ONVIF audio timestamps")
 	}
@@ -70,8 +87,8 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 			},
 		}
 		if i == 1 {
-			cfg.Profile = secondProfile
-			switch secondProfile {
+			cfg.Profile = test.other
+			switch test.other {
 			case airplay.ReceiverProfileUxPlay:
 				cfg.DeviceID = "02:00:00:00:00:02"
 				cfg.DisplayWidth, cfg.DisplayHeight = 320, 180
@@ -81,6 +98,9 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 			default:
 				cfg.RealtimeAudio = true
 			}
+		} else if test.airPlay2Speaker {
+			cfg.Profile = airplay.ReceiverProfileRoku
+			cfg.RealtimeAudio = true
 		}
 		server, err := airplay.NewReceiverServer(cfg)
 		if err != nil {
@@ -89,24 +109,24 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 		defer server.Close()
 		go server.Serve(ctx)
 		receivers[i] = server
-		if i == 1 && !classic {
-			devices[i] = server.AirPlayDevice()
-		} else {
+		if cfg.Profile == airplay.ReceiverProfileRAOP {
 			devices[i] = server.RAOPDevice()
+		} else {
+			devices[i] = server.AirPlayDevice()
 		}
 		if i == 1 && classic {
 			// A dual-advertised speaker uses the RAOP service port.
 			devices[i].RAOPOnly = false
 			devices[i].Port = 7000
 			devices[i].Features = airplay.FeatureTransientPairing
-			if noVideo {
+			if test.noVideo {
 				devices[i].Features |= airplay.FeatureScreen
 			}
 		}
 	}
 	// Deliberately do not run background mDNS or start a desktop session.
 	d, err := New(Config{
-		CredFile: filepath.Join(t.TempDir(), "credentials.json"), TestMode: true, NoVideo: noVideo, FPS: 10, Bitrate: 500, HWAccel: "openh264",
+		CredFile: filepath.Join(t.TempDir(), "credentials.json"), TestMode: true, NoVideo: test.noVideo, FPS: 10, Bitrate: 500, HWAccel: "openh264",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -144,9 +164,13 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 			t.Fatalf("connect receiver %d: %+v", index, reply)
 		}
 	}
-	connect(0, "")
-	wait("first receiver started", func() bool { return receivers[0].Stats().AudioPackets > 10 })
-	connect(1, "")
+	first, second := 0, 1
+	if test.displayFirst {
+		first, second = second, first
+	}
+	connect(first, "")
+	wait("first receiver started", func() bool { return receivers[first].Stats().AudioPackets > 10 })
+	connect(second, "")
 	if classic {
 		wait("second receiver requests Digest password", func() bool {
 			status := d.handleStatus()
@@ -173,14 +197,18 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 	if status.SharedAudio.Sources != 1 || status.SharedAudio.Encoders != 1 || status.VideoEncoders != wantVideoEncoders || len(status.Streams) != 2 {
 		t.Fatalf("capture/encoder sharing: %+v", status)
 	}
+	wantLead := int64(2000)
+	if test.displayFirst {
+		wantLead = 250
+	}
 	for i, entry := range status.Streams {
 		protocol, videoLead := "raop", int64(0)
 		if i == 1 && mirror {
-			protocol, videoLead = "airplay-mirror", 2000
-		} else if i == 1 && !classic {
+			protocol, videoLead = "airplay-mirror", wantLead
+		} else if devices[i].SupportsAirPlay2Audio() {
 			protocol = "airplay2-audio"
 		}
-		if entry.AudioOnly != (videoLead == 0) || !entry.HasAudio || entry.AudioLeadMS != 2000 || entry.VideoLeadMS != videoLead ||
+		if entry.AudioOnly != (videoLead == 0) || !entry.HasAudio || entry.AudioLeadMS != wantLead || entry.VideoLeadMS != videoLead ||
 			entry.Protocol != protocol || entry.TimingProtocol != "NTP" || entry.State != StateStreaming {
 			t.Fatalf("unexpected stream status: %+v", entry)
 		}
@@ -188,7 +216,7 @@ func testSharedAudioPlayout(t *testing.T, secondProfile airplay.ReceiverProfile,
 	for i, server := range receivers {
 		stats := server.Stats()
 		playback := stats.Playback
-		if (i == 0 || classic) && stats.TimingReplies != 3 ||
+		if (i == 0 && !test.airPlay2Speaker || classic) && stats.TimingReplies != 3 ||
 			(i == 0 || !mirror) && stats.VideoPackets != 0 ||
 			i == 1 && mirror && playback.VideoPlayed == 0 ||
 			playback.AudioPeak == 0 || playback.AudioMissingSamples != 0 || playback.AudioLost != 0 ||

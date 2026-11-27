@@ -139,15 +139,10 @@ type Config struct {
 
 func (d *Daemon) mirrorStreamConfig(mediaSource string) airplay.StreamConfig {
 	lead := d.playoutLatency
-	if mediaSource == "" && !d.cfg.NoAudio && !airplay.HasExplicitTargetLatency() {
+	if mediaSource == "" {
 		d.mu.Lock()
-		for _, room := range d.streams {
-			if room.audioOnly != nil {
-				if speakerLead := room.audioOnly.PlayoutLatency(); speakerLead <= 2*time.Second {
-					lead = max(lead, speakerLead)
-				}
-				break
-			}
+		if active := d.livePlayoutLeadLocked(); active > 0 {
+			lead = active
 		}
 		d.mu.Unlock()
 	}
@@ -163,6 +158,33 @@ func (d *Daemon) mirrorStreamConfig(mediaSource string) airplay.StreamConfig {
 		PortMin:             d.cfg.PortMin,
 		PortMax:             d.cfg.PortMax,
 	}
+}
+
+// livePlayoutLeadLocked returns the established lead of the shared desktop
+// streams. File playback has its own timeline. The caller holds d.mu.
+func (d *Daemon) livePlayoutLeadLocked() time.Duration {
+	for _, room := range d.streams {
+		if room.mediaSource != "" {
+			continue
+		}
+		if room.audioOnly != nil {
+			return room.audioOnly.PlayoutLatency()
+		}
+		if room.session != nil {
+			_, videoLead, _ := room.session.PlayoutTiming()
+			return videoLead
+		}
+	}
+	return 0
+}
+
+// Check again before publishing a stream in case another negotiation
+// completed concurrently. Audio's RTP sample units can introduce rounding.
+func (d *Daemon) checkLivePlayoutLeadLocked(lead time.Duration) error {
+	if active := d.livePlayoutLeadLocked(); active > 0 && (active-lead).Abs() >= time.Millisecond {
+		return fmt.Errorf("active streams use %v of playout lead, new stream negotiated %v. Retry the connection", active, lead)
+	}
+	return nil
 }
 
 func validatePortRange(portMin, portMax int) error {
@@ -1523,6 +1545,12 @@ func (d *Daemon) connectAndStream(ctx context.Context, entry *activeStream, targ
 	// Attach only after SETUP succeeds. This avoids buffering encoded data for a
 	// receiver which is still pairing, prompting, or negotiating its media ports.
 	_, videoLead, audioLead := session.PlayoutTiming()
+	if err := d.checkLivePlayoutLeadLocked(videoLead); err != nil {
+		d.mu.Unlock()
+		_ = session.Close()
+		removeStream(err.Error())
+		return
+	}
 	sink := broadcast.AddSinkWithPlayoutLead(videoLead)
 	current.state = StateStreaming
 	current.session = session
@@ -1617,12 +1645,7 @@ func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, devic
 		return context.Canceled
 	}
 	entry.device, entry.deviceID = device.Name, device.DeviceID
-	for _, destination := range d.streams {
-		if destination.audioOnly != nil {
-			config.PlayoutLatency = destination.audioOnly.PlayoutLatency()
-			break
-		}
-	}
+	config.PlayoutLatency = d.livePlayoutLeadLocked()
 	d.mu.Unlock()
 
 	session, err := airplay.OpenAudioOnly(ctx, device, config, d.credStore, expectedID)
@@ -1657,16 +1680,9 @@ func (d *Daemon) streamAudioOnly(ctx context.Context, entry *activeStream, devic
 		d.mu.Unlock()
 		return context.Canceled
 	}
-	// A concurrent SETUP may have finished while this one was negotiating.
-	// Keep the established lead so existing rooms can play continuously.
-	for _, destination := range d.streams {
-		if destination.audioOnly != nil {
-			activeLead := destination.audioOnly.PlayoutLatency()
-			if activeLead != session.PlayoutLatency() {
-				d.mu.Unlock()
-				return fmt.Errorf("audio playout lead differs from the active rooms (%v versus %v)", session.PlayoutLatency(), activeLead)
-			}
-		}
+	if err := d.checkLivePlayoutLeadLocked(session.PlayoutLatency()); err != nil {
+		d.mu.Unlock()
+		return err
 	}
 	entry.audioOnly = session
 	entry.state = StateStreaming

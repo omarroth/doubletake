@@ -102,9 +102,9 @@ nonzero value disables runtime adjustment (default: 0)
 .B \-target-latency-ms \fIMS\fR
 Override both audio and video playout latency in milliseconds. Zero selects the
 automatic AirPlay policy with separate screen and audio defaults (default: 0).
-Daemon mode uses a 250 ms budget for mirror sessions. Direct audio playback
-uses a 2-second audio lead. A nonzero value sets a common lead at startup,
-subject to the receiver's supported latency.
+In daemon mode, the first live stream defaults to 250 ms for mirroring or
+2 seconds for direct audio. New live streams use the active group's lead.
+A nonzero value sets a common lead at startup, subject to receiver support.
 .TP
 .B \-video-source \fISOURCE\fR
 Play video and audio from a local file or a direct HTTP(S) media URL.

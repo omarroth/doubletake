@@ -221,11 +221,11 @@ with `-no-video` to request audio-only playback on all connections. A direct
 `-target` can also identify an AirPlay 2 speaker. With `-no-video`, doubletake
 looks up the audio endpoint via mDNS. It prefers realtime AirPlay 2 audio and
 shares one PTP clock across compatible speakers.
-Speakers that offer classic RAOP can also use that transport. Direct audio
-defaults to a 2-second playout lead. Start a speaker before a mirror to let the
-mirror inherit the speaker's lead. Use `-target-latency-ms` to set a common lead
-regardless of connection order. `doubletake ctl status` reports the transport,
-clock and playout leads for each destination.
+Speakers that offer classic RAOP can also use that transport. A speaker started
+on its own defaults to a 2-second playout lead. New live streams inherit the
+active group's lead. If a receiver needs a larger lead, start it first or set
+`-target-latency-ms` when starting the daemon. `doubletake ctl status` reports
+the transport, clock and playout leads for each destination.
 AirPlay 2 uses transient pairing or saved HomeKit credentials. Speakers that
 require a new persistent pairing cannot be enrolled in audio-only mode yet.
 
