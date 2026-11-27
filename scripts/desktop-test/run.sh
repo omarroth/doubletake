@@ -36,7 +36,7 @@ unset DISPLAY WAYLAND_DISPLAY SWAYSOCK
 tar -xzf "$package" -C "$work/install"
 sender="$work/install/usr/bin/doubletake"
 "$sender" -version
-"$work/install/usr/bin/doubletake-ctl" -version
+"$sender" ctl -version
 test ! -e "$work/install/usr/bin/doubletake-test-receiver"
 
 start() {

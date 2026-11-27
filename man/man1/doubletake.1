@@ -173,7 +173,7 @@ Enable verbose protocol logging
 .TP
 .B \-daemonize
 Run in daemon mode for multi-target control via
-.B doubletake-ctl
+.B doubletake ctl
 .TP
 .B \-socket \fIPATH\fR
 Daemon control socket path. The default is
@@ -221,18 +221,51 @@ Run in daemon mode:
 Debug mode with verbose logging:
 .B doubletake \-target 192.168.1.77 \-debug
 .SH DAEMON MODE
-When run with \fB\-daemonize\fR, doubletake runs as a background service that can control
-multiple simultaneous connections. Use
-.B doubletake ctl
-to manage the daemon.
+Start the daemon with \fBdoubletake \-daemonize\fR and control it with
+\fBdoubletake ctl\fR. To use a custom control socket, pass
+\fBdoubletake ctl \-socket \fIPATH\fR before the command.
+.SS Control commands
+.TP
+.B status
+List active connections with their transport, timing protocol, and playout leads.
+.TP
+.B discover
+Refresh receiver discovery.
+.TP
+.B devices
+List cached receivers.
+.TP
+.B connect [\fITARGET\fR] [\fIPIN-OR-PASSWORD\fR]
+Start streaming to a receiver, optionally supplying a PIN or password.
+If no target is specified, use the first available discovered receiver.
+.TP
+.B play \fISOURCE\fR [\fITARGET\fR]
+Play media from a local file or direct HTTP(S) URL until end of input.
+Requires a GStreamer-enabled sender. If no target is specified, use the
+first available display.
+.TP
+.B disconnect [\fITARGET\fR]
+Stop one stream, or all streams if no target is specified.
+.TP
+.B mute [\fITARGET\fR]
+Mute one receiver, or all receivers if no target is specified.
+.TP
+.B unmute [\fITARGET\fR]
+Unmute one receiver, or all receivers if no target is specified.
+.TP
+.B volume \fITARGET\fR [\fIDB\fR]
+Read the receiver's volume or set it between \-30 and 0 dB. Setting a level
+while muted saves that level for unmute.
+.TP
+.B pin \fIPIN-OR-PASSWORD\fR
+Submit the credential when exactly one receiver is waiting.
+For concurrent prompts, use
+\fBdoubletake ctl connect \fITARGET PIN-OR-PASSWORD\fR.
 .PP
-Daemon status distinguishes an on-screen PIN from a configured password so UI
-clients can present the appropriate single prompt. Both values remain
-submittable with the compatible
-.B doubletake ctl pin
-command when exactly one receiver is waiting. For concurrent prompts, use
-.B doubletake ctl connect \fITARGET\fR \fIPIN-OR-PASSWORD\fR
-to submit a credential to a specific receiver.
+The status JSON reports pending input as \fBneeds_credential\fR and
+distinguishes an on-screen PIN from a configured password with
+\fBcredential_kind\fR. Each waiting stream includes its target and credential
+kind. The legacy \fBneeds_pin\fR field reports on-screen PIN prompts.
 .SH FIREWALL
 For each stream, doubletake binds three consecutive local UDP ports: timing at
 \fIN\fR, audio control and receiver retransmission requests at \fIN+1\fR, and
@@ -277,12 +310,11 @@ PipeWire (Wayland) or X11 for screen capture
 .I ~/.config/doubletake/credentials.json
 Default location for saved AirPlay credentials
 .SH SHELL COMPLETION
-Bash completion for options, encoder and codec choices, and file paths is
-included in release packages and source installations. Install the
+Bash completion for control commands, options, encoder and codec choices, and
+file paths is included in release packages and source installations. Install the
 .B bash-completion
 package and start a new shell to load it automatically.
 .SH SEE ALSO
-.BR doubletake-ctl (1),
 .BR doubletake-test-receiver (1)
 .SH AUTHOR
 Written by Omar Roth.

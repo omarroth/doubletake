@@ -103,9 +103,8 @@ make BUILD_TAGS=
 make test BUILD_TAGS=
 ```
 
-This build cannot send audio to receivers requiring AAC-ELD without ALAC;
-`-no-audio` remains available. `doubletake-ctl` is always built with cgo disabled
-and requires no GStreamer or FDK-AAC runtime libraries.
+This build cannot send audio to receivers requiring AAC-ELD without ALAC.
+Use `-no-audio` for video-only playback.
 
 ## Prepare a release
 
@@ -120,26 +119,22 @@ make release VERSION=vX.Y.Z
 (cd dist && sha256sum -c SHA256SUMS)
 ```
 
-`make release` builds stripped binaries in `BUILD_DIR/release/TARGET/` and writes
+`make release` builds the stripped executable in `BUILD_DIR/release/TARGET/` and writes
 `dist/doubletake-VERSION-TARGET.tar.gz` and `dist/SHA256SUMS`. `TARGET` defaults
 to `linux-x86_64` or `linux-arm64` according to the Go target architecture.
 Build on Ubuntu 20.04 to retain the supported glibc and GStreamer baseline;
 a binary built on a newer system can require newer libraries. The sender links
-GStreamer and includes the daemon controller as `doubletake ctl`. The release
-also includes the standalone static controller.
+GStreamer and includes the daemon controller as `doubletake ctl`.
 
 The archive is a relative installation tree, with no enclosing version folder:
 
 ```text
 usr/bin/doubletake
-usr/bin/doubletake-ctl
 usr/lib/systemd/user/doubletake.service
 usr/share/bash-completion/completions/doubletake
-usr/share/bash-completion/completions/doubletake-ctl -> doubletake
 usr/share/licenses/doubletake/LICENSE
 usr/share/licenses/doubletake/COPYING.GPL
 usr/share/man/man1/doubletake.1
-usr/share/man/man1/doubletake-ctl.1
 ```
 
 Debian/Ubuntu and Arch packagers can extract this tree into the package staging
@@ -158,8 +153,8 @@ make install-prebuilt PREFIX=/usr DESTDIR="$pkgdir"
 `SYSTEMDUSERDIR`, `BASHCOMPDIR`, and `LICENSEDIR` can be overridden for distribution
 policy. The default source-install prefix remains `/usr/local`.
 
-To package existing binaries, set `RELEASE_DIR` to a directory containing
-`doubletake` and `doubletake-ctl`:
+To package an existing build, set `RELEASE_DIR` to the directory containing
+`doubletake`.
 
 ```sh
 make package-release VERSION=vX.Y.Z TARGET=linux-arm64 RELEASE_DIR=/path/to/binaries
@@ -174,14 +169,14 @@ help, including Ubuntu 20.04's bash-completion version.
 CI tests Go 1.25 and the current stable toolchain on both Linux architectures
 and builds the Linux release binaries on Ubuntu 20.04.
 
-The macOS and Windows release archives contain both commands and the license
-files at the top level. The macOS tarball contains universal, ad hoc signed
-binaries. The Windows ZIPs contain native x86-64 or ARM64 executables. These
+The macOS and Windows release archives contain the executable and license
+files at the top level. The macOS tarball contains a universal, ad hoc signed
+executable. The Windows ZIPs contain native x86-64 or ARM64 executables. These
 senders use `no_gstreamer`. Windows loads the optional FDK-AAC DLL at runtime.
-CI runs the unpacked commands and checks the native capture backend on all
+CI runs the unpacked executable and checks the native capture backend on all
 three runners. It also tests the matching Windows FDK-AAC runtime separately.
 
-To archive prebuilt native commands locally, use
+To archive a prebuilt native executable locally, use
 `python3 scripts/package-native-release.py VERSION TARGET BINARY_DIRECTORY OUTPUT_DIRECTORY`.
 Native targets are `macos-universal`, `windows-x86_64`, and `windows-arm64`.
 

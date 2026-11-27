@@ -3,7 +3,6 @@ set -eo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 sender=$(realpath "${1:-$root/bin/doubletake}")
-controller=$(realpath "${2:-$root/bin/doubletake-ctl}")
 runner=()
 if [[ -n ${PACKAGE_TEST_RUNNER:-} ]]; then runner=("$PACKAGE_TEST_RUNNER"); fi
 scratch=$(mktemp -d)
@@ -87,57 +86,58 @@ complete_line _doubletake 'doubletake ct' doubletake ct
 expect ctl
 complete_line _doubletake 'doubletake ctl con' doubletake ctl con
 expect connect
-complete_line _doubletake_ctl 'doubletake-ctl con' doubletake-ctl con
-expect connect
-complete_line _doubletake_ctl 'doubletake-ctl pl' doubletake-ctl pl
+complete_line _doubletake 'doubletake ctl pl' doubletake ctl pl
 expect play
-complete_line _doubletake_ctl 'doubletake-ctl vol' doubletake-ctl vol
+complete_line _doubletake 'doubletake ctl vol' doubletake ctl vol
 expect volume
-complete_line _doubletake_ctl 'doubletake-ctl -socket connect con' doubletake-ctl -socket connect con
+complete_line _doubletake 'doubletake ctl -socket connect con' doubletake ctl -socket connect con
 expect connect
-complete_line _doubletake_ctl 'doubletake-ctl --socket=/tmp/d.sock con' doubletake-ctl --socket = /tmp/d.sock con
+complete_line _doubletake 'doubletake ctl --socket=/tmp/d.sock con' doubletake ctl --socket = /tmp/d.sock con
 expect connect
-complete_line _doubletake_ctl 'doubletake-ctl connect ' doubletake-ctl connect ''
+complete_line _doubletake 'doubletake ctl connect ' doubletake ctl connect ''
 expect_empty
-complete_line _doubletake_ctl 'doubletake-ctl pin secret' doubletake-ctl pin secret
+complete_line _doubletake 'doubletake ctl pin secret' doubletake ctl pin secret
 expect_empty
-complete_line _doubletake_ctl 'doubletake-ctl --ver' doubletake-ctl --ver
+complete_line _doubletake 'doubletake ctl --ver' doubletake ctl --ver
 expect --version
-complete_line _doubletake_ctl 'doubletake-ctl -- con' doubletake-ctl -- con
+complete_line _doubletake 'doubletake ctl -- con' doubletake ctl -- con
 expect connect
-complete_line _doubletake_ctl 'doubletake-ctl -- -' doubletake-ctl -- -
+complete_line _doubletake 'doubletake ctl -- -' doubletake ctl -- -
 expect_empty
 
 cd "$scratch"
 touch 'credentials with spaces.json' 'daemon socket' 'clip with spaces.mkv'
 complete_line _doubletake 'doubletake -creds cred' doubletake -creds cred
 expect 'credentials with spaces.json'
-complete_line _doubletake_ctl 'doubletake-ctl -socket daemon' doubletake-ctl -socket daemon
+complete_line _doubletake 'doubletake ctl -socket daemon' doubletake ctl -socket daemon
 expect 'daemon socket'
 complete_line _doubletake 'doubletake -video-source clip' doubletake -video-source clip
 expect 'clip with spaces.mkv'
-complete_line _doubletake_ctl 'doubletake-ctl play clip' doubletake-ctl play clip
+complete_line _doubletake 'doubletake ctl play clip' doubletake ctl play clip
 expect 'clip with spaces.mkv'
 
 # Detect drift between shipped completion lists and actual command help.
-for command in "$sender" "$controller"; do
-    name=${command##*/}
-    function=_doubletake
-    if [[ $name == doubletake-ctl ]]; then function=_doubletake_ctl; fi
-    "${runner[@]}" "$command" -help > "$scratch/help" 2>&1
+for mode in sender ctl; do
+    command=("$sender")
+    command_words=(doubletake)
+    if [[ $mode == ctl ]]; then
+        command+=(ctl)
+        command_words+=(ctl)
+    fi
+    "${runner[@]}" "${command[@]}" -help > "$scratch/help" 2>&1
     sed -nE 's/^  (-[^ ,]+)([ ,].*)?$/\1/p' "$scratch/help" | sort -u > "$scratch/flags"
     test -s "$scratch/flags"
-    complete_line "$function" "$name -" "$name" -
+    complete_line _doubletake "${command_words[*]} -" "${command_words[@]}" -
     while IFS= read -r option; do expect "$option"; done < "$scratch/flags"
     for option in "${COMPREPLY[@]}"; do
         case $option in -h|-help) continue ;; esac
         if ! grep -Fxq -- "$option" "$scratch/flags"; then
-            echo "Completion offers an unsupported flag for $name: $option" >&2
+            echo "Completion offers an unsupported flag for ${command_words[*]}: $option" >&2
             exit 1
         fi
     done
-    if [[ $name == doubletake-ctl ]]; then
-        complete_line _doubletake_ctl "$name " "$name" ''
+    if [[ $mode == ctl ]]; then
+        complete_line _doubletake 'doubletake ctl ' doubletake ctl ''
         while IFS= read -r command; do expect "$command"; done < <(
             awk '/^Commands:/{commands=1;next} /^Flags:/{commands=0} commands && NF {print $1}' "$scratch/help"
         )

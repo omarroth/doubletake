@@ -27,13 +27,10 @@ stage=$scratch/package
 
 cat > "$scratch/expected" <<'EOF'
 usr/bin/doubletake
-usr/bin/doubletake-ctl
 usr/lib/systemd/user/doubletake.service
 usr/share/bash-completion/completions/doubletake
-usr/share/bash-completion/completions/doubletake-ctl
 usr/share/licenses/doubletake/COPYING.GPL
 usr/share/licenses/doubletake/LICENSE
-usr/share/man/man1/doubletake-ctl.1
 usr/share/man/man1/doubletake.1
 EOF
 find "$stage" \( -type f -o -type l \) -printf '%P\n' | sort > "$scratch/actual"
@@ -41,7 +38,6 @@ diff -u "$scratch/expected" "$scratch/actual"
 while IFS= read -r file; do
     case $file in
         usr/bin/*) test "$(stat -c %a "$stage/$file")" = 755 ;;
-        */completions/doubletake-ctl) test "$(readlink "$stage/$file")" = doubletake ;;
         *) test "$(stat -c %a "$stage/$file")" = 644 ;;
     esac
 done < "$scratch/expected"
@@ -50,9 +46,8 @@ if grep -Fq '@bindir@' "$stage/usr/lib/systemd/user/doubletake.service"; then ex
 cmp "$root/LICENSE" "$stage/usr/share/licenses/doubletake/LICENSE"
 cmp "$root/COPYING.GPL" "$stage/usr/share/licenses/doubletake/COPYING.GPL"
 cmp "$root/completions/doubletake.bash" "$stage/usr/share/bash-completion/completions/doubletake"
-for binary in doubletake doubletake-ctl; do
-    "${runner[@]}" "$stage/usr/bin/$binary" -version
-done
+"${runner[@]}" "$stage/usr/bin/doubletake" -version
+"${runner[@]}" "$stage/usr/bin/doubletake" ctl -version
 
 # Repacking under a restrictive umask must preserve bytes and permissions.
 name=${archive##*/}

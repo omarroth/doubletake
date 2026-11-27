@@ -6,12 +6,12 @@ A Plasma 6 system tray widget for controlling AirPlay screen mirroring via the d
 
 - KDE Plasma 6 (Plasma 5 should also work with minor QML import adjustments)
 - `doubletake` running (provides the Unix socket control interface)
-- `doubletake-ctl` on your `$PATH` (the applet shells out to it)
+- `doubletake` on your `$PATH` for the applet's `doubletake ctl` commands
 
 ## Install
 
 ```sh
-# Build the daemon and ctl binaries
+# Build and install doubletake
 cd /path/to/doubletake
 make
 sudo make install
@@ -68,7 +68,7 @@ systemctl --user enable --now doubletake.service
 
 ```
 ┌─────────────────┐     JSON/Unix socket      ┌──────────────────┐
-│  Plasma Applet  │ ──── doubletake-ctl ────> │ doubletake       │
+│  Plasma Applet  │ ──── doubletake ctl ────> │ doubletake       │
 │  (QML/JS)       │                           │ (Go)             │
 └─────────────────┘                           └──────────────────┘
                                                   │
@@ -78,9 +78,9 @@ systemctl --user enable --now doubletake.service
                                               H.264 streaming)
 ```
 
-The applet runs `doubletake-ctl` as a subprocess to communicate with the daemon.
+The applet runs `doubletake ctl` as a subprocess to communicate with the daemon.
 The daemon reports whether each pending credential is an on-screen PIN or a
 configured password. The applet submits it to that specific receiver with
-`doubletake-ctl connect TARGET CREDENTIAL`, so concurrent connection flows do
+`doubletake ctl connect TARGET CREDENTIAL`, so concurrent connection flows do
 not consume one another's credentials. The daemon manages the full AirPlay
 lifecycle (discovery, pairing, FairPlay, mirroring).

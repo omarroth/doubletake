@@ -39,7 +39,6 @@ PlasmoidItem {
         return list
     }
 
-    readonly property string ctlBinary: "doubletake-ctl"
     readonly property bool isStreaming: root.daemonState === "streaming"
     readonly property bool isConnecting: root.daemonState === "connecting"
     readonly property bool needsPIN: root.needsCredential && root.credentialKind === "pin"
@@ -149,7 +148,7 @@ PlasmoidItem {
         for (var i = 0; i < args.length; i++) {
             quotedArgs.push(root.shellQuote(args[i]))
         }
-        var cmd = root.ctlBinary + " " + quotedArgs.join(" ")
+        var cmd = "doubletake ctl " + quotedArgs.join(" ")
         if (!root.pendingCommands) root.pendingCommands = new Object()
         root.pendingCommands[cmd] = action
         executable.connectSource(cmd)

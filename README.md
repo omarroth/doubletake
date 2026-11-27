@@ -25,13 +25,12 @@ sha256sum --ignore-missing -c SHA256SUMS
 sudo tar -xzf doubletake-vX.Y.Z-linux-x86_64.tar.gz -C /
 ```
 
-Each archive includes both commands in `/usr/bin`, manuals, bash completion,
+Each archive includes `/usr/bin/doubletake`, a manpage, Bash completion,
 licenses, and a systemd user service. Enable the service separately if desired.
 
 `doubletake` requires GStreamer 1.16+ and its runtime plugins. Install FDK-AAC
 to enable AAC-ELD audio; otherwise doubletake uses ALAC when supported by the
-receiver. The optional standalone controller `doubletake-ctl` is static. Release
-binaries target Ubuntu 20.04 and newer Linux systems.
+receiver. Release binaries target Ubuntu 20.04 and newer Linux systems.
 
 On Ubuntu/Debian:
 
@@ -75,8 +74,8 @@ Download the matching archive and `SHA256SUMS` from
 | Windows ARM64 | `doubletake-VERSION-windows-arm64.zip` |
 
 Extract the archive into a folder and run `./doubletake` on macOS or
-`.\doubletake.exe` in PowerShell. Both commands are at the top level. These
-builds use the native desktop capture and need no GStreamer installation.
+`.\doubletake.exe` in PowerShell. These builds use native desktop capture and
+need no GStreamer installation.
 On macOS, allow Screen & System Audio Recording.
 File, HTTP, and stdin playback require a GStreamer-enabled sender.
 
@@ -96,9 +95,9 @@ sudo apt install build-essential pkg-config \
 ```
 
 ```sh
-make                 # bin/doubletake and bin/doubletake-ctl
+make                 # bin/doubletake
 make test
-sudo make install    # binaries, manuals, completion, licenses, and user service
+sudo make install    # executable, manpage, completion, licenses, and user service
 ```
 
 For a user installation:
@@ -111,8 +110,8 @@ Use `make uninstall` with the same prefix to remove an installation.
 [Developer notes](docs/development.md) cover codec build options,
 the diagnostic receiver, tests, and distribution packaging.
 
-Bash completion covers both commands, their options, enum values, and file
-paths. With `bash-completion` installed, open a new shell after installation.
+Bash completion covers `doubletake` and `doubletake ctl`, their options, and
+file paths. With `bash-completion` installed, open a new shell after installation.
 
 ## Builds without GStreamer
 
@@ -238,7 +237,7 @@ PTP with
 
 Classic RAOP supports clear or RSA-wrapped audio and Digest passwords.
 Audio-only playback follows the captured output's volume and mute when the
-sound server provides those levels. See `man doubletake-ctl` for pairing and mute commands.
+sound server provides those levels. See `doubletake ctl -help` for pairing and mute commands.
 
 To run the installed daemon as a systemd user service:
 

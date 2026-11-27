@@ -1,4 +1,4 @@
-.PHONY: all doubletake doubletake-native doubletake-ctl doubletake-test-receiver
+.PHONY: all doubletake doubletake-native doubletake-test-receiver
 .PHONY: release package-release install install-prebuilt uninstall test test-go clean
 
 PREFIX ?= /usr/local
@@ -22,7 +22,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf de
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 VERSION_FLAGS = -X doubletake/internal/version.Version=$(VERSION) -X doubletake/internal/version.Commit=$(COMMIT)
 
-all: doubletake doubletake-ctl
+all: doubletake
 
 doubletake:
 	CGO_ENABLED=1 go build -tags '$(BUILD_TAGS)' -ldflags='$(VERSION_FLAGS)' -o '$(BUILD_DIR)/doubletake$(EXE)' ./cmd/doubletake
@@ -31,16 +31,12 @@ doubletake:
 doubletake-native:
 	CGO_ENABLED=$(if $(filter linux,$(GOOS)),0,1) go build -trimpath -tags no_gstreamer -ldflags='$(VERSION_FLAGS)' -o '$(BUILD_DIR)/native/$(TARGET)/doubletake$(EXE)' ./cmd/doubletake
 
-doubletake-ctl:
-	CGO_ENABLED=0 go build -ldflags='$(VERSION_FLAGS)' -o '$(BUILD_DIR)/doubletake-ctl$(EXE)' ./cmd/doubletake-ctl
-
 # Developer-only diagnostic receiver; build explicitly when needed.
 doubletake-test-receiver:
 	CGO_ENABLED=1 go build -tags '$(BUILD_TAGS)' -o '$(BUILD_DIR)/doubletake-test-receiver$(EXE)' ./cmd/doubletake-test-receiver
 
 release:
 	CGO_ENABLED=1 go build -trimpath -tags '$(BUILD_TAGS)' -ldflags='-s -w $(VERSION_FLAGS)' -o '$(release_dir)/doubletake$(EXE)' ./cmd/doubletake
-	CGO_ENABLED=0 go build -trimpath -ldflags='-s -w $(VERSION_FLAGS)' -o '$(release_dir)/doubletake-ctl$(EXE)' ./cmd/doubletake-ctl
 	$(MAKE) package-release
 
 package-release:
@@ -61,15 +57,14 @@ install: all
 # Packaging can install existing binaries without invoking the Go compiler.
 install-prebuilt:
 	install -d '$(DESTDIR)$(PREFIX)/bin'
-	install -m 755 '$(BUILD_DIR)/doubletake$(INSTALL_EXE)' '$(BUILD_DIR)/doubletake-ctl$(INSTALL_EXE)' '$(DESTDIR)$(PREFIX)/bin/'
+	install -m 755 '$(BUILD_DIR)/doubletake$(INSTALL_EXE)' '$(DESTDIR)$(PREFIX)/bin/'
 	install -d '$(DESTDIR)$(MANDIR)/man1'
-	install -m 644 man/man1/doubletake.1 man/man1/doubletake-ctl.1 '$(DESTDIR)$(MANDIR)/man1/'
+	install -m 644 man/man1/doubletake.1 '$(DESTDIR)$(MANDIR)/man1/'
 	install -d '$(DESTDIR)$(SYSTEMDUSERDIR)'
 	sed 's|@bindir@|$(PREFIX)/bin|g' systemd/doubletake.service.in > '$(DESTDIR)$(SYSTEMDUSERDIR)/doubletake.service'
 	chmod 644 '$(DESTDIR)$(SYSTEMDUSERDIR)/doubletake.service'
 	install -d '$(DESTDIR)$(BASHCOMPDIR)'
 	install -m 644 completions/doubletake.bash '$(DESTDIR)$(BASHCOMPDIR)/doubletake'
-	ln -sf doubletake '$(DESTDIR)$(BASHCOMPDIR)/doubletake-ctl'
 	install -d '$(DESTDIR)$(LICENSEDIR)'
 	install -m 644 LICENSE COPYING.GPL '$(DESTDIR)$(LICENSEDIR)/'
 

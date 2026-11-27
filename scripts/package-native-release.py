@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package native release binaries and licenses in a flat archive."""
+"""Package the native binary and licenses in a flat archive."""
 
 import argparse
 import gzip
@@ -58,9 +58,9 @@ def main():
     windows = args.target.startswith("windows-")
     suffix = ".exe" if windows else ""
     extension = "zip" if windows else "tar.gz"
-    binaries = [(args.binaries / (name + suffix), 0o755) for name in ("doubletake", "doubletake-ctl")]
     root = Path(__file__).resolve().parent.parent
-    files = binaries + [(root / name, 0o644) for name in ("LICENSE", "COPYING.GPL")]
+    files = [(args.binaries / ("doubletake" + suffix), 0o755)]
+    files.extend((root / name, 0o644) for name in ("LICENSE", "COPYING.GPL"))
     for source, _ in files:
         if not source.is_file() or source.stat().st_size == 0:
             parser.error(f"missing or empty package file: {source}")

@@ -129,12 +129,11 @@ jobs:
         run: |
           mkdir -p bin
           go build -o bin/ ./cmd/doubletake
-          CGO_ENABLED=0 go build -o bin/ ./cmd/doubletake-ctl
           suffix=
           if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
           "bin/doubletake$suffix" -version
           "bin/doubletake$suffix" ctl -help
-          "bin/doubletake-ctl$suffix" -version
+          "bin/doubletake$suffix" ctl -version
       - name: Verify native capture plugin availability
         shell: bash
         run: |
@@ -221,7 +220,7 @@ jobs:
             $feature = Install-WindowsFeature Server-Media-Foundation
             if (-not $feature.Success) { throw 'Could not install Media Foundation' }
           }
-      - name: Build and package native commands
+      - name: Build and package native doubletake
         shell: bash
         run: |
           test "$(go env GOARCH)" = "$EXPECTED_ARCH"
@@ -233,19 +232,13 @@ jobs:
               dir="bin/release/darwin-$arch"
               mkdir -p "$dir"
               GOARCH="$arch" go build -trimpath -tags no_gstreamer -ldflags "$version_flags" -o "$dir/doubletake" ./cmd/doubletake
-              GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags "$version_flags" -o "$dir/doubletake-ctl" ./cmd/doubletake-ctl
             done
-            for command in doubletake doubletake-ctl; do
-              xcrun lipo -create "bin/release/darwin-arm64/$command" "bin/release/darwin-amd64/$command" -output "$binaries/$command"
-              xcrun lipo "$binaries/$command" -verify_arch arm64 x86_64
-              codesign --force --sign - --timestamp=none "$binaries/$command"
-            done
+            xcrun lipo -create bin/release/darwin-{arm64,amd64}/doubletake -output "$binaries/doubletake"
+            xcrun lipo "$binaries/doubletake" -verify_arch arm64 x86_64
+            codesign --force --sign - --timestamp=none "$binaries/doubletake"
           else
             go build -trimpath -tags no_gstreamer -ldflags "$version_flags" -o "$binaries/doubletake.exe" ./cmd/doubletake
-            CGO_ENABLED=0 go build -trimpath -ldflags "$version_flags" -o "$binaries/doubletake-ctl.exe" ./cmd/doubletake-ctl
-            for command in doubletake doubletake-ctl; do
-              go version -m "$binaries/$command.exe" | grep -F "GOARCH=$EXPECTED_ARCH"
-            done
+            go version -m "$binaries/doubletake.exe" | grep -F "GOARCH=$EXPECTED_ARCH"
           fi
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) python scripts/package-native-release.py "$VERSION" "$TARGET" "$binaries" dist
       - name: Verify the unpacked release and native capture
@@ -263,16 +256,17 @@ jobs:
           else
             tar -xzf "$archive" -C bin/unpacked
             codesign --verify --all-architectures bin/unpacked/doubletake
-            codesign --verify --all-architectures bin/unpacked/doubletake-ctl
           fi
           expected_commit=$(git rev-parse --short=12 HEAD)
-          for command in doubletake doubletake-ctl; do
-            binary="bin/unpacked/$command$suffix"
-            PATH="$runtime_path" "$binary" -help >/dev/null
-            reported=$(PATH="$runtime_path" "$binary" -version)
-            grep -F "$VERSION" <<< "$reported"
-            grep -F "$expected_commit" <<< "$reported"
-          done
+          binary="bin/unpacked/doubletake$suffix"
+          PATH="$runtime_path" "$binary" -help >/dev/null
+          PATH="$runtime_path" "$binary" ctl -help >/dev/null
+          reported=$(PATH="$runtime_path" "$binary" -version)
+          grep -F "$VERSION" <<< "$reported"
+          grep -F "$expected_commit" <<< "$reported"
+          reported=$(PATH="$runtime_path" "$binary" ctl -version)
+          grep -F "$VERSION" <<< "$reported"
+          grep -F "$expected_commit" <<< "$reported"
           cmp LICENSE bin/unpacked/LICENSE
           cmp COPYING.GPL bin/unpacked/COPYING.GPL
           go test -tags no_gstreamer ./internal/airplay -run '^TestNativeDesktopPattern$' -count=1 -v
@@ -358,7 +352,7 @@ jobs:
           BUILD_TAGS='' scripts/test-audio-output.sh
           BUILD_TAGS=no_gstreamer scripts/test-audio-output.sh
 
-      - name: Build and package both commands
+      - name: Build and package doubletake
         run: make release TARGET=${{ matrix.target }}
 
       - name: Verify minimum-runtime compatibility and version
@@ -373,10 +367,9 @@ jobs:
           ./doubletake -version | grep -F "$VERSION"
           expected_commit=$(git rev-parse --short=12 HEAD)
           ./doubletake -version | grep -F "$expected_commit"
-          file ./doubletake-ctl | grep -F 'statically linked'
-          ./doubletake-ctl -help >/dev/null
-          ./doubletake-ctl -version | grep -F "$VERSION"
-          ./doubletake-ctl -version | grep -F "$expected_commit"
+          ./doubletake ctl -help >/dev/null
+          ./doubletake ctl -version | grep -F "$VERSION"
+          ./doubletake ctl -version | grep -F "$expected_commit"
           required_glibc=$(readelf --version-info ./doubletake | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -1)
           test -n "$required_glibc"
           dpkg --compare-versions "$required_glibc" le 2.31
@@ -385,7 +378,7 @@ jobs:
         run: scripts/test-release-package.sh "dist/doubletake-${VERSION}-${{ matrix.target }}.tar.gz" ${{ matrix.target }}
 
       - name: Test bash completion against the built commands
-        run: scripts/test-bash-completion.sh bin/release/${{ matrix.target }}/doubletake bin/release/${{ matrix.target }}/doubletake-ctl
+        run: scripts/test-bash-completion.sh bin/release/${{ matrix.target }}/doubletake
 
       - uses: actions/upload-artifact@v7
         with:

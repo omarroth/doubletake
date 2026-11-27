@@ -1,4 +1,4 @@
-# bash completion for doubletake and doubletake-ctl; requires bash-completion.
+# Bash completion for doubletake. Requires bash-completion.
 
 _doubletake_complete_words()
 {
@@ -50,7 +50,7 @@ _doubletake()
     if [[ ${words[1]} == ctl ]]; then
         words=("${words[@]:1}")
         ((cword--))
-        _doubletake_ctl_words
+        _doubletake_ctl
         return
     fi
 
@@ -88,15 +88,6 @@ _doubletake()
 }
 
 _doubletake_ctl()
-{
-    # Populated by _init_completion through Bash's dynamic scope.
-    # shellcheck disable=SC2034
-    local cur prev words cword
-    _init_completion -n = || return
-    _doubletake_ctl_words
-}
-
-_doubletake_ctl_words()
 {
     # Go's flag parser stops at the first command. A socket option consumes
     # one argument, including paths which happen to look like command names.
@@ -139,4 +130,3 @@ _doubletake_ctl_words()
 }
 
 complete -F _doubletake doubletake
-complete -F _doubletake_ctl doubletake-ctl

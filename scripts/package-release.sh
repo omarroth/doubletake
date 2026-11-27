@@ -26,13 +26,11 @@ fi
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 binaries=$(cd -- "$3" && pwd)
-for binary in doubletake doubletake-ctl; do
-    test -x "$binaries/$binary"
-    if ! readelf --file-header "$binaries/$binary" | grep -Fq "$machine"; then
-        echo "$binary does not match package target $target" >&2
-        exit 1
-    fi
-done
+test -x "$binaries/doubletake"
+if ! readelf --file-header "$binaries/doubletake" | grep -Fq "$machine"; then
+    echo "doubletake does not match package target $target" >&2
+    exit 1
+fi
 mkdir -p -- "$4"
 output=$(cd -- "$4" && pwd)
 stage=$(mktemp -d "$output/.doubletake-stage.XXXXXX")
