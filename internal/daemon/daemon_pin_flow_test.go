@@ -299,18 +299,17 @@ func TestSubmittedPasswordCompletesPairingWithoutSecondPrompt(t *testing.T) {
 	deadline := time.Now().Add(8 * time.Second)
 	for {
 		stats := server.Stats()
-		// Stop at pair-verify: capture intentionally starts before SETUP in the
-		// daemon, and CI does not install a GStreamer encoder. Digest reuse is
-		// covered without capture by TestReceiverServerCombinedCodePairsAndAnswersDigest.
-		if stats.PairSetup == 3 && stats.PairVerify == 2 {
-			if stats.PINStarts != 0 {
-				t.Fatalf("password flow sent %d PIN-start requests, want 0", stats.PINStarts)
-			}
-			break
-		}
 		status = d.handleStatus()
 		if status.NeedsCredential {
 			t.Fatalf("daemon prompted a second time after password submission: %+v", status)
+		}
+		if stats.PINStarts != 0 || stats.PairSetup > 3 {
+			t.Fatalf("password flow started another pairing: %+v", stats)
+		}
+		// The test only needs the first authenticated pairing. On runners with
+		// a video encoder, SETUP can also reconnect and verify the same pairing.
+		if stats.PairSetup == 3 && stats.PairVerify >= 2 {
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for authenticated pairing: receiver stats %+v, daemon status %+v", stats, status)

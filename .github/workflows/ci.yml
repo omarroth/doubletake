@@ -51,6 +51,9 @@ jobs:
         runner: [macos-15, windows-2025]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     env:
       CGO_ENABLED: '1'
       GST_VERSION: '1.26.11'
@@ -71,7 +74,11 @@ jobs:
         shell: pwsh
         env:
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
-        run: (Join-Path $env:MSYS2_LOCATION 'ucrt64\bin') >> $env:GITHUB_PATH
+        run: |
+          $ucrtBin = Join-Path $env:MSYS2_LOCATION 'ucrt64\bin'
+          $ucrtBin >> $env:GITHUB_PATH
+          "CC=$(Join-Path $ucrtBin 'gcc.exe')" >> $env:GITHUB_ENV
+          "PKG_CONFIG=$(Join-Path $ucrtBin 'pkgconf.exe')" >> $env:GITHUB_ENV
       - name: Enable Media Foundation on the Windows Server runner
         if: runner.os == 'Windows'
         shell: powershell
@@ -125,7 +132,6 @@ jobs:
           $gst.DirectoryName >> $env:GITHUB_PATH
           "PKG_CONFIG_LIBDIR=$(Join-Path $lib 'pkgconfig')" >> $env:GITHUB_ENV
       - name: Build and run the integrated sender
-        shell: bash
         run: |
           mkdir -p bin
           go build -o bin/ ./cmd/doubletake
@@ -135,7 +141,6 @@ jobs:
           "bin/doubletake$suffix" ctl -help
           "bin/doubletake$suffix" ctl -version
       - name: Verify native capture plugin availability
-        shell: bash
         run: |
           if [[ "$RUNNER_OS" == macOS ]]; then
             gst-inspect-1.0 avfvideosrc >/dev/null
@@ -147,7 +152,6 @@ jobs:
       - name: Exercise daemon socket access and exclusive instance ownership
         run: go test ./internal/daemon -run '^Test(RunRejects(SecondDaemonWithoutRemovingLiveSocket|LiveDaemonThatPredatesInstanceLock)|RemoveStaleControlSocket)$' -count=1
       - name: Play local and HTTP media through the daemon and loopback receiver
-        shell: bash
         run: |
           for plugin in vp8enc vp8dec matroskamux matroskademux openh264enc rtponviftimestamp vorbisenc vorbisdec rtpL16pay souphttpsrc; do
             gst-inspect-1.0 "$plugin" >/dev/null
