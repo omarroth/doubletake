@@ -1702,7 +1702,7 @@ func TestWaylandCapturePlansRetainSelectedEncoderBackend(t *testing.T) {
 
 func TestWaylandPlansUsePortableOutputRateControl(t *testing.T) {
 	encoder := encoderResult{parts: gstStage{"nvh264enc"}, rawFormat: "NV12"}
-	for _, mode := range []waylandPipelineMode{waylandPipelineSystemMemory, waylandPipelineVAMemory, waylandPipelineVAPostprocPlainRaw} {
+	for _, mode := range []waylandPipelineMode{waylandPipelineSystemMemory, waylandPipelineVAMemory, waylandPipelineVAPostprocPlainRaw, waylandPipelineGLDMABuf} {
 		for _, fps := range []int{24, 30, 60} {
 			plan := waylandCapturePlan{encoder: encoder, mode: mode}
 			args := buildWaylandVideoPipelineForPlan(3, 42, fps, plan, 1920, 1080, true)
@@ -1750,5 +1750,94 @@ func TestH264TestCaptureStartupProbePreservesRealGStreamerOutput(t *testing.T) {
 		if !bytes.Equal(got.AnnexB, expected.AnnexB) || got.PTS != expected.PTS {
 			t.Fatalf("GStreamer startup access unit %d changed during replay", index)
 		}
+	}
+}
+
+func TestGLWaylandPipelineImportsDMABufAndScalesOnGPU(t *testing.T) {
+	stubPipeWireProvideClock(t, true)
+	encoder := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420", codec: VideoCodecH264}
+	pipeline := buildGLWaylandVideoPipeline(3, 42, 30, encoder, 1920, 1080, true)
+	joined := strings.Join(pipeline, " ")
+	for _, arg := range pipeline {
+		switch arg {
+		case "always-copy=true", "vapostproc", "videoconvert", "videoflip":
+			t.Errorf("GL Wayland pipeline must not copy or convert full portal frames on the CPU (%s): %s", arg, joined)
+		}
+	}
+	wantOrder := []string{
+		"pipewiresrc", "fd=3", "path=42", "do-timestamp=true", "keepalive-time=34", "provide-clock=false",
+		"!", "video/x-raw(memory:DMABuf),pixel-aspect-ratio=1/1",
+		"!", "glupload",
+		"!", "glcolorconvert", "!", "video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D",
+		"!", "glvideoflip", "video-direction=auto",
+		"!", "glcolorscale", "!", "video/x-raw(memory:GLMemory),format=RGBA,width=[2,1920,2],height=[2,1080,2],pixel-aspect-ratio=1/1",
+		"!", "glcolorconvert", "!", "video/x-raw(memory:GLMemory),format=I420",
+		"!", "gldownload", "!", "video/x-raw,format=I420",
+		"!", "videoscale", "add-borders=true", "!", "video/x-raw,width=1920,height=1080,pixel-aspect-ratio=1/1",
+		"!", "compositor", "force-live=true", "ignore-inactive-pads=true", "background=black",
+		"!", "video/x-raw,format=I420,width=1920,height=1080,pixel-aspect-ratio=1/1,framerate=30/1",
+		"!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
+		"!", "videorate", "name=doubletake-rate", "drop-only=true", "skip-to-first=true",
+		"!", "openh264enc",
+	}
+	if !containsPipelineSequence(pipeline, wantOrder) {
+		t.Fatalf("GL plan must import DMA-BUF, fit on the GPU, and download before padding, live cadence, and encoding:\n%s", joined)
+	}
+	suffix := appendGstVideoEncoding(nil, encoder, true)
+	if !reflect.DeepEqual(pipeline[len(pipeline)-len(suffix):], suffix) {
+		t.Errorf("GL plan changed the shared encoding/output suffix: %s", joined)
+	}
+
+	native := strings.Join(buildGLWaylandVideoPipeline(3, 42, 30, encoder, 0, 0, true), " ")
+	if strings.Contains(native, "glcolorscale") || strings.Contains(native, "videoscale") || strings.Contains(native, "width=") {
+		t.Errorf("native-size GL plan must not constrain the capture size: %s", native)
+	}
+}
+
+func TestWaylandCapturePlansTryGLBeforeSystemMemory(t *testing.T) {
+	t.Setenv("DOUBLETAKE_WAYLAND_GL", "1")
+	hasGL := func(name string) bool {
+		for _, element := range glWaylandCaptureElements {
+			if name == element {
+				return true
+			}
+		}
+		return false
+	}
+	hasGLAndVA := func(name string) bool { return name == "vapostproc" || hasGL(name) }
+	openh264 := encoderResult{parts: gstStage{"openh264enc"}, rawFormat: "I420"}
+	nvenc := encoderResult{parts: gstStage{"nvh264enc"}, rawFormat: "NV12"}
+	main10 := encoderResult{parts: gstStage{"nvh265enc"}, rawFormat: "P010_10LE", codec: VideoCodecHEVC}
+	va := encoderResult{parts: gstStage{"vah264enc"}, rawFormat: "NV12", inputMemory: encoderInputVAMemory}
+	for _, test := range []struct {
+		name       string
+		encoder    encoderResult
+		hasElement func(string) bool
+		env        string
+		want       []waylandPipelineMode
+	}{
+		{name: "OpenH264", encoder: openh264, hasElement: hasGL, want: []waylandPipelineMode{waylandPipelineGLDMABuf, waylandPipelineSystemMemory}},
+		{name: "NVENC", encoder: nvenc, hasElement: hasGL, want: []waylandPipelineMode{waylandPipelineGLDMABuf, waylandPipelineSystemMemory}},
+		{name: "VA postprocessor keeps priority", encoder: openh264, hasElement: hasGLAndVA, want: []waylandPipelineMode{waylandPipelineVAPostprocPlainRaw, waylandPipelineSystemMemory}},
+		{name: "VA encoder keeps native import", encoder: va, hasElement: hasGLAndVA, want: []waylandPipelineMode{waylandPipelineVAMemory, waylandPipelineSystemMemory}},
+		{name: "10-bit input", encoder: main10, hasElement: hasGL, want: []waylandPipelineMode{waylandPipelineSystemMemory}},
+		{name: "missing GL elements", encoder: openh264, hasElement: func(string) bool { return false }, want: []waylandPipelineMode{waylandPipelineSystemMemory}},
+		{name: "disabled by environment", encoder: openh264, hasElement: hasGL, env: "0", want: []waylandPipelineMode{waylandPipelineSystemMemory}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.env != "" {
+				t.Setenv("DOUBLETAKE_WAYLAND_GL", test.env)
+			}
+			var modes []waylandPipelineMode
+			for _, plan := range waylandCapturePlans(test.encoder, test.hasElement) {
+				modes = append(modes, plan.mode)
+			}
+			if !reflect.DeepEqual(modes, test.want) {
+				t.Fatalf("plan modes = %v, want %v", modes, test.want)
+			}
+		})
+	}
+	if got := (waylandCapturePlan{encoder: openh264, mode: waylandPipelineGLDMABuf}).String(); got != "openh264enc with GL DMA-BUF import and GPU scaling" {
+		t.Fatalf("GL plan description = %q", got)
 	}
 }

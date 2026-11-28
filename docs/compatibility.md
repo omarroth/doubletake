@@ -66,6 +66,15 @@ AMD/Intel DMA-BUF capture can require the VA postprocessing plugin even when a
 different encoder is selected. Check `gst-inspect-1.0 vapostproc`; Arch packages
 it as `gst-plugin-va`. Older `vaapipostproc` packages do not provide that element.
 
+Without `vapostproc`, doubletake first tries to import DMA-BUFs with the
+GStreamer OpenGL elements for encoders that take 8-bit system-memory video
+(check `gst-inspect-1.0 glupload`; Debian and Ubuntu package them as
+`gstreamer1.0-gl`). OpenGL converts and scales each frame on the GPU, which
+spares compositors that would otherwise read every frame back into shared
+memory, such as Hyprland. When the portal or driver cannot provide importable
+DMA-BUFs, startup falls back to shared memory. Set `DOUBLETAKE_WAYLAND_GL=0` to
+skip the OpenGL path.
+
 - **Hyprland:** use `xdg-desktop-portal-hyprland` 1.5.0 or newer. Version 1.4.1
   can stop producing frames after exhausting its buffer pool.
   See [#62](https://github.com/omarroth/doubletake/issues/62).
